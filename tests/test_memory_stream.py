@@ -8,18 +8,18 @@ sys.path.append(
 from memory_stream import MemoryStream
 
 seed_memories = [
-    "Adam Beck is a backend software engineer who enjoys building reliable and scalable software systems.",
-    "Adam Beck is always looking for ways to make applications faster, easier to maintain, and more useful for their users.",
+    "Adam Beck is a backend software engineer.",
+    "Adam Beck enjoys building reliable software systems.",
+    "Adam Beck enjoys building scalable software systems.",
     "Adam Beck lives in Salt Lake City, Utah.",
-    "Adam Beck enjoys discussing software architecture, APIs, and distributed systems with other engineers.",
-    "Adam Beck frequently collaborates with his colleagues on technical projects.",
-    "Adam Beck enjoys helping others solve challenging problems.",
-    "Adam Beck values clean code, continuous learning, and professional growth.",
+    "Adam Beck enjoys discussing software architecture.",
+    "Adam Beck enjoys discussing APIs and distributed systems.",
+    "Adam Beck frequently collaborates with other engineers.",
+    "Adam Beck enjoys helping others solve technical problems.",
+    "Adam Beck values clean code.",
     "Adam Beck primarily develops software using Python and TypeScript.",
-    "Adam Beck enjoys drinking coffee while working.",
-    "Adam Beck prefers sunny days over rainy days.",
-    "Adam Beck hopes to become a highly respected software architect.",
-    "Adam Beck wants to build systems that positively impact many people."
+    "Adam Beck hopes to become a software architect.",
+    "Adam Beck wants to build software that positively impacts many people.",
 ]
 
 def addSeedMemories() -> MemoryStream:
@@ -33,18 +33,13 @@ def addSeedMemories() -> MemoryStream:
 def addNewMemories() -> MemoryStream:
     stream = MemoryStream()
 
-    stream.add_observation("Adam Beck clocks in for the workday.")
-    stream.add_observation("Adam Beck places his backpack underneath his desk.")
-    stream.add_observation("Adam Beck turns on his monitor.")
-    stream.add_observation("Adam Beck unlocks his work laptop.")
-    stream.add_observation("Adam Beck opens Microsoft Teams and reviews unread messages.")
-    stream.add_observation("Adam Beck receives a message from his project manager assigning a new memory-system task.")
-    stream.add_observation("Adam Beck reads the task description and adds it to his notes.")
-    stream.add_observation("Adam Beck joins the morning engineering standup meeting.")
-    stream.add_observation("A coworker tells Adam Beck a joke before the meeting begins.")
-    stream.add_observation("Adam Beck laughs and briefly discusses weekend plans with the coworker.")
-    stream.add_observation("Adam Beck returns to his desk and opens the memory-stream project.")
-    stream.add_observation("Adam Beck begins reviewing memory retrieval results from yesterday's testing.")
+    stream.add_observation("Adam Beck is reading a message about upcoming testing plans.")
+    stream.add_observation("Adam Beck is attending a project meeting about the memory-system implementation.")
+    stream.add_observation("A coworker is explaining a recent testing result to Adam Beck.")
+    stream.add_observation("Adam Beck is reading documentation about agent memory behavior.")
+    stream.add_observation("Adam Beck is discussing project timelines with a coworker.")
+    stream.add_observation("Adam Beck is reviewing the latest project updates from the engineering team.")
+    
 
 if __name__ == "__main__":
     # addSeedMemories()

@@ -10,9 +10,9 @@ class MemoryRetriever:
         self.memory_stream = MemoryStream()
 
         # Retrieval weights from the paper
-        self.alpha_recency = 1.0
+        self.alpha_recency = 0.25
         self.alpha_importance = 1.0
-        self.alpha_relevance = 1.0
+        self.alpha_relevance = 3.0
 
         # Recency decay factor from the paper
         self.recency_decay = 0.995
@@ -198,11 +198,11 @@ class MemoryRetriever:
     def reflect(self):
         print("AGENT: REFLECTING")
 
-        reflection_threshold = 40
+        reflection_threshold = 38
 
         memories = self.memory_stream.get_memory_stream()
 
-        recent_memories = memories[-10:]
+        recent_memories = memories[-20:]
 
         importance_sum = sum(memory.importance for memory in recent_memories)
 
@@ -289,9 +289,20 @@ class MemoryRetriever:
             if line.lower().startswith("here are"):
                 continue
 
-            line = re.sub(r"^\d+[\.)]\s*", "", line)
+            line = re.sub(r"^\d+[\.\)]\s*", "", line)
             line = re.sub(r"\*\*", "", line)
             line = re.sub(r"\s*\(because.*?\)$", "", line)
+
+            # Normalize pronouns
+            if line.startswith("He is "):
+                line = "Adam Beck is " + line[len("He is "):]
+
+            elif line.startswith("He "):
+                line = "Adam Beck " + line[len("He "):]
+
+            elif line.startswith("His "):
+                line = "Adam Beck's " + line[len("His "):]
+
             insights.append(line)
 
         return insights
