@@ -1,6 +1,6 @@
 from dataclasses import asdict
 from pathlib import Path
-from memory import Memory
+from memory import Memory, Reflection
 import json
 import ollama
 
@@ -18,7 +18,19 @@ class MemoryStream:
         with open(self.path, "r") as f:
             memories = json.load(f)
 
-        return [Memory(**memory) for memory in memories]
+        loaded_memories = []
+
+        for memory in memories:
+            if memory.get("memory_type") == "reflection":
+                loaded_memories.append(
+                    Reflection(**memory)
+                )
+            else:
+                loaded_memories.append(
+                    Memory(**memory)
+                )
+
+        return loaded_memories
 
     def save(self, memories):
         with open(self.path, "w") as f:
@@ -28,7 +40,7 @@ class MemoryStream:
                 indent=2
             )
 
-    def add_memory(self, description):
+    def add_observation(self, description):
         memories = self.load()
 
         importance = self.generate_importance_score(description)
@@ -48,11 +60,29 @@ class MemoryStream:
 
         return memory
 
+    def add_reflection(self, description, source_memory_ids):
+        memories = self.load()
+        embedding = self.generate_embedding(description)
+        importance = self.generate_importance_score(description)
+        next_id = len(memories) + 1
+
+        reflection = Reflection(
+            id=next_id,
+            description=description,
+            importance=importance,
+            embedding=embedding,
+            source_memory_ids=source_memory_ids
+        )
+
+        memories.append(reflection)
+        self.save(memories)
+
+        return reflection
+
     def get_memory_stream(self):
         return self.load()
 
     # Helper functions
-
     def generate_importance_score(self, description):
 
         importance_prompt = f"""

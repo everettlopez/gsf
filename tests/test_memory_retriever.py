@@ -11,12 +11,16 @@ from memory_retriever import MemoryRetriever
 
 retriever = MemoryRetriever()
 
+# retriever.reflect()
+
 results = retriever.retrieve(
-    "What task is Agent currently working on?"
+    "What project is Adam Beck working on?"
 )
 
 for result in results:
     print(
+        result["memory"].id,
+        result["memory"].memory_type,
         result["memory"].description,
         "\nRetrieval score:",
         result["retrieval_score"],

@@ -11,3 +11,8 @@ class Memory:
     embedding: List[float] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_accessed_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+@dataclass
+class Reflection(Memory):
+    source_memory_ids: List[int] = field(default_factory=list)
+    memory_type: str = "reflection"
