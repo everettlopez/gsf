@@ -39,7 +39,7 @@ class MemoryStream:
                 f,
                 indent=2
             )
-
+    
     def add_observation(self, description):
         memories = self.load()
 

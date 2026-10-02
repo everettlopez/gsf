@@ -18,10 +18,8 @@ retriever = MemoryRetriever()
 
 # print(similarity)
 
-# retriever.reflect()
-
 results = retriever.retrieve(
-    "What does Adam Beck enjoy?"
+    "2:00 pm"
 )
 
 for result in results:
