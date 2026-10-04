@@ -1,0 +1,89 @@
+{
+  "locations": {
+    "reception": {
+      "state": "empty",
+      "objects": {
+        "time_clock": {
+          "state": "on"
+        }
+      }
+    },
+    "conference_room": {
+      "state": "empty",
+      "objects": {
+        "table": {
+          "state": "clean"
+        },
+        "chair": {
+          "state": "available"
+        }
+      }
+    },
+    "break_room": {
+      "state": "empty",
+      "objects": {
+        "coffee_machine": {
+          "state": "idle"
+        },
+        "table": {
+          "state": "clean"
+        },
+        "chair": {
+          "state": "available"
+        }
+      }
+    },
+    "office_1": {
+      "state": "empty",
+      "objects": {
+        "desk": {
+          "state": "organized"
+        },
+        "computer": {
+          "state": "off"
+        },
+        "chair": {
+          "state": "available"
+        },
+        "calendar": {
+          "state": "not updated"
+        }
+      }
+    },
+    "office_2": {
+      "state": "empty",
+      "objects": {
+        "desk": {
+          "state": "organized"
+        },
+        "computer": {
+          "state": "off"
+        },
+        "chair": {
+          "state": "available"
+        },
+        "calendar": {
+          "state": "not updated"
+        }
+      }
+    }
+  },
+  "agents": {
+    "adam": {
+      "id": "adam",
+      "name": "Adam Beck",
+      "office": "office_1",
+      "current_location": "reception",
+      "current_action": "arriving at the reception area",
+      "interacting_with": "time_clock"
+    },
+    "eve": {
+      "id": "eve",
+      "name": "Eve Smith",
+      "office": "office_2",
+      "current_location": "reception",
+      "current_action": "clocking in and check in with the team",
+      "interacting_with": "time_clock"
+    }
+  }
+}

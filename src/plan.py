@@ -1,15 +1,19 @@
 from memory_stream import MemoryStream
+from memory_retriever import MemoryRetriever
 from memory import Memory
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import ollama 
 import re
 
-class Planner:
-    def __init__(self):
-        self.memory_stream = MemoryStream()
 
-    def generate_initial_plan(self):
+class Planner:
+    def __init__(self, agent):
+        self.memory_stream = MemoryStream(agent["id"])
+        self.memory_retriever = MemoryRetriever(agent["id"])
+        self.memories = self.memory_stream.load()
+
+    def generate_initial_plan_adam(self):
 
         prompt = f"""
         Name: Adam Beck (age: 24)
@@ -29,13 +33,13 @@ class Planner:
         Adam Beck is making good progress on the memory-system project and wants to continue improving it in the coming days.
 
         On Wednesday, Adam:
-        1) clocked in to work at 7:00 am,
-        2) attended engineering meetings from 9:00 am to 10:00 am,
-        3) worked on memory-system development from 10:00 am to 1:00 pm,
-        4) took a lunch break in the break room from 1:00 pm to 2:00 pm,
-        5) collaborated with coworkers on technical challenges from 2:00 pm to 4:00 pm,
-        6) reviewed project updates, documentation, and testing progress from 4:00 pm to 5:00 pm,
-        7) clocked out and finished work at 5:00 pm.
+        1) clock in and start work at 7:00 am,
+        2) attended engineering meetings from 8:00 am to 9:00 am,
+        3) worked on memory-system development from 9:00 am to 12:00 pm,
+        4) took a lunch break in the break room from 12:00 pm to 1:00 pm,
+        5) collaborated with coworkers on technical challenges from 1:00 pm to 2:00 pm,
+        6) reviewed project updates, documentation, and testing progress from 2:00 pm to 5:00 pm,
+        7) clock out and finished work at 5:00 pm.
 
         Today is Thursday.
 
@@ -74,38 +78,335 @@ class Planner:
             plan_items.append(item)
         return plan_items
 
-    def create_chunks(self, daily_plan):
+    def generate_initial_plan_eve(self):
+    
+        prompt = f"""
+        Name: Eve Smith (age: 21)
+
+        Innate traits: shy, detail-oriented, thoughtful
+
+        Eve Smith is a frontend software engineer who primarily develops software using TypeScript and React.
+
+        She enjoys building polished and accessible user interfaces and values clean code.
+
+        Eve Smith is currently working on a navigation menu redesign project. She has recently been focused on UI components, responsive layouts, accessibility, and implementation work.
+
+        Eve Smith works with designers and other engineers, and prefers collaborating one-on-one or in writing on technical challenges.
+
+        Eve Smith hopes to become a lead frontend engineer. She wants to build software that feels simple and welcoming for many people to use.
+
+        Eve Smith is making good progress on the navigation menu redesign and wants to continue improving it in the coming days.
+
+        On Wednesday, Eve:
+        1) clock in and start work at 7:00 am,
+        2) attended engineering meetings from 8:00 am to 9:00 am,
+        3) worked on navigation menu development from 9:00 am to 12:00 pm,
+        4) took a lunch break in the break room from 12:00 pm to 1:00 pm,
+        5) collaborated with coworkers on technical challenges from 1:00 pm to 2:00 pm,
+        6) reviewed project updates, documentation, and testing progress from 2:00 pm to 5:00 pm,
+        7) clock out and finished work at 5:00 pm.
+
+        Today is Thursday.
+
+        Here is Eve's plan today in broad strokes:
+
+        Continue the plan as a numbered list.
+
+        Return the plan in broad-strokes time blocks.
+
+        Example:
+        3. work on navigation menu development from 10:00 am to 1:00 pm
+        """
+
+        response = ollama.generate(
+            model="qwen3",
+            prompt=prompt,
+            think=False
+        )
+
+        plan_text = response["response"]
+
+        plan_items = []
+
+        for line in plan_text.splitlines():
+            line = line.strip()
+
+            match = re.match(r"^\d+\.\s*(.+)$", line)
+
+            if not match:
+                continue
+
+            item = match.group(1)
+
+            item = item.replace("**", "").strip()
+
+            plan_items.append(item)
+        return plan_items
+
+    def regenerate_plan_adam(self, agent, current_time, current_chunk, observations, status, world):
+        agent_summary = self.generate_agent_summary(agent)
+        observations_text = "\n".join(
+            f"Observation: {observation}" for observation in observations
+        )
+
+        context_memories = []
+        seen = set()
+
+        room = agent["current_location"]
+
+        entities = []
+
+        # ROOM ITSELF
+        entities.append((room, world["locations"][room]["state"]))
+
+        # OBJECTS IN ROOM
+        for object_name, object_data in (world["locations"][room]["objects"].items()):
+            entities.append((object_name, object_data["state"]))
+
+        # agents in the room
+        for other_agent in world["agents"].values():
+            if(other_agent["id"] != agent["id"] and other_agent["current_location"] == room):
+                entities.append((other_agent["name"], other_agent["current_action"]))
+
+        for entity_name, entity_status in entities:
+            queries = [
+                f"What is {agent["name"]}'s relationship with {entity_name}",
+                f"{entity_name} is {entity_status}"
+            ]
+
+            for query in queries:
+                results = self.memory_retriever.retrieve(query)
+
+                for result in results:
+                    description = (result["memory"].description)
+
+                    if description not in seen:
+                        seen.add(description)
+                        context_memories.append(result)
+
+
+
+        context = "\n".join(
+        f"- {result['memory'].description}"
+        for result in context_memories
+        )
+
+        prompt = f"""
+        Name: Adam Beck (age: 24)
+        
+        Innate traits: collaborative, technical, growth-oriented
+
+        Adam Beck is a backend software engineer who primarily develops software using Python and TypeScript.
+
+        He enjoys building reliable and scalable software systems and values clean code.
+
+        Adam Beck is currently working on a memory-system project. He has recently been focused on memory retrieval, memory-stream architecture, testing, and implementation work.
+
+        Adam Beck works closely with other engineers and enjoys collaborating on technical challenges.
+
+        Adam Beck hopes to become a software architect. He wants to build software that positively impacts many people.
+
+        Adam Beck is making good progress on the memory-system project and wants to continue improving it in the coming days.
+
+        Summary of relevant context from Adam's memory:
+        {context}
+
+        On Wednesday, Adam:
+        1) clocked in to work at 7:00 am,
+        2) attended engineering meetings from 9:00 am to 10:00 am,
+        3) worked on memory-system development from 10:00 am to 1:00 pm,
+        4) took a lunch break in the break room from 1:00 pm to 2:00 pm,
+        5) collaborated with coworkers on technical challenges from 2:00 pm to 4:00 pm,
+        6) reviewed project updates, documentation, and testing progress from 4:00 pm to 5:00 pm,
+        7) clocked out and finished work at 5:00 pm.
+
+        Today is {current_time} on Thursday
+
+        Here is Adam's plan today in broad strokes:
+
+        Continue the plan as a numbered list.
+
+        Return the plan in broad-strokes time blocks.
+
+        Example:
+        3. work on memory-system development from {current_time} to 1:00 pm
+        """
+
+        response = ollama.generate(
+            model="qwen3",
+            prompt=prompt,
+            think=False
+        )
+
+        plan_text = response["response"]
+
+        plan_items = []
+
+        for line in plan_text.splitlines():
+            line = line.strip()
+
+            match = re.match(r"^\d+\.\s*(.+)$", line)
+
+            if not match:
+                continue
+
+            item = match.group(1)
+
+            item = item.replace("**", "").strip()
+
+            plan_items.append(item)
+        return plan_items
+
+    def regenerate_plan_eve(self, agent, current_time, current_chunk, observations, status, world):
+        agent_summary = self.generate_agent_summary(agent)
+        observations_text = "\n".join(
+            f"Observation: {observation}" for observation in observations
+        )
+
+        context_memories = []
+        seen = set()
+
+        room = agent["current_location"]
+
+        entities = []
+
+        # ROOM ITSELF
+        entities.append((room, world["locations"][room]["state"]))
+
+        # OBJECTS IN ROOM
+        for object_name, object_data in (world["locations"][room]["objects"].items()):
+            entities.append((object_name, object_data["state"]))
+
+        # agents in the room
+        for other_agent in world["agents"].values():
+            if(other_agent["id"] != agent["id"] and other_agent["current_location"] == room):
+                entities.append((other_agent["name"], other_agent["current_action"]))
+
+        for entity_name, entity_status in entities:
+            queries = [
+                f"What is {agent["name"]}'s relationship with {entity_name}",
+                f"{entity_name} is {entity_status}"
+            ]
+
+            for query in queries:
+                results = self.memory_retriever.retrieve(query)
+
+                for result in results:
+                    description = (result["memory"].description)
+
+                    if description not in seen:
+                        seen.add(description)
+                        context_memories.append(result)
+
+        context = "\n".join(
+        f"- {result['memory'].description}"
+        for result in context_memories
+        )
+
+        prompt = f"""
+        Name: Eve Smith (age: 21)
+        
+        Innate traits: shy, detail-oriented, thoughtful
+
+        Eve Smith is a frontend software engineer who primarily develops software using TypeScript and React.
+
+        She enjoys building polished and accessible user interfaces and values clean code.
+
+        Eve Smith is currently working on a navigation menu redesign project. She has recently been focused on UI components, responsive layouts, accessibility, and implementation work.
+
+        Eve Smith works with designers and other engineers, and prefers collaborating one-on-one or in writing on technical challenges.
+
+        Eve Smith hopes to become a lead frontend engineer. She wants to build software that feels simple and welcoming for many people to use.
+
+        Eve Smith is making good progress on the navigation menu redesign and wants to continue improving it in the coming days.
+
+        Summary of relevant context from Adam's memory:
+        {context}
+
+        On Wednesday, Eve:
+        1) clocked in to work at 7:00 am,
+        2) attended engineering meetings from 9:00 am to 10:00 am,
+        3) worked on navigation menu development from 10:00 am to 1:00 pm,
+        4) took a lunch break in the break room from 1:00 pm to 2:00 pm,
+        5) collaborated with coworkers on technical challenges from 2:00 pm to 4:00 pm,
+        6) reviewed project updates, documentation, and testing progress from 4:00 pm to 5:00 pm,
+        7) clocked out and finished work at 5:00 pm.
+
+        Today is {current_time} on Thursday
+    
+        Here is Eve's plan today in broad strokes:
+
+        Continue the plan as a numbered list.
+
+        Return the plan in broad-strokes time blocks.
+
+        Example:
+        3. work on navigation menu development from {current_time} to 1:00 pm
+        """
+
+        response = ollama.generate(
+            model="qwen3",
+            prompt=prompt,
+            think=False
+        )
+
+        plan_text = response["response"]
+
+        plan_items = []
+
+        for line in plan_text.splitlines():
+            line = line.strip()
+
+            match = re.match(r"^\d+\.\s*(.+)$", line)
+
+            if not match:
+                continue
+
+            item = match.group(1)
+
+            item = item.replace("**", "").strip()
+
+            plan_items.append(item)
+        return plan_items
+
+    def create_chunks(self, daily_plan, agent):
         chunks = []
 
         for activity in daily_plan:
             chunks.append({
                 "activity": activity,
-                "location": self.resolve_location(activity),
+                "location": self.resolve_location(activity, agent),
                 "start_time": self.extract_start_time(activity),
                 "duration": self.extract_duration(activity)
             })
 
         return chunks
 
-    def resolve_location(self, activity):
+    def resolve_location(self, activity, agent):
         activity = activity.lower()
 
         if "clock in" in activity:
-            return "Reception"
+            return "reception"
+
+        if "reception" in activity:
+            return "reception"
 
         if "clock out" in activity:
-            return "Reception"
+            return "reception"
 
-        if "meeting" in activity:
-            return "Conference Room"
+        if "conference" in activity:
+            return "conference room"
+
+        if "lunch" in activity:
+            return "break room"
 
         if "collaborate" in activity:
-            return "Conference Room - Whiteboard"
+            return "conference room"
 
         if "break" in activity:
-            return "Break Room"
+            return "break room"
 
-        return "Cubicle" 
+        return agent["office"]
 
     def extract_start_time(self, activity):
         activity = activity.lower().strip()
@@ -183,33 +484,33 @@ class Planner:
         return end_total - start_total
 
     def create_plan(self, chunks):
-        memories = self.memory_stream.get_memory_stream()
         description = "\n".join(
         f"{chunk['activity']} in {chunk['location']} for {chunk['duration']} minutes"
         for chunk in chunks
         )
         
         plan = Memory(
-            id=len(memories) + 1,
+            id=len(self.memories) + 1,
             description=description,
             memory_type="plan",
             embedding=self.memory_stream.generate_embedding(description),
             importance=5
         )
 
-        memories.append(plan)
+        self.memories.append(plan)
 
-        self.memory_stream.save(memories)
+        self.memory_stream.save(self.memories)
 
         print(plan.description)
 
         return plan
 
-    def decompose_chunks(self, chunks):
+    def decompose_chunks(self, chunks, agent):
         decomposed_chunks = []
 
         for chunk in chunks:
             if chunk["duration"] < 60:
+                decomposed_chunks.append(chunk)
                 continue
 
             prompt = f"""
@@ -267,14 +568,14 @@ class Planner:
                 
                 decomposed_chunks.append({
                 "activity": activity,
-                "location": chunk["location"],
+                "location": self.resolve_location(activity, agent),
                 "start_time": self.extract_start_time(activity),
                 "duration": 60
                 })
                 
         return decomposed_chunks
 
-    def decompose_hour_chunks(self, hour_chunks):
+    def decompose_hour_chunks(self, hour_chunks, agent):
 
         minute_chunks = []
 
@@ -287,7 +588,7 @@ class Planner:
 
             Rules:
             - Create actions lasting roughly 5 to 15 minutes.
-            - Actions should be sequential.
+            - Action times should be sequential.
             - Actions should contribute to the original activity.
             - Do not create actions that are unrelated to the activity.
             - Return only a numbered list.
@@ -332,7 +633,7 @@ class Planner:
 
                 actions.append({
                     "activity": activity,
-                    "location": chunk["location"],
+                    "location": self.resolve_location(activity, agent),
                     "start_time": self.extract_start_time(activity),
                 })
 
@@ -415,3 +716,163 @@ class Planner:
         return int(
         (end - start).total_seconds() / 60
         )
+
+    def get_current_status(self, agent, current_time):
+        return (
+            f"It is {current_time}. "
+            f"{agent["name"]} is currently at {agent["current_location"]} and is {agent["current_action"]}."
+        )
+
+    def get_current_minute_chunk(
+        self,
+        current_time,
+        minute_chunks
+    ):
+        current_dt = datetime.strptime(
+            current_time.upper(),
+            "%I:%M %p"
+        )
+
+        for chunk in minute_chunks:
+            start_dt = datetime.strptime(
+                chunk["start_time"].upper(),
+                "%I:%M %p"
+            )
+
+            end_dt = start_dt + timedelta(
+                minutes=chunk["duration"]
+            )
+
+            if start_dt <= current_dt < end_dt:
+                return chunk
+
+        return None
+
+    def continue_plan_or_react(self, agent, status, current_chunk, observations, world):
+
+        agent_summary = self.generate_agent_summary(agent)
+        observations_text = "\n".join(
+            f"Observation: {observation}" for observation in observations
+        )
+        
+        context_memories = []
+        seen = set()
+
+        room = agent["current_location"]
+
+        entities = []
+
+        # Room itself
+        entities.append((room, world["locations"][room]["state"]))
+
+        # objects in room
+        for object_name, object_data in (world["locations"][room]["objects"].items()):
+            entities.append((object_name, object_data["state"]))
+
+        # agenrs in the room
+        for other_agent in world["agents"].values():
+            if(other_agent["id"] != agent["id"] and other_agent["current_location"] == room):
+                entities.append((other_agent["name"], other_agent["current_action"]))
+
+        for entity_name, entity_status in entities:
+            queries = [
+                f"What is {agent["name"]}'s relationship with {entity_name}",
+                f"{entity_name} is {entity_status}"
+            ]
+
+            for query in queries:
+                results = self.memory_retriever.retrieve(query)
+
+                for result in results:
+                    description = (result["memory"].description)
+
+                    if description not in seen:
+                        seen.add(description)
+                        context_memories.append(result)
+
+        context = "\n".join(
+        f"- {result['memory'].description}"
+        for result in context_memories
+        )
+
+        
+
+        prompt = f"""
+        {agent_summary}
+
+        {agent["name"]}'s status: {status}
+
+        {observations_text}
+
+        Current planned action: {current_chunk["activity"]}
+        Current planned location: {current_chunk["location"]}
+
+        Summary of relevant context from {agent["name"]}'s memory:
+        {context}
+
+        Should {agent["name"]} react to any of the observed entities or their current state, and if so, what would be an appropriate reaction?
+
+        1. Continue the current planned action
+        2. React to the current sitation
+
+        Respond with an integer 1, or 2.
+        """
+
+        response = ollama.generate(
+            model="qwen3",
+            prompt=prompt,
+            think=False
+        )
+    
+        return response["response"]
+
+    def generate_agent_summary(self, agent):
+        core_memories = self.memory_retriever.retrieve(
+            f"{agent['name']}'s core characteristics"
+        )
+
+        occupation_memories = self.memory_retriever.retrieve(
+            f"{agent['name']}'s current daily occupation"
+        )
+
+        progress_memories = self.memory_retriever.retrieve(
+            f"{agent['name']}'s feeling about recent progress in life"
+        )
+
+        all_memories = (
+            core_memories +
+            occupation_memories +
+            progress_memories
+        )
+
+        seen = set()
+        unique_memories = []
+
+        for result in all_memories:
+            description = result["memory"].description
+
+            if description not in seen:
+                seen.add(description)
+                unique_memories.append(description)
+
+        memory_text = "\n".join(
+            f"- {description}"
+            for description in unique_memories
+        )
+
+        prompt = f"""
+    How would one describe {agent['name']}'s core characteristics
+    given the following statements?
+
+    {memory_text}
+
+    Return the summary as a paragraph with no formatting.
+    """
+
+        response = ollama.generate(
+            model="qwen3",
+            prompt=prompt,
+            think=False
+        )
+
+        return response["response"]

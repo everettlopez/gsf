@@ -7,6 +7,6 @@ sys.path.append(
 
 from src.simulation.environment_tree import EnvironmentTree
 
-tree = EnvironmentTree.load("data/world/world.json")
+tree = EnvironmentTree.load("data/world/environment_tree.json")
 
-print(tree.get_children("cubicle"))
+print(tree.get_children("cubicles"))

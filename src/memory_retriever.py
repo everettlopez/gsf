@@ -6,8 +6,8 @@ import ollama
 import re
 
 class MemoryRetriever:
-    def __init__(self):
-        self.memory_stream = MemoryStream()
+    def __init__(self, agent_name: str):
+        self.memory_stream = MemoryStream(agent_name)
 
         # Retrieval weights from the paper
         self.alpha_recency = 0.5

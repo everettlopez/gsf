@@ -5,9 +5,9 @@ import ollama
 import re
 
 class Reflection:
-    def __init__(self):
-        self.memory_stream = MemoryStream()
-        self.memory_retriever = MemoryRetriever()
+    def __init__(self, agent):
+        self.memory_stream = MemoryStream(agent["id"])
+        self.memory_retriever = MemoryRetriever(agent["id"])
 
     def reflect(self):
         print("AGENT: REFLECTING")

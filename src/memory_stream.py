@@ -6,10 +6,14 @@ import ollama
 
 
 class MemoryStream:
-    def __init__(self):
+    def __init__(self, agent_name: str):
         root_dir = Path(__file__).parent.parent
 
-        self.path = root_dir / "data" / "memory-stream.json"
+        self.path = (
+            root_dir / "data" / "agents" / agent_name / "memory_stream.json"
+        )
+
+        self.memories = self.load()
 
     def load(self):
         if not self.path.exists():
@@ -41,11 +45,10 @@ class MemoryStream:
             )
     
     def add_observation(self, description):
-        memories = self.load()
 
         importance = self.generate_importance_score(description)
         embedding = self.generate_embedding(description)
-        next_id = len(memories) + 1
+        next_id = len(self.memories) + 1
 
         memory = Memory(
             id=next_id,
@@ -54,17 +57,16 @@ class MemoryStream:
             embedding=embedding
         )
 
-        memories.append(memory)
+        self.memories.append(memory)
 
-        self.save(memories)
+        self.save(self.memories)
 
         return memory
 
     def add_reflection(self, description, source_memory_ids):
-        memories = self.load()
         embedding = self.generate_embedding(description)
         importance = self.generate_importance_score(description)
-        next_id = len(memories) + 1
+        next_id = len(self.memories) + 1
 
         reflection = Reflection(
             id=next_id,
@@ -74,8 +76,8 @@ class MemoryStream:
             source_memory_ids=source_memory_ids
         )
 
-        memories.append(reflection)
-        self.save(memories)
+        self.memories.append(reflection)
+        self.save(self.memories)
 
         return reflection
 
