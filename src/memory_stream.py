@@ -3,17 +3,16 @@ from pathlib import Path
 from memory import Memory, Reflection
 import json
 import ollama
+import re
 
 
 class MemoryStream:
     def __init__(self, agent_name: str):
         root_dir = Path(__file__).parent.parent
-
-        self.path = (
-            root_dir / "data" / "agents" / agent_name / "memory_stream.json"
-        )
-
+        self.path = (root_dir / "data" / "agents" / agent_name / "memory_stream.json")
         self.memories = self.load()
+        self._importance_cache = {}
+        self.dirty = False
 
     def load(self):
         if not self.path.exists():
@@ -38,12 +37,16 @@ class MemoryStream:
 
     def save(self, memories):
         with open(self.path, "w") as f:
-            json.dump(
-                [asdict(memory) for memory in memories],
-                f,
-                indent=2
-            )
-    
+            json.dump([asdict(memory) for memory in memories], f, indent=2)
+
+    def mark_dirty(self):
+        self.dirty = True
+
+    def flush(self):
+        if self.dirty:
+            self.save(self.memories)
+
+    # ADD SINGLE OBSERVATION
     def add_observation(self, description):
 
         importance = self.generate_importance_score(description)
@@ -62,6 +65,33 @@ class MemoryStream:
         self.save(self.memories)
 
         return memory
+
+    # BATCHED OBSERVATIONS CREATION
+    def add_observations(self, descriptions):
+        embeddings = ollama.embed(model="nomic-embed-text", input=descriptions)["embeddings"]
+        created = []
+
+        for description, embedding in zip(descriptions, embeddings):
+            memory = Memory(
+                id=len(self.memories) + 1,
+                description=description,
+                importance=self.cached_importance(description),
+                embedding=embedding
+            )
+
+            self.memories.append(memory)
+            created.append(memory)
+
+        self.save(self.memories)
+        return created
+
+    def cached_importance(self, description):
+        if description not in self._importance_cache:
+            try:
+                self._importance_cache[description] = self.generate_importance_score(description)
+            except Exception:
+                self._importance_cache[description] = 5
+        return self._importance_cache[description]
 
     def add_reflection(self, description, source_memory_ids):
         embedding = self.generate_embedding(description)
@@ -82,7 +112,7 @@ class MemoryStream:
         return reflection
 
     def get_memory_stream(self):
-        return self.load()
+        return self.memories
 
     # Helper functions
     def generate_importance_score(self, description):
@@ -121,3 +151,15 @@ class MemoryStream:
         )
 
         return response["embeddings"][0]
+
+    def add_plan(self, description):
+        plan = Memory(
+            id=len(self.memories) + 1,
+            description=description,
+            memory_type="plan",
+            embedding=self.generate_embedding(description),
+            importance=5,
+        )
+        self.memories.append(plan)
+        self.save(self.memories)
+        return plan

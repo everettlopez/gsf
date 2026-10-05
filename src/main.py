@@ -1,285 +1,373 @@
-from world import *
-from plan import Planner
+"""
+main.py - Generative Agents simulation driver (Adam + Eve)
+
+Per step, the loop runs three phases for BOTH agents (so they act
+"simultaneously" and don't see each other's mid-step changes):
+
+    1. PERCEIVE  - build observations, store only the NEW ones in memory
+    2. DECIDE    - continue the plan (1) or react (2); the LLM is only asked
+                   when there is something new to react to
+    3. ACT       - update agent/world state (1) or regenerate the plan (2)
+
+Assumes the earlier refactors are in place:
+    - perceive_environment(agent, world, stream, prev_obs) -> (all_obs, new_obs)
+    - Planner(agent, memory_stream, memory_retriever)
+    - MemoryRetriever(agent_id, memory_stream)
+    - MemoryStream.flush() / mark_dirty() / add_observations()
+    - generate_interactions(agent, world, observations, planner)
+"""
+
+import re
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Callable, Optional
+
+from memory_retriever import MemoryRetriever
+from memory_stream import MemoryStream
 from perceive import perceive_environment
-import time 
+from plan import Planner
+from world import generate_interactions, load_world, save_world, update_agent_state
 
-adam = load_agent("adam")
-adam_planner = Planner(adam)
 
-eve = load_agent("eve")
-eve_planner = Planner(eve)
+# ---------------------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------------------
+START_TIME = "7:00 am"
+NUM_STEPS = 30
+STEP_MINUTES = 5            # simulated minutes per step
+STEP_DELAY_SECONDS = 0      # wall-clock padding per step (was 120; 0 = run flat out)
 
-world = load_world()
-current_time = "7:00 am"
-STEP_DELAY_SECONDS = 120
+DEBUG_OBSERVATIONS = False  # True = print every observation each step
 
-# Initial plan
-adam_daily_plan = adam_planner.generate_initial_plan_adam()
-adam_chunks = adam_planner.create_chunks(adam_daily_plan, adam)
-print("ADAM'S BROAD PLAN")
-adam_planner.create_plan(adam_chunks)
-time.sleep(45)
+# Only ask the LLM "continue or react?" when something NEW was observed.
+# With this True, an agent's own state lines (e.g. "Adam is currently at...")
+# don't count, so agents don't "react" to the changes they just made themselves.
+REACT_ONLY_TO_EXTERNAL = True
 
-eve_daily_plan = eve_planner.generate_initial_plan_eve()
-eve_chunks = eve_planner.create_chunks(eve_daily_plan, eve)
-print("EVE'S BROAD PLAN")
-eve_planner.create_plan(eve_chunks)
-time.sleep(45)
+# If the agent is still on the same plan chunk and keeps going (decision 1),
+# skip update_agent_state + generate_interactions (2+ LLM calls). Set False to
+# restore the old behaviour of re-running them every step.
+SKIP_UNCHANGED_CHUNKS = True
 
-# DECOMPOSE CHUNKS (HOUR)
-adam_decomposed_chunks = adam_planner.decompose_chunks(adam_chunks, adam)
-print("ADAM DECOMPOSED CHUNKS")
-adam_planner.create_plan(adam_decomposed_chunks)
-time.sleep(45)
 
-eve_decomposed_chunks = eve_planner.decompose_chunks(eve_chunks, eve)
-print("EVE DECOMPOSED CHUNKS")
-eve_planner.create_plan(eve_decomposed_chunks)
-time.sleep(45)
+# ---------------------------------------------------------------------------
+# TIMING (where is the time going?)
+# ---------------------------------------------------------------------------
+timings = {}  # label -> (total_seconds, call_count)
 
-# DECOMPOSE HOUR CHUNKS (MINUTES)
 
-adam_minute_chunks = adam_planner.decompose_hour_chunks(adam_decomposed_chunks, adam)
-print("ADAM MINUTE CHUNKS")
-adam_planner.create_plan(adam_minute_chunks)
-time.sleep(45)
+@contextmanager
+def timed(label):
+    """Time a block, print it, and accumulate it for the end-of-run summary."""
+    t0 = time.time()
+    try:
+        yield
+    finally:
+        dt = time.time() - t0
+        total, count = timings.get(label, (0.0, 0))
+        timings[label] = (total + dt, count + 1)
+        print(f"    [timing] {label}: {dt:.1f}s")
 
-eve_minute_chunks = eve_planner.decompose_hour_chunks(eve_decomposed_chunks, eve)
-print("EVE MINUTE CHUNKS")
-eve_planner.create_plan(eve_minute_chunks)
-time.sleep(45)
 
-def step_time(current_time, minutes=5):
-    current_dt = datetime.strptime(
-    current_time.upper(),
-    "%I:%M %p"
-    )
-    
-    new_dt = current_dt + timedelta(
-    minutes=minutes
-    )
-    
-    return new_dt.strftime(
-    "%I:%M %p"
-    ).lower()
-
-def process_step(self, agent, current_time, minute_chunks):
-    print("PROCESSING STEP")
-    status = self.get_current_status(agent, current_time)
-    print("Status: ", status)
-
-    current_chunk = self.get_current_minute_chunk(current_time, minute_chunks)
-    print("Current Chunk: ", current_chunk)
-
-    decision = self.continue_plan_or_react(agent, status, current_chunk)
-    print("Decision: ", decision)
-
-    if decision.strip() == "1":
-        print("Decision is 1")
-        agent = self.continue_plan(agent, current_chunk)
-
-    print("\n")
-    return agent
-
-for _ in range(30):
-    start = time.time()
+def print_timing_summary():
+    if not timings:
+        return
     print("\n" + "=" * 50)
-    print(f"TIME: {current_time}")
+    print("TIMING SUMMARY (slowest first)")
+    for label, (total, count) in sorted(timings.items(), key=lambda kv: -kv[1][0]):
+        print(f"  {total:7.1f}s total | {count:3d} calls | {total / count:6.1f}s avg | {label}")
 
-    # PERCEIVE
-    adam_observations = perceive_environment(adam, world)
-    eve_observations = perceive_environment(eve, world)
 
-    print("ADAM'S OBSERVATIONS")
-    for observation in adam_observations:
-        print(observation)
+# ---------------------------------------------------------------------------
+# PER-AGENT RUNTIME
+# ---------------------------------------------------------------------------
+@dataclass
+class AgentRuntime:
+    """Everything one agent needs, built around ONE shared MemoryStream."""
+    agent: dict                      # same dict object as world["agents"][id]
+    stream: MemoryStream
+    retriever: MemoryRetriever
+    planner: Planner
+    initial_plan_fn: Callable        # planner.generate_initial_plan_<name>
+    regenerate_plan_fn: Callable     # planner.regenerate_plan_<name>
 
-    print("EVE'S OBSERVATIONS")
-    for observation in eve_observations:
-        print(observation)
+    minute_chunks: list = field(default_factory=list)
+    prev_obs: list = field(default_factory=list)
+    last_chunk: Optional[dict] = None
 
-    
-    # Status
-    adam_status = adam_planner.get_current_status(adam, current_time)
-    eve_status = eve_planner.get_current_status(eve, current_time)
+    # Per-step scratch space (filled in by the phases below)
+    observations: list = field(default_factory=list)
+    new_obs: list = field(default_factory=list)
+    chunk: Optional[dict] = None
+    status: str = ""
+    decision: str = "1"
 
-    # AGENTS CURRENT CHUNKS
-    current_chunk_adam = adam_planner.get_current_minute_chunk(current_time, adam_minute_chunks)
-    current_chunk_eve = eve_planner.get_current_minute_chunk(current_time, eve_minute_chunks)
+    @property
+    def tag(self):
+        return self.agent["id"].upper()
 
-    print("CURRENT CHUNK (ADAM): ", current_chunk_adam)
-    print("CURRENT CHUNK (EVE): ", current_chunk_eve)
 
-    print("\n")
+# Adam and Eve have separate plan prompts, so map each id to its method names.
+PLAN_METHODS = {
+    "adam": ("generate_initial_plan_adam", "regenerate_plan_adam"),
+    "eve": ("generate_initial_plan_eve", "regenerate_plan_eve"),
+}
 
-    # AGENTS STATUS
-    print(f"STATUS (ADAM): {adam_status}")
-    print(f"STATUS (EVE): {eve_status}")
 
-    print("\n")
+def make_runtime(agent_id, world):
+    # Use the agent dict that lives inside world so there is a single source of
+    # truth (previously load_agent() and load_world() gave two diverging copies).
+    agent = world["agents"][agent_id]
 
-    # AGENTS PLANNED ACTIONS
-    print(f"PLANNED ACTION (ADAM): {current_chunk_adam['activity']}")
-    print(f"PLANNED ACTION (EVE): {current_chunk_eve['activity']}")
+    stream = MemoryStream(agent_id)
+    retriever = MemoryRetriever(agent_id, stream)
+    planner = Planner(agent, stream, retriever)
 
-    print("\n")
+    initial_name, regen_name = PLAN_METHODS[agent_id]
+    return AgentRuntime(
+        agent=agent,
+        stream=stream,
+        retriever=retriever,
+        planner=planner,
+        initial_plan_fn=getattr(planner, initial_name),
+        regenerate_plan_fn=getattr(planner, regen_name),
+    )
 
-    # AGENTS PLANNED LOCATIONS
-    print(f"PLANNED LOCATION (ADAM): {current_chunk_adam['location']}")
-    print(f"PLANNED LOCATION (EVE): {current_chunk_eve['location']}")
 
-    print("\n")
+# ---------------------------------------------------------------------------
+# PLANNING
+# ---------------------------------------------------------------------------
+def build_plan_hierarchy(rt, daily_plan):
+    """
+    broad plan -> hourly chunks -> 5-15 minute chunks.
+    Each level is also saved to memory as a "plan" memory (as before).
+    Returns the minute chunks (empty list if the LLM output couldn't be parsed).
+    """
+    planner, agent, tag = rt.planner, rt.agent, rt.tag
 
-    # DECISIONS
-    adam_decision = adam_planner.continue_plan_or_react(adam, adam_status, current_chunk_adam, adam_observations, world)
-    adam_decision = adam_decision.strip().replace(".", "")
+    chunks = planner.create_chunks(daily_plan, agent)
+    print(f"{tag} BROAD PLAN")
+    planner.create_plan(chunks)
 
-    eve_decision = eve_planner.continue_plan_or_react(eve, eve_status, current_chunk_eve, eve_observations, world)
-    eve_decision = eve_decision.strip().replace(".", "")
+    with timed(f"{tag} decompose_chunks (hour, LLM)"):
+        hour_chunks = planner.decompose_chunks(chunks, agent)
+    print(f"{tag} HOUR CHUNKS")
+    planner.create_plan(hour_chunks)
 
-    print(f"DECISION (ADAM): {adam_decision}")
-    print(f"DECISION (EVE): {eve_decision}")
+    with timed(f"{tag} decompose_hour_chunks (minute, LLM)"):
+        minute_chunks = planner.decompose_hour_chunks(hour_chunks, agent)
+    print(f"{tag} MINUTE CHUNKS")
+    planner.create_plan(minute_chunks)
 
-    # ADAMS CHOICE
-    if adam_decision.strip() == "1":
-        adam = update_agent_state(
-        adam,
-        current_chunk_adam
+    return minute_chunks
+
+
+def initial_planning(rt):
+    with timed(f"{rt.tag} initial broad plan (LLM)"):
+        daily_plan = rt.initial_plan_fn()
+
+    rt.minute_chunks = build_plan_hierarchy(rt, daily_plan)
+
+    if not rt.minute_chunks:
+        # No chunks means get_current_minute_chunk always returns None.
+        print(f"WARNING [{rt.tag}]: initial plan produced no chunks. "
+              f"Daily plan was: {daily_plan}")
+
+
+# ---------------------------------------------------------------------------
+# TIME HELPERS
+# ---------------------------------------------------------------------------
+def step_time(current_time, minutes=STEP_MINUTES):
+    current_dt = datetime.strptime(current_time.upper(), "%I:%M %p")
+    new_dt = current_dt + timedelta(minutes=minutes)
+    # %I zero-pads ("07:05 am"), which the planner's strptime handles fine.
+    return new_dt.strftime("%I:%M %p").lower()
+
+
+def parse_decision(raw):
+    """Pull the first 1 or 2 out of the model's reply; default to continue."""
+    match = re.search(r"[12]", raw or "")
+    if not match:
+        print(f"WARNING: could not parse decision from {raw!r}, defaulting to 1")
+        return "1"
+    return match.group(0)
+
+
+# ---------------------------------------------------------------------------
+# PHASE 1: PERCEIVE
+# ---------------------------------------------------------------------------
+def perceive_phase(rt, world):
+    with timed(f"{rt.tag} perceive (stores new obs only)"):
+        rt.observations, rt.new_obs = perceive_environment(
+            rt.agent, world, rt.stream, rt.prev_obs
+        )
+    rt.prev_obs = rt.observations
+
+    print(f"[{rt.tag}] {len(rt.observations)} observations, {len(rt.new_obs)} new")
+    if DEBUG_OBSERVATIONS:
+        for obs in rt.observations:
+            marker = "*" if obs in rt.new_obs else " "
+            print(f"    {marker} {obs}")
+
+
+# ---------------------------------------------------------------------------
+# PHASE 2: DECIDE
+# ---------------------------------------------------------------------------
+def reaction_candidates(rt):
+    """New observations that are worth asking the LLM about."""
+    if not REACT_ONLY_TO_EXTERNAL:
+        return rt.new_obs
+    # Self-observations all start with the agent's own name. This also drops
+    # "Adam is interacting with the computer"-style lines about themselves.
+    name = rt.agent["name"]
+    return [o for o in rt.new_obs if not o.startswith(name)]
+
+
+def decide_phase(rt, current_time, world):
+    planner = rt.planner
+
+    rt.status = planner.get_current_status(rt.agent, current_time)
+    rt.chunk = planner.get_current_minute_chunk(current_time, rt.minute_chunks)
+
+    print(f"[{rt.tag}] STATUS: {rt.status}")
+    if rt.chunk:
+        print(f"[{rt.tag}] PLANNED: {rt.chunk['activity']} @ {rt.chunk['location']}")
+    else:
+        print(f"[{rt.tag}] PLANNED: (no chunk covers {current_time})")
+
+    # Gate 1: nothing to follow -> nothing to decide.
+    if rt.chunk is None:
+        rt.decision, reason = "1", "no current chunk"
+
+    else:
+        candidates = reaction_candidates(rt)
+
+        # Gate 2: nothing new to react to -> skip the LLM entirely.
+        if not candidates:
+            rt.decision, reason = "1", "nothing new observed (LLM skipped)"
+        else:
+            with timed(f"{rt.tag} continue_plan_or_react (LLM)"):
+                raw = planner.continue_plan_or_react(
+                    rt.agent, rt.status, rt.chunk, rt.observations, world
+                )
+            rt.decision = parse_decision(raw)
+            reason = f"LLM said {raw.strip()!r} after {len(candidates)} new obs"
+
+    print(f"[{rt.tag}] DECISION: {rt.decision} ({reason})")
+
+
+# ---------------------------------------------------------------------------
+# PHASE 3: ACT
+# ---------------------------------------------------------------------------
+def apply_chunk(rt, world):
+    """Move the agent to its chunk's action/location and update the world."""
+    update_agent_state(rt.agent, rt.chunk)
+
+    with timed(f"{rt.tag} generate_interactions (LLM x2 + summary)"):
+        rt.agent, _ = generate_interactions(
+            rt.agent, world, rt.observations, rt.planner
         )
 
-        adam, world = generate_interactions(adam, world, adam_observations)
+    world["agents"][rt.agent["id"]] = rt.agent  # keep world in sync
 
-        world["agents"]["adam"] = adam
+    print(f"[{rt.tag}] NEW ACTION:   {rt.agent['current_action']}")
+    print(f"[{rt.tag}] NEW ROOM:     {rt.agent['current_location']}")
+    print(f"[{rt.tag}] INTERACTING:  {rt.agent['interacting_with']}")
 
-        save_world(world)
 
-        print(
-            f"NEW ACTION (ADAM): "
-            f"{adam['current_action']}"
-        )
+def act_phase(rt, current_time, world):
+    if rt.decision == "1":
+        if rt.chunk is None:
+            print(f"[{rt.tag}] ACT: no chunk, state unchanged")
+            return
 
-        print(
-            f"NEW ROOM (ADAM): "
-            f"{adam['current_location']}"
-        )
+        if SKIP_UNCHANGED_CHUNKS and rt.chunk == rt.last_chunk:
+            print(f"[{rt.tag}] ACT: same chunk as last step, skipping update")
+            return
 
-        print(
-            f"INTERACTING WITH (ADAM): "
-            f"{adam['interacting_with']}"
-        )
-    elif adam_decision.strip() == "2":
-        adam_daily_plan = adam_planner.regenerate_plan_adam(adam, current_time, current_chunk_adam, adam_observations, adam_status, world)
-        adam_chunks = adam_planner.create_chunks(adam_daily_plan, adam)
-        print("ADAM DAILY PLAN")
-        adam_planner.create_plan(adam_chunks)
-        time.sleep(45)
+        apply_chunk(rt, world)
 
-        adam_decomposed_chunks = adam_planner.decompose_chunks(adam_chunks, adam)
-        print("ADAM DECOMPOSED (HOUR)")
-        adam_planner.create_plan(adam_decomposed_chunks)
-        time.sleep(45)
+    elif rt.decision == "2":
+        print(f"[{rt.tag}] ACT: reacting, regenerating plan from {current_time}")
 
-        adam_minute_chunks = adam_planner.decompose_hour_chunks(adam_decomposed_chunks, adam)
-        print("ADAM DECOMPOSED (MINUTE)")
-        adam_planner.create_plan(adam_minute_chunks)
-        time.sleep(45)
-
-        print("PLAN GENERATED (ADAM)")
-
-        current_chunk = adam_planner.get_current_minute_chunk(current_time, adam_minute_chunks)
-        print("NEW CURRENT CHUNK (ADAM)")
-        print(current_chunk)
-
-        adam = update_agent_state(adam, current_chunk)
-
-        adam, world = generate_interactions(adam, world, adam_observations)
-
-        world["agents"]["adam"] = adam
-
-        save_world(world)
-
-        print(
-            f"NEW ACTION: "
-            f"{adam['current_action']}"
+        with timed(f"{rt.tag} regenerate plan (LLM)"):
+            daily_plan = rt.regenerate_plan_fn(
+                rt.agent, current_time, rt.chunk, rt.observations, rt.status, world
             )
-            
-        print(
-        f"NEW ROOM: "
-        f"{adam['current_location']}"
-        )
 
-    if eve_decision.strip() == "1":
-        eve = update_agent_state(
-        eve,
-        current_chunk_eve
-        )
+        new_minute_chunks = build_plan_hierarchy(rt, daily_plan) if daily_plan else []
 
-        eve, world = generate_interactions(eve, world, eve_observations)
+        if not new_minute_chunks:
+            # Don't wipe the working plan if the model's output didn't parse.
+            print(f"WARNING [{rt.tag}]: regenerated plan was empty/unparseable, "
+                  f"keeping the old plan. Raw plan items: {daily_plan}")
+            return
 
-        world["agents"]["eve"] = eve
+        rt.minute_chunks = new_minute_chunks
+        rt.chunk = rt.planner.get_current_minute_chunk(current_time, rt.minute_chunks)
+        print(f"[{rt.tag}] NEW CURRENT CHUNK: {rt.chunk}")
 
-        save_world(world)
+        if rt.chunk is not None:
+            apply_chunk(rt, world)
 
-        print(
-            f"NEW ACTION (EVE): "
-            f"{eve['current_action']}"
-        )
+    rt.last_chunk = rt.chunk
 
-        print(
-            f"NEW ROOM (EVE): "
-            f"{eve['current_location']}"
-        )
 
-        print(
-            f"INTERACTING WITH (EVE): "
-            f"{eve['interacting_with']}"
-        )
-    elif eve_decision.strip() == "2":
-        eve_daily_plan = eve_planner.regenerate_plan_eve(eve, current_time, current_chunk_eve, eve_observations, eve_status, world)
-        eve_chunks = eve_planner.create_chunks(eve_daily_plan, eve)
-        print("EVE DAILY PLAN")
-        eve_planner.create_plan(eve_chunks)
-        time.sleep(45)
+# ---------------------------------------------------------------------------
+# MAIN LOOP
+# ---------------------------------------------------------------------------
+def main():
+    world = load_world()
+    runtimes = [make_runtime("adam", world), make_runtime("eve", world)]
 
-        eve_decomposed_chunks = eve_planner.decompose_chunks(eve_chunks, eve)
-        print("EVE DECOMPOSED CHUNKS (HOUR)")
-        eve_planner.create_plan(eve_decomposed_chunks)
-        time.sleep(45)
+    # Initial plans (the old time.sleep(45) pauses are gone; add them back
+    # inside build_plan_hierarchy if you need to throttle the GPU).
+    for rt in runtimes:
+        initial_planning(rt)
 
-        eve_minute_chunks = eve_planner.decompose_hour_chunks(eve_decomposed_chunks, eve)
-        print("EVE DECOMPOSED CHUNKS (MINUTE)")
-        eve_planner.create_plan(eve_minute_chunks)
-        time.sleep(45)
+    current_time = START_TIME
 
-        print("PLAN GENERATED (EVE)")
+    try:
+        for step in range(1, NUM_STEPS + 1):
+            step_start = time.time()
+            print("\n" + "=" * 50)
+            print(f"STEP {step}/{NUM_STEPS} | TIME: {current_time}")
 
-        current_chunk = eve_planner.get_current_minute_chunk(current_time, eve_minute_chunks)
-        print("NEW CURRENT CHUNK (EVE):")
-        print(current_chunk)
+            # Run each phase for every agent before moving on, so one agent's
+            # actions don't leak into the other's perception mid-step.
+            for rt in runtimes:
+                perceive_phase(rt, world)
 
-        eve = update_agent_state(eve, current_chunk)
+            for rt in runtimes:
+                decide_phase(rt, current_time, world)
 
-        eve, world = generate_interactions(eve, world, eve_observations)
+            for rt in runtimes:
+                act_phase(rt, current_time, world)
 
-        world["agents"]["eve"] = eve
-        
-        save_world(world)
+            # One disk write per step instead of one per action / retrieval.
+            save_world(world)
+            for rt in runtimes:
+                rt.stream.flush()
 
-        print(
-            f"NEW ACTION (EVE): "
-            f"{eve['current_action']}"
-            )
-            
-        print(
-        f"NEW ROOM (EVE): "
-        f"{eve['current_location']}"
-        )
+            elapsed = time.time() - step_start
+            print(f"\nStep {step} took {elapsed:.1f}s")
 
-    current_time = step_time(current_time)
+            current_time = step_time(current_time)
 
-    elapsed = time.time() - start
-    sleep_time = max(0, STEP_DELAY_SECONDS - elapsed)
+            sleep_time = max(0, STEP_DELAY_SECONDS - elapsed)
+            if sleep_time > 0:
+                print(f"Sleeping for {sleep_time:.1f} seconds...")
+                time.sleep(sleep_time)
 
-    print(f"Sleeping for {sleep_time:.1f} seconds...")
-    time.sleep(sleep_time)
+    finally:
+        # Runs on Ctrl-C or a crash, so access timestamps and observations
+        # from the interrupted step still get written.
+        for rt in runtimes:
+            rt.stream.flush()
+        print_timing_summary()
+
+
+if __name__ == "__main__":
+    main()

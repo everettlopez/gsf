@@ -49,8 +49,7 @@ def update_agent_state(agent, current_chunk):
 
     return agent
 
-def generate_interactions(agent, world, observations):
-    planner = Planner(agent)
+def generate_interactions(agent, world, observations, planner):
 
     agent_summary = planner.generate_agent_summary(agent)
 

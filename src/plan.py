@@ -8,10 +8,9 @@ import re
 
 
 class Planner:
-    def __init__(self, agent):
-        self.memory_stream = MemoryStream(agent["id"])
-        self.memory_retriever = MemoryRetriever(agent["id"])
-        self.memories = self.memory_stream.load()
+    def __init__(self, agent, memory_stream=None, memory_retriever=None):
+        self.memory_stream = memory_stream or MemoryStream(agent["id"])
+        self.memory_retriever = memory_retriever or MemoryRetriever(agent["id"], self.memory_stream)
 
     def generate_initial_plan_adam(self):
 
@@ -144,10 +143,6 @@ class Planner:
         return plan_items
 
     def regenerate_plan_adam(self, agent, current_time, current_chunk, observations, status, world):
-        agent_summary = self.generate_agent_summary(agent)
-        observations_text = "\n".join(
-            f"Observation: {observation}" for observation in observations
-        )
 
         context_memories = []
         seen = set()
@@ -258,11 +253,7 @@ class Planner:
         return plan_items
 
     def regenerate_plan_eve(self, agent, current_time, current_chunk, observations, status, world):
-        agent_summary = self.generate_agent_summary(agent)
-        observations_text = "\n".join(
-            f"Observation: {observation}" for observation in observations
-        )
-
+        
         context_memories = []
         seen = set()
 
@@ -320,7 +311,7 @@ class Planner:
 
         Eve Smith is making good progress on the navigation menu redesign and wants to continue improving it in the coming days.
 
-        Summary of relevant context from Adam's memory:
+        Summary of relevant context from Eve's memory:
         {context}
 
         On Wednesday, Eve:
@@ -489,17 +480,7 @@ class Planner:
         for chunk in chunks
         )
         
-        plan = Memory(
-            id=len(self.memories) + 1,
-            description=description,
-            memory_type="plan",
-            embedding=self.memory_stream.generate_embedding(description),
-            importance=5
-        )
-
-        self.memories.append(plan)
-
-        self.memory_stream.save(self.memories)
+        plan = self.memory_stream.add_plan(description)
 
         print(plan.description)
 
@@ -723,30 +704,40 @@ class Planner:
             f"{agent["name"]} is currently at {agent["current_location"]} and is {agent["current_action"]}."
         )
 
-    def get_current_minute_chunk(
-        self,
-        current_time,
-        minute_chunks
-    ):
-        current_dt = datetime.strptime(
-            current_time.upper(),
-            "%I:%M %p"
-        )
+    def _parse_time(self, value):
+        try:
+            return datetime.strptime(value.upper().strip(), "%I:%M %p")
+        except (ValueError, AttributeError):
+            return None
+
+    def get_current_minute_chunk(self, current_time, minute_chunks):
+        current_dt = self._parse_time(current_time)
+        if current_dt is None:
+            return None
+
+        latest_started = None
+        latest_start_dt = None
 
         for chunk in minute_chunks:
-            start_dt = datetime.strptime(
-                chunk["start_time"].upper(),
-                "%I:%M %p"
-            )
+            start_dt = self._parse_time(chunk.get("start_time"))
+            if start_dt is None:
+                continue
 
-            end_dt = start_dt + timedelta(
-                minutes=chunk["duration"]
-            )
+            duration = chunk.get("duration") or 0
+            end_dt = start_dt + timedelta(minutes=duration)
 
+            # Exact match: current time falls inside this chunk
             if start_dt <= current_dt < end_dt:
                 return chunk
 
-        return None
+            # Track the most recent chunk that has already started
+            if start_dt <= current_dt and (
+                latest_start_dt is None or start_dt >= latest_start_dt
+            ):
+                latest_started = chunk
+                latest_start_dt = start_dt
+
+        return latest_started
 
     def continue_plan_or_react(self, agent, status, current_chunk, observations, world):
 

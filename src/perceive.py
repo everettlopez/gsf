@@ -1,97 +1,42 @@
 from memory_stream import MemoryStream
 
-def perceive_environment(agent, world):
-
-    memory_stream = MemoryStream(agent["id"])
-
-    observations = []
-
+# perceive.py
+def build_observations(agent, world):
     room = agent["current_location"]
-
-    room_data = (
-        world["locations"][room]
-    )
-
-    # PERCEIVE AGENT SELF ACTIONS / LOCATION
-
-    location_observation = (
-        f"{agent['name']} is currently at {room}."
-    )
-
-    observations.append(
-        location_observation
-    )
-
-    memory_stream.add_observation(
-        location_observation
-    )
-
-    action_observation = (
-        f"{agent["name"]} is currently {agent["current_action"].lower()}."
-    )
-
-    observations.append(action_observation)
-
-    memory_stream.add_observation(
-        action_observation
-    )
+    room_data = world["locations"][room]
+    obs = [
+        f"{agent['name']} is currently at {room}.",
+        f"{agent['name']} is currently {agent['current_action'].lower()}.",
+    ]
 
     if agent["interacting_with"] is not None:
-        interaction_observation = (
-            f"{agent['name']} is interacting with the {agent['interacting_with']}"
+        obs.append(
+            f"{agent['name']} is interacting with the {agent['interacting_with']}."
         )
 
-        observations.append(interaction_observation)
-
-        memory_stream.add_observation(interaction_observation)
-
-    # PERCIEVCE OTHER AGENTS
-    for other_agent in world["agents"].values():
-        if other_agent["id"] == agent["id"]:
+    for other in world["agents"].values():
+        if other["id"] == agent["id"] or other["current_location"] != room:
             continue
-
-        if (other_agent["current_location"] == room):
-
-            observation = (
-                f"{other_agent["name"]} is currently {other_agent["current_action"].lower()}."
+        obs.append(f"{other['name']} is currently {other['current_action'].lower()}.")
+        if other["interacting_with"] is not None:
+            obs.append(
+                f"{other['name']} is interacting with the {other['interacting_with']}."
             )
 
-            observations.append(observation)
+    obs.append(f"The {room} is currently {room_data['state']}.")
+    for name, data in room_data["objects"].items():
+        obs.append(f"The {name} in the {room} is {data['state']}.")
 
-            memory_stream.add_observation(observation)
+    return obs
 
-            if other_agent["interacting_with"] is not None:
-                interaction_observation = (
-                    f"{other_agent["name"]} is interacting with the {other_agent["interacting_with"]}"
-                )
 
-                observations.append(interaction_observation)
+def perceive_environment(agent, world, memory_stream, previous_observations):
+    observations = build_observations(agent, world)
 
-                memory_stream.add_observation(interaction_observation)
+    previous = set(previous_observations)
+    new_observations = [o for o in observations if o not in previous]
 
-    # PERCEIVE ROOM
-    room_observation = (
-        f"The {room} is currently {room_data["state"]}."
-    )
+    if new_observations:
+        memory_stream.add_observations(new_observations)
 
-    observations.append(room_observation)
-
-    memory_stream.add_observation(room_observation)
-
-    for obj, data in room_data["objects"].items():
-
-        state = data["state"]
-
-        observation = (
-            f"The {obj} in the {room} is {state}."
-        )
-
-        observations.append(
-            observation
-        )
-
-        memory_stream.add_observation(
-            observation
-        )
-
-    return observations
+    return observations, new_observations

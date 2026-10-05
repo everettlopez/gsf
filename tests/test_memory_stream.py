@@ -55,7 +55,6 @@ def addSeedMemories() -> MemoryStream:
     for memory in eve_seed_memories:
         stream.add_observation(memory)
         print("SEED MEMORY ADDED")
-        time.sleep(45)
 
     return stream
 
