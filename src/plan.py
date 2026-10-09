@@ -7,10 +7,88 @@ import ollama
 import re
 
 
+AGENT_PROFILES = {
+    "adam": """Name: Adam Beck (age: 24)
+    
+        Innate traits: collaborative, technical, growth-oriented
+
+        Adam Beck is a backend software engineer who primarily develops software using Python and TypeScript.
+
+        He enjoys building reliable and scalable software systems and values clean code.
+
+        Adam Beck is currently working on a memory-system project. He has recently been focused on memory retrieval, memory-stream architecture, testing, and implementation work.
+
+        Adam Beck works closely with other engineers and enjoys collaborating on technical challenges.
+
+        Adam Beck hopes to become a software architect. He wants to build software that positively impacts many people.
+
+        Adam Beck is making good progress on the memory-system project and wants to continue improving it in the coming days.
+
+        On Wednesday, Adam:
+        1) clock in and start work at 7:00 am,
+        2) attended engineering meetings from 8:00 am to 9:00 am,
+        3) worked on memory-system development from 9:00 am to 12:00 pm,
+        4) took a lunch break in the break room from 12:00 pm to 1:00 pm,
+        5) collaborated with coworkers on technical challenges from 1:00 pm to 2:00 pm,
+        6) reviewed project updates, documentation, and testing progress from 2:00 pm to 5:00 pm,
+        7) clock out and finished work at 5:00 pm.""",
+    "eve": """Name: Eve Smith (age: 21)
+
+        Innate traits: shy, detail-oriented, thoughtful
+
+        Eve Smith is a frontend software engineer who primarily develops software using TypeScript and React.
+
+        She enjoys building polished and accessible user interfaces and values clean code.
+
+        Eve Smith is currently working on a navigation menu redesign project. She has recently been focused on UI components, responsive layouts, accessibility, and implementation work.
+
+        Eve Smith works with designers and other engineers, and prefers collaborating one-on-one or in writing on technical challenges.
+
+        Eve Smith hopes to become a lead frontend engineer. She wants to build software that feels simple and welcoming for many people to use.
+
+        Eve Smith is making good progress on the navigation menu redesign and wants to continue improving it in the coming days.
+
+        On Wednesday, Eve:
+        1) clock in and start work at 7:00 am,
+        2) attended engineering meetings from 8:00 am to 9:00 am,
+        3) worked on navigation menu development from 9:00 am to 12:00 pm,
+        4) took a lunch break in the break room from 12:00 pm to 1:00 pm,
+        5) collaborated with coworkers on technical challenges from 1:00 pm to 2:00 pm,
+        6) reviewed project updates, documentation, and testing progress from 2:00 pm to 5:00 pm,
+        7) clock out and finished work at 5:00 pm.""",
+}
+
 class Planner:
     def __init__(self, agent, memory_stream=None, memory_retriever=None):
         self.memory_stream = memory_stream or MemoryStream(agent["id"])
         self.memory_retriever = memory_retriever or MemoryRetriever(agent["id"], self.memory_stream)
+        self._summary_cache = {}
+
+    def _parse_numbered(self, text):
+        items = []
+        for line in text.splitlines():
+            m = re.match(r"^\d+\.\s*(.+)$", line.strip())
+            if m:
+                items.append(m.group(1).replace("**", "").strip())
+        return items
+
+
+    def split_plan(self, chunks, current_time):
+        """(done, remaining) around now. A chunk in progress is truncated to now."""
+        now = self._parse_time(current_time)
+        done, remaining = [], []
+        for c in chunks:
+            start = self._parse_time(c.get("start_time"))
+            if start is None:
+                continue
+            if start < now:
+                c = dict(c)
+                c["duration"] = min(c.get("duration") or 0,
+                                    int((now - start).total_seconds() // 60))
+                done.append(c)
+            else:
+                remaining.append(c)
+        return done, remaining
 
     def generate_initial_plan_adam(self):
 
@@ -142,262 +220,92 @@ class Planner:
             plan_items.append(item)
         return plan_items
 
-    def regenerate_plan_adam(self, agent, current_time, current_chunk, observations, status, world):
-
-        context_memories = []
-        seen = set()
-
-        room = agent["current_location"]
-
-        entities = []
-
-        # ROOM ITSELF
-        entities.append((room, world["locations"][room]["state"]))
-
-        # OBJECTS IN ROOM
-        for object_name, object_data in (world["locations"][room]["objects"].items()):
-            entities.append((object_name, object_data["state"]))
-
-        # agents in the room
-        for other_agent in world["agents"].values():
-            if(other_agent["id"] != agent["id"] and other_agent["current_location"] == room):
-                entities.append((other_agent["name"], other_agent["current_action"]))
-
-        for entity_name, entity_status in entities:
-            queries = [
-                f"What is {agent["name"]}'s relationship with {entity_name}",
-                f"{entity_name} is {entity_status}"
-            ]
-
-            for query in queries:
-                results = self.memory_retriever.retrieve(query)
-
-                for result in results:
-                    description = (result["memory"].description)
-
-                    if description not in seen:
-                        seen.add(description)
-                        context_memories.append(result)
-
-
-
-        context = "\n".join(
-        f"- {result['memory'].description}"
-        for result in context_memories
-        )
+    def regenerate_plan(self, agent, current_time, reaction, done_chunks, old_remaining, end_of_day="5:00 pm"):
+        name = agent["name"]
+        done_text = "\n".join(f"- {c['activity']}" for c in done_chunks) or "- (nothing yet)"
+        old_text = "\n".join(f"- {c['activity']}" for c in old_remaining) or "- (nothing left)"
 
         prompt = f"""
-        Name: Adam Beck (age: 24)
+        {AGENT_PROFILES[agent["id"]]}
+
+        Today is Thursday and it is now {current_time}.
         
-        Innate traits: collaborative, technical, growth-oriented
+        So far today, {name} has done:
+        {done_text}
 
-        Adam Beck is a backend software engineer who primarily develops software using Python and TypeScript.
+        {name}'s previous plan for the rest of the day:
+        {old_text}
 
-        He enjoys building reliable and scalable software systems and values clean code.
+        Just now, {name} decided to react: {reaction}
 
-        Adam Beck is currently working on a memory-system project. He has recently been focused on memory retrieval, memory-stream architecture, testing, and implementation work.
-
-        Adam Beck works closely with other engineers and enjoys collaborating on technical challenges.
-
-        Adam Beck hopes to become a software architect. He wants to build software that positively impacts many people.
-
-        Adam Beck is making good progress on the memory-system project and wants to continue improving it in the coming days.
-
-        Summary of relevant context from Adam's memory:
-        {context}
-
-        On Wednesday, Adam:
-        1) clocked in to work at 7:00 am,
-        2) attended engineering meetings from 9:00 am to 10:00 am,
-        3) worked on memory-system development from 10:00 am to 1:00 pm,
-        4) took a lunch break in the break room from 1:00 pm to 2:00 pm,
-        5) collaborated with coworkers on technical challenges from 2:00 pm to 4:00 pm,
-        6) reviewed project updates, documentation, and testing progress from 4:00 pm to 5:00 pm,
-        7) clocked out and finished work at 5:00 pm.
-
-        Today is {current_time} on Thursday
-
-        Here is Adam's plan today in broad strokes:
-
-        Continue the plan as a numbered list.
-
-        Return the plan in broad-strokes time blocks.
-
+        Revise {name}'s plan from {current_time} until {end_of_day}.
+        Return a numbered list of broad-strokes blocks, each written as
+        "<activity> from H:MM am to H:MM pm". The first block must start at {current_time}.
+        
         Example:
-        3. work on memory-system development from {current_time} to 1:00 pm
-        """
+        1. work on memory-system development from {current_time} to 1:00 pm"""
 
-        response = ollama.generate(
-            model="qwen3",
-            prompt=prompt,
-            think=False
-        )
+        response = ollama.generate(model="qwen3", prompt=prompt, think=False, options={"num_predict": 300})
 
-        plan_text = response["response"]
+        return self._parse_numbered(response["response"])
 
-        plan_items = []
-
-        for line in plan_text.splitlines():
-            line = line.strip()
-
-            match = re.match(r"^\d+\.\s*(.+)$", line)
-
-            if not match:
-                continue
-
-            item = match.group(1)
-
-            item = item.replace("**", "").strip()
-
-            plan_items.append(item)
-        return plan_items
-
-    def regenerate_plan_eve(self, agent, current_time, current_chunk, observations, status, world):
-        
-        context_memories = []
-        seen = set()
-
-        room = agent["current_location"]
-
-        entities = []
-
-        # ROOM ITSELF
-        entities.append((room, world["locations"][room]["state"]))
-
-        # OBJECTS IN ROOM
-        for object_name, object_data in (world["locations"][room]["objects"].items()):
-            entities.append((object_name, object_data["state"]))
-
-        # agents in the room
-        for other_agent in world["agents"].values():
-            if(other_agent["id"] != agent["id"] and other_agent["current_location"] == room):
-                entities.append((other_agent["name"], other_agent["current_action"]))
-
-        for entity_name, entity_status in entities:
-            queries = [
-                f"What is {agent["name"]}'s relationship with {entity_name}",
-                f"{entity_name} is {entity_status}"
-            ]
-
-            for query in queries:
-                results = self.memory_retriever.retrieve(query)
-
-                for result in results:
-                    description = (result["memory"].description)
-
-                    if description not in seen:
-                        seen.add(description)
-                        context_memories.append(result)
-
-        context = "\n".join(
-        f"- {result['memory'].description}"
-        for result in context_memories
-        )
-
-        prompt = f"""
-        Name: Eve Smith (age: 21)
-        
-        Innate traits: shy, detail-oriented, thoughtful
-
-        Eve Smith is a frontend software engineer who primarily develops software using TypeScript and React.
-
-        She enjoys building polished and accessible user interfaces and values clean code.
-
-        Eve Smith is currently working on a navigation menu redesign project. She has recently been focused on UI components, responsive layouts, accessibility, and implementation work.
-
-        Eve Smith works with designers and other engineers, and prefers collaborating one-on-one or in writing on technical challenges.
-
-        Eve Smith hopes to become a lead frontend engineer. She wants to build software that feels simple and welcoming for many people to use.
-
-        Eve Smith is making good progress on the navigation menu redesign and wants to continue improving it in the coming days.
-
-        Summary of relevant context from Eve's memory:
-        {context}
-
-        On Wednesday, Eve:
-        1) clocked in to work at 7:00 am,
-        2) attended engineering meetings from 9:00 am to 10:00 am,
-        3) worked on navigation menu development from 10:00 am to 1:00 pm,
-        4) took a lunch break in the break room from 1:00 pm to 2:00 pm,
-        5) collaborated with coworkers on technical challenges from 2:00 pm to 4:00 pm,
-        6) reviewed project updates, documentation, and testing progress from 4:00 pm to 5:00 pm,
-        7) clocked out and finished work at 5:00 pm.
-
-        Today is {current_time} on Thursday
-    
-        Here is Eve's plan today in broad strokes:
-
-        Continue the plan as a numbered list.
-
-        Return the plan in broad-strokes time blocks.
-
-        Example:
-        3. work on navigation menu development from {current_time} to 1:00 pm
-        """
-
-        response = ollama.generate(
-            model="qwen3",
-            prompt=prompt,
-            think=False
-        )
-
-        plan_text = response["response"]
-
-        plan_items = []
-
-        for line in plan_text.splitlines():
-            line = line.strip()
-
-            match = re.match(r"^\d+\.\s*(.+)$", line)
-
-            if not match:
-                continue
-
-            item = match.group(1)
-
-            item = item.replace("**", "").strip()
-
-            plan_items.append(item)
-        return plan_items
-
-    def create_chunks(self, daily_plan, agent):
+    def create_chunks(self, daily_plan, agent, world=None):
         chunks = []
-
         for activity in daily_plan:
+            activity = activity.strip().rstrip(".")
             chunks.append({
                 "activity": activity,
                 "location": self.resolve_location(activity, agent),
                 "start_time": self.extract_start_time(activity),
-                "duration": self.extract_duration(activity)
+                "duration": self.extract_duration(activity),
+                "target_agent": self.extract_target_agent(activity, agent, world),
             })
 
         return chunks
 
-    def resolve_location(self, activity, agent):
-        activity = activity.lower()
+    def resolve_location(self, activity, agent, default=None):
+        """
+        Map an activity description to a room. Order matters: explicit room
+        names win, then specific activities, then the agent's default.
+        `default` lets callers (e.g. reactions) fall back to the agent's current
+        room instead of their office.
+        """
+        text = activity.lower()
 
-        if "clock in" in activity:
+        def has(*patterns):
+            return any(re.search(p, text) for p in patterns)
+
+        # 1. Explicit room names in the text
+        if has(r"\breception\b", r"\bfront desk\b"):
             return "reception"
-
-        if "reception" in activity:
-            return "reception"
-
-        if "clock out" in activity:
-            return "reception"
-
-        if "conference" in activity:
+        if has(r"\bbreak room\b", r"\bkitchen\b"):
+            return "break room"
+        if has(r"\bconference room\b", r"\bmeeting room\b"):
             return "conference room"
 
-        if "lunch" in activity:
+        # 2. Arriving / leaving
+        if has(r"\bclock(?:ing)? (?:in|out)\b", r"\bsign(?:ing)?[ -](?:in|out)\b",
+            r"\bbadge (?:in|out)\b", r"\bhead(?:ing)? home\b",
+            r"\bleave (?:for the day|work)\b"):
+            return "reception"
+
+        # 3. Meals, rest and personal needs
+        if has(r"\blunch\b", r"\bcoffee\b", r"\bsnack\b", r"\bhydrate\b",
+            r"\bdrink(?:ing)? water\b", r"\bstretch(?:ing)?\b",
+            r"\b(?:take|taking|short|quick|brief|coffee) break\b",
+            r"\bbreak (?:for|and)\b", r"\brelax(?:ing)?\b", r"\beat(?:ing)?\b"):
             return "break room"
 
-        if "collaborate" in activity:
+        # 4. Group work
+        if has(r"\bmeetings?\b", r"\bstand-?up\b", r"\bsync\b", r"\bretro(?:spective)?\b",
+            r"\bbrainstorm\w*\b", r"\bwhiteboard\w*\b", r"\bdemo\b",
+            r"\bpresent(?:ing|ation)?\b", r"\bcollaborat\w+\b",
+            r"\bpair(?:ing)? (?:up|programming)\b", r"\bdiscuss\w* (?:with )?(?:the )?team\b",
+            r"\bteam (?:discussion|check-?in|huddle)\b"):
             return "conference room"
 
-        if "break" in activity:
-            return "break room"
-
-        return agent["office"]
+        # 5. Everything else is solo work
+        return default or agent["office"]
 
     def extract_start_time(self, activity):
         activity = activity.lower().strip()
@@ -546,12 +454,15 @@ class Planner:
                     continue
                 
                 activity = match.group(1).strip()
+
+                activity = activity.strip().rstrip(".")
                 
                 decomposed_chunks.append({
                 "activity": activity,
                 "location": self.resolve_location(activity, agent),
                 "start_time": self.extract_start_time(activity),
-                "duration": 60
+                "duration": 60,
+                "target_agent": chunk.get("target_agent"),
                 })
                 
         return decomposed_chunks
@@ -612,10 +523,13 @@ class Planner:
 
                 activity = match.group(1).strip()
 
+                activity = activity.strip().rstrip(".")
+
                 actions.append({
                     "activity": activity,
                     "location": self.resolve_location(activity, agent),
                     "start_time": self.extract_start_time(activity),
+                    "target_agent": chunk.get("target_agent"),
                 })
 
             #
@@ -740,30 +654,31 @@ class Planner:
         return latest_started
 
     def continue_plan_or_react(self, agent, status, current_chunk, observations, world):
+        # `observations` should now be only the NEW external observations
+        # (main.py passes `candidates`), matching the paper's "react to an observation".
 
-        agent_summary = self.generate_agent_summary(agent)
+        agent_summary = self.generate_agent_summary(agent)   # cached after the first call
         observations_text = "\n".join(
             f"Observation: {observation}" for observation in observations
         )
-        
-        context_memories = []
-        seen = set()
 
         room = agent["current_location"]
 
-        entities = []
+        # Build every entity in the room first...
+        entities = [(room, world["locations"][room]["state"])]
 
-        # Room itself
-        entities.append((room, world["locations"][room]["state"]))
-
-        # objects in room
-        for object_name, object_data in (world["locations"][room]["objects"].items()):
+        for object_name, object_data in world["locations"][room]["objects"].items():
             entities.append((object_name, object_data["state"]))
 
-        # agenrs in the room
         for other_agent in world["agents"].values():
-            if(other_agent["id"] != agent["id"] and other_agent["current_location"] == room):
+            if other_agent["id"] != agent["id"] and other_agent["current_location"] == room:
                 entities.append((other_agent["name"], other_agent["current_action"]))
+
+        # ...THEN keep only the ones mentioned in what we're reacting to.
+        entities = [(n, s) for n, s in entities if any(n in o for o in observations)]
+
+        context_memories = []
+        seen = set()
 
         for entity_name, entity_status in entities:
             queries = [
@@ -772,21 +687,18 @@ class Planner:
             ]
 
             for query in queries:
-                results = self.memory_retriever.retrieve(query)
-
-                for result in results:
-                    description = (result["memory"].description)
-
+                for result in self.memory_retriever.retrieve(query, n=5):
+                    description = result["memory"].description
                     if description not in seen:
                         seen.add(description)
                         context_memories.append(result)
 
-        context = "\n".join(
-        f"- {result['memory'].description}"
-        for result in context_memories
-        )
+        context_memories.sort(key=lambda r: r["retrieval_score"], reverse=True)
+        context_memories = context_memories[:10]
 
-        
+        context = "\n".join(
+            f"- {result['memory'].description}" for result in context_memories
+        )
 
         prompt = f"""
         {agent_summary}
@@ -801,20 +713,20 @@ class Planner:
         Summary of relevant context from {agent["name"]}'s memory:
         {context}
 
-        Should {agent["name"]} react to any of the observed entities or their current state, and if so, what would be an appropriate reaction?
+        Should {agent["name"]} react to the observation, and if so, what would be an appropriate reaction?
 
-        1. Continue the current planned action
-        2. React to the current sitation
-
-        Respond with an integer 1, or 2.
+        Answer in exactly this format:
+        DECISION: 1 (continue the current plan) or 2 (react)
+        REACTION: <one short sentence, or "none">
         """
 
         response = ollama.generate(
             model="qwen3",
             prompt=prompt,
-            think=False
+            think=False,
+            options={"num_predict": 40, "temperature": 0}
         )
-    
+
         return response["response"]
 
     def generate_agent_summary(self, agent):
@@ -867,3 +779,27 @@ class Planner:
         )
 
         return response["response"]
+
+    def extract_target_agent(self, activity, agent, world):
+        """Return the id of another agent named in the activity, else None."""
+        if not world:
+            return None
+        text = activity.lower()
+        for other in world["agents"].values():
+            if other["id"] == agent["id"]:
+                continue
+            first = other["name"].split()[0].lower()
+            if re.search(rf"\b{first}\b", text):   # \b so "evening" doesn't match "eve"
+                return other["id"]
+        return None
+
+    def make_reaction_chunk(self, agent, current_time, reaction, world, minutes=10):
+        reaction = reaction.strip().rstrip(".")
+        return {
+            "activity": f"{current_time}: {reaction}",
+            "location": self.resolve_location(reaction, agent, default=agent["current_location"]),
+            "start_time": current_time,
+            "duration": minutes,
+            "target_agent": self.extract_target_agent(reaction, agent, world),
+            "is_reaction": True,
+        }

@@ -34,7 +34,7 @@
       }
     },
     "office_1": {
-      "state": "empty",
+      "state": "occupied by Adam Beck",
       "objects": {
         "desk": {
           "state": "organized"
@@ -46,12 +46,12 @@
           "state": "available"
         },
         "calendar": {
-          "state": "not updated"
+          "state": "updated"
         }
       }
     },
     "office_2": {
-      "state": "empty",
+      "state": "occupied by Eve Smith",
       "objects": {
         "desk": {
           "state": "organized"
@@ -63,7 +63,7 @@
           "state": "available"
         },
         "calendar": {
-          "state": "not updated"
+          "state": "updated"
         }
       }
     }
@@ -73,17 +73,17 @@
       "id": "adam",
       "name": "Adam Beck",
       "office": "office_1",
-      "current_location": "reception",
-      "current_action": "arriving at the reception area",
-      "interacting_with": "time_clock"
+      "current_location": "office_1",
+      "current_action": "setting up the workspace and organize tools",
+      "interacting_with": "desk"
     },
     "eve": {
       "id": "eve",
       "name": "Eve Smith",
       "office": "office_2",
-      "current_location": "reception",
-      "current_action": "clocking in and check in with the team",
-      "interacting_with": "time_clock"
+      "current_location": "office_2",
+      "current_action": "setting up the workspace and organize necessary tools",
+      "interacting_with": null
     }
   }
 }

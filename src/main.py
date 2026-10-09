@@ -6,14 +6,31 @@ Per step, the loop runs three phases for BOTH agents (so they act
 
     1. PERCEIVE  - build observations, store only the NEW ones in memory
     2. DECIDE    - continue the plan (1) or react (2); the LLM is only asked
-                   when there is something new to react to
+                   when there is something new to react to, and it returns a
+                   short reaction that drives the replan (paper, section 4.3.1)
     3. ACT       - update agent/world state (1) or regenerate the plan (2)
 
-Assumes the earlier refactors are in place:
+Planning follows the paper's top-down scheme:
+
+    broad plan  ->  hour chunks  ->  5-15 minute chunks
+
+By default each level is expanded lazily (and cached) when the agent reaches
+it. Set EAGER_DECOMPOSITION (or PAPER_STRICT) to decompose the whole plan up
+front, exactly as the paper describes. Every level is saved to the memory
+stream as a plan either way.
+
+On a reaction, only the plan from the current time onward is regenerated;
+what already happened today is kept (the chunk in progress is cut at "now").
+
+Assumes these are in place:
     - perceive_environment(agent, world, stream, prev_obs) -> (all_obs, new_obs)
     - Planner(agent, memory_stream, memory_retriever)
+    - Planner.split_plan(chunks, current_time) -> (done, remaining)
+    - Planner.regenerate_plan(agent, current_time, reaction, done, remaining)
+    - Planner.continue_plan_or_react(agent, status, chunk, observations, world) ->
+      text containing "DECISION: 1|2" and "REACTION: ..."
     - MemoryRetriever(agent_id, memory_stream)
-    - MemoryStream.flush() / mark_dirty() / add_observations()
+    - MemoryStream.flush() / mark_dirty() / add_observations() / add_plan()
     - generate_interactions(agent, world, observations, planner)
 """
 
@@ -30,6 +47,8 @@ from perceive import perceive_environment
 from plan import Planner
 from world import generate_interactions, load_world, save_world, update_agent_state
 
+from conversation import run_conversation
+
 
 # ---------------------------------------------------------------------------
 # CONFIG
@@ -37,9 +56,15 @@ from world import generate_interactions, load_world, save_world, update_agent_st
 START_TIME = "7:00 am"
 NUM_STEPS = 30
 STEP_MINUTES = 5            # simulated minutes per step
-STEP_DELAY_SECONDS = 0      # wall-clock padding per step (was 120; 0 = run flat out)
+STEP_DELAY_SECONDS = 0      # wall-clock padding per step (0 = run flat out)
 
 DEBUG_OBSERVATIONS = False  # True = print every observation each step
+
+# --- Efficiency shortcuts (NOT in the paper) --------------------------------
+
+# Decompose the whole plan up front (paper) instead of when each block is
+# reached. Costs roughly 100s per agent at startup on a local model.
+EAGER_DECOMPOSITION = False
 
 # Only ask the LLM "continue or react?" when something NEW was observed.
 # With this True, an agent's own state lines (e.g. "Adam is currently at...")
@@ -47,9 +72,28 @@ DEBUG_OBSERVATIONS = False  # True = print every observation each step
 REACT_ONLY_TO_EXTERNAL = True
 
 # If the agent is still on the same plan chunk and keeps going (decision 1),
-# skip update_agent_state + generate_interactions (2+ LLM calls). Set False to
-# restore the old behaviour of re-running them every step.
+# skip update_agent_state + generate_interactions (2+ LLM calls).
 SKIP_UNCHANGED_CHUNKS = True
+
+# After a react (replan), don't ask the LLM about reacting again for this many
+# steps. Stops agents from replanning on nearly every step.
+REACT_COOLDOWN_STEPS = 6
+
+# Step 1 sees the whole room as "new". Treat it as a baseline and don't react.
+SKIP_REACT_ON_FIRST_STEP = True
+
+# --- One switch to turn all the shortcuts off -------------------------------
+# True = behave as the paper describes: decompose everything up front, and ask
+# the react/continue question every step about everything currently perceived.
+# Slow on a local model, but it's the baseline to compare the shortcuts against.
+PAPER_STRICT = False
+
+if PAPER_STRICT:
+    EAGER_DECOMPOSITION = True
+    REACT_ONLY_TO_EXTERNAL = False
+    SKIP_UNCHANGED_CHUNKS = False
+    REACT_COOLDOWN_STEPS = 0
+    SKIP_REACT_ON_FIRST_STEP = False
 
 
 # ---------------------------------------------------------------------------
@@ -91,11 +135,17 @@ class AgentRuntime:
     retriever: MemoryRetriever
     planner: Planner
     initial_plan_fn: Callable        # planner.generate_initial_plan_<name>
-    regenerate_plan_fn: Callable     # planner.regenerate_plan_<name>
 
-    minute_chunks: list = field(default_factory=list)
+    # The plan, at three levels of detail. The two caches are keyed by
+    # (start_time, activity), so a replan can never hit a stale entry.
+    broad_chunks: list = field(default_factory=list)
+    hour_cache: dict = field(default_factory=dict)
+    minute_cache: dict = field(default_factory=dict)
+
     prev_obs: list = field(default_factory=list)
     last_chunk: Optional[dict] = None
+    last_react_step: int = -10_000
+    override: Optional[dict] = None
 
     # Per-step scratch space (filled in by the phases below)
     observations: list = field(default_factory=list)
@@ -103,16 +153,17 @@ class AgentRuntime:
     chunk: Optional[dict] = None
     status: str = ""
     decision: str = "1"
+    reaction: str = ""
 
     @property
     def tag(self):
         return self.agent["id"].upper()
 
 
-# Adam and Eve have separate plan prompts, so map each id to its method names.
-PLAN_METHODS = {
-    "adam": ("generate_initial_plan_adam", "regenerate_plan_adam"),
-    "eve": ("generate_initial_plan_eve", "regenerate_plan_eve"),
+# Adam and Eve still have separate initial-plan prompts.
+INITIAL_PLAN_METHODS = {
+    "adam": "generate_initial_plan_adam",
+    "eve": "generate_initial_plan_eve",
 }
 
 
@@ -125,74 +176,114 @@ def make_runtime(agent_id, world):
     retriever = MemoryRetriever(agent_id, stream)
     planner = Planner(agent, stream, retriever)
 
-    initial_name, regen_name = PLAN_METHODS[agent_id]
     return AgentRuntime(
         agent=agent,
         stream=stream,
         retriever=retriever,
         planner=planner,
-        initial_plan_fn=getattr(planner, initial_name),
-        regenerate_plan_fn=getattr(planner, regen_name),
+        initial_plan_fn=getattr(planner, INITIAL_PLAN_METHODS[agent_id]),
     )
 
 
 # ---------------------------------------------------------------------------
 # PLANNING
 # ---------------------------------------------------------------------------
-def build_plan_hierarchy(rt, daily_plan):
-    """
-    broad plan -> hourly chunks -> 5-15 minute chunks.
-    Each level is also saved to memory as a "plan" memory (as before).
-    Returns the minute chunks (empty list if the LLM output couldn't be parsed).
-    """
-    planner, agent, tag = rt.planner, rt.agent, rt.tag
+def expand_hours(rt, broad):
+    """broad block -> hour chunks (cached, saved to the memory stream)."""
+    p = rt.planner
+    bkey = (broad["start_time"], broad["activity"])
 
-    chunks = planner.create_chunks(daily_plan, agent)
-    print(f"{tag} BROAD PLAN")
-    planner.create_plan(chunks)
+    if bkey not in rt.hour_cache:
+        with timed(f"{rt.tag} expand broad {bkey[0]} -> hours (LLM)"):
+            hours = p.decompose_chunks([broad], rt.agent)
+        if hours:
+            p.create_plan(hours)
+        # If the output didn't parse, fall back to the coarser chunk.
+        rt.hour_cache[bkey] = hours or [broad]
 
-    with timed(f"{tag} decompose_chunks (hour, LLM)"):
-        hour_chunks = planner.decompose_chunks(chunks, agent)
-    print(f"{tag} HOUR CHUNKS")
-    planner.create_plan(hour_chunks)
-
-    with timed(f"{tag} decompose_hour_chunks (minute, LLM)"):
-        minute_chunks = planner.decompose_hour_chunks(hour_chunks, agent)
-    print(f"{tag} MINUTE CHUNKS")
-    planner.create_plan(minute_chunks)
-
-    return minute_chunks
+    return rt.hour_cache[bkey]
 
 
-def initial_planning(rt):
+def expand_minutes(rt, hour):
+    """hour chunk -> 5-15 minute chunks (cached, saved to the memory stream)."""
+    p = rt.planner
+    hkey = (hour["start_time"], hour["activity"])
+
+    if hkey not in rt.minute_cache:
+        with timed(f"{rt.tag} expand hour {hkey[0]} -> minutes (LLM)"):
+            minutes = p.decompose_hour_chunks([hour], rt.agent)
+        if minutes:
+            p.create_plan(minutes)
+        rt.minute_cache[hkey] = minutes or [hour]
+
+    return rt.minute_cache[hkey]
+
+
+def expand_plan(rt, chunks):
+    """Eagerly decompose the given broad chunks all the way down (the paper's
+    up-front version). Fills the same caches the lazy path uses."""
+    for broad in chunks:
+        for hour in expand_hours(rt, broad):
+            expand_minutes(rt, hour)
+
+
+def initial_planning(rt, world):
+    """Day plan in broad strokes, then (optionally) the full decomposition."""
     with timed(f"{rt.tag} initial broad plan (LLM)"):
         daily_plan = rt.initial_plan_fn()
 
-    rt.minute_chunks = build_plan_hierarchy(rt, daily_plan)
+    rt.broad_chunks = rt.planner.create_chunks(daily_plan, rt.agent, world)
+    rt.hour_cache, rt.minute_cache = {}, {}
 
-    if not rt.minute_chunks:
-        # No chunks means get_current_minute_chunk always returns None.
+    print(f"{rt.tag} BROAD PLAN")
+    if not rt.broad_chunks:
+        # No chunks means get_chunk_lazy always returns None.
         print(f"WARNING [{rt.tag}]: initial plan produced no chunks. "
               f"Daily plan was: {daily_plan}")
+        return
+
+    rt.planner.create_plan(rt.broad_chunks)  # plans live in the memory stream
+
+    if EAGER_DECOMPOSITION:
+        expand_plan(rt, rt.broad_chunks)
+
+
+def get_chunk_lazy(rt, current_time):
+    """
+    Return the minute-level chunk covering current_time.
+
+    Anything not decomposed yet is expanded now (1 LLM call per level, then
+    cached); with EAGER_DECOMPOSITION everything is already cached.
+    """
+    p = rt.planner
+
+    if rt.override:
+        now = p._parse_time(current_time)
+        start = p._parse_time(rt.override["start_time"])
+        if start and now and start <= now < start + timedelta(minutes=rt.override["duration"]):
+            return rt.override
+        rt.override = None          # expired, fall back to the real plan
+
+
+    broad = p.get_current_minute_chunk(current_time, rt.broad_chunks)
+    if broad is None:
+        return None
+
+    hour = p.get_current_minute_chunk(current_time, expand_hours(rt, broad))
+    if hour is None:
+        return None
+
+    return p.get_current_minute_chunk(current_time, expand_minutes(rt, hour))
 
 
 # ---------------------------------------------------------------------------
-# TIME HELPERS
+# TIME / PARSING HELPERS
 # ---------------------------------------------------------------------------
 def step_time(current_time, minutes=STEP_MINUTES):
     current_dt = datetime.strptime(current_time.upper(), "%I:%M %p")
     new_dt = current_dt + timedelta(minutes=minutes)
     # %I zero-pads ("07:05 am"), which the planner's strptime handles fine.
     return new_dt.strftime("%I:%M %p").lower()
-
-
-def parse_decision(raw):
-    """Pull the first 1 or 2 out of the model's reply; default to continue."""
-    match = re.search(r"[12]", raw or "")
-    if not match:
-        print(f"WARNING: could not parse decision from {raw!r}, defaulting to 1")
-        return "1"
-    return match.group(0)
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +307,9 @@ def perceive_phase(rt, world):
 # PHASE 2: DECIDE
 # ---------------------------------------------------------------------------
 def reaction_candidates(rt):
-    """New observations that are worth asking the LLM about."""
+    """Observations worth asking the LLM about."""
+    if PAPER_STRICT:
+        return rt.observations  # paper: react to everything perceived this step
     if not REACT_ONLY_TO_EXTERNAL:
         return rt.new_obs
     # Self-observations all start with the agent's own name. This also drops
@@ -225,49 +318,114 @@ def reaction_candidates(rt):
     return [o for o in rt.new_obs if not o.startswith(name)]
 
 
-def decide_phase(rt, current_time, world):
+def decide_phase(rt, step, current_time, world):
     planner = rt.planner
+    rt.reaction = ""
 
     rt.status = planner.get_current_status(rt.agent, current_time)
-    rt.chunk = planner.get_current_minute_chunk(current_time, rt.minute_chunks)
+    rt.chunk = get_chunk_lazy(rt, current_time)
 
     print(f"[{rt.tag}] STATUS: {rt.status}")
     if rt.chunk:
-        print(f"[{rt.tag}] PLANNED: {rt.chunk['activity']} @ {rt.chunk['location']}")
+        print(f"[{rt.tag}] PLANNED: {rt.chunk['activity']} at {rt.chunk['location']}")
     else:
         print(f"[{rt.tag}] PLANNED: (no chunk covers {current_time})")
+
+    steps_since_react = step - rt.last_react_step
 
     # Gate 1: nothing to follow -> nothing to decide.
     if rt.chunk is None:
         rt.decision, reason = "1", "no current chunk"
 
+    # Gate 1b: step 1 is just the baseline snapshot of the room.
+    elif SKIP_REACT_ON_FIRST_STEP and step == 1:
+        rt.decision, reason = "1", "first step baseline (LLM skipped)"
+
+    # Gate 1c: recently replanned, give the new plan time to play out.
+    elif steps_since_react < REACT_COOLDOWN_STEPS:
+        rt.decision, reason = "1", (
+            f"react cooldown, {steps_since_react} steps since replan (LLM skipped)"
+        )
+
     else:
         candidates = reaction_candidates(rt)
 
-        # Gate 2: nothing new to react to -> skip the LLM entirely.
+        # Gate 2: nothing to react to -> skip the LLM entirely.
         if not candidates:
             rt.decision, reason = "1", "nothing new observed (LLM skipped)"
         else:
             with timed(f"{rt.tag} continue_plan_or_react (LLM)"):
                 raw = planner.continue_plan_or_react(
-                    rt.agent, rt.status, rt.chunk, rt.observations, world
+                    rt.agent, rt.status, rt.chunk, candidates, world
                 )
-            rt.decision = parse_decision(raw)
-            reason = f"LLM said {raw.strip()!r} after {len(candidates)} new obs"
+            rt.decision, rt.reaction = parse_decision(raw)
+            reason = f"LLM said {raw.strip()!r} after {len(candidates)} obs"
 
     print(f"[{rt.tag}] DECISION: {rt.decision} ({reason})")
 
+def parse_decision(raw):
+    m = re.search(r"DECISION:\s*([12])", raw)
+    decision = m.group(1) if m else "1"
+    m = re.search(r"REACTION:\s*(.+)", raw)
+    reaction = m.group(1).strip().strip('."') if m else ""
+    if reaction.lower() in ("", "none"):
+        decision = "1"          # "react" with nothing to do is just continue
+    return decision, reaction
+
+def resolve_conversations(runtimes, step, current_time, world):
+    """If a reaction targets an agent in the same room, talk instead of
+    just relabelling the action. Agents are handled one at a time, so the
+    second agent responds to the first instead of making their own greeting."""
+    by_id = {rt.agent["id"]: rt for rt in runtimes}
+    busy = set()
+
+    for rt in runtimes:
+        if rt.decision != "2" or rt.agent["id"] in busy:
+            continue
+
+        target_id = rt.planner.extract_target_agent(rt.reaction, rt.agent, world)
+        other = by_id.get(target_id)
+        if (other is None
+                or other.agent["id"] in busy
+                or other.agent["current_location"] != rt.agent["current_location"]):
+            continue                      # not a conversation; normal react() runs
+
+        print(f"[{rt.tag}] CONVERSATION with {other.tag}: {rt.reaction}")
+        with timed(f"{rt.tag}<->{other.tag} conversation (LLM per turn)"):
+            run_conversation(rt, other, current_time, rt.reaction)
+
+        busy.update({rt.agent["id"], other.agent["id"]})
+        for a, b in ((rt, other), (other, rt)):
+            settle_after_conversation(a, b, step, current_time, world)
+
+
+def settle_after_conversation(rt, partner, step, current_time, world):
+    """Hold both agents in place for one step. No generate_interactions call,
+    which saves roughly 11s per agent."""
+    rt.last_react_step = step             # starts the react cooldown
+    rt.override = {
+        "activity": f"{current_time}: Talk with {partner.agent['name']}",
+        "location": rt.agent["current_location"],
+        "start_time": current_time,
+        "duration": STEP_MINUTES,
+        "target_agent": partner.agent["id"],
+        "is_reaction": True,
+    }
+    rt.chunk = rt.last_chunk = rt.override
+    update_agent_state(rt.agent, rt.chunk, world)
+    rt.agent["interacting_with"] = None
+    rt.decision = "3"                     # tells act_phase to skip this agent
 
 # ---------------------------------------------------------------------------
 # PHASE 3: ACT
 # ---------------------------------------------------------------------------
 def apply_chunk(rt, world):
     """Move the agent to its chunk's action/location and update the world."""
-    update_agent_state(rt.agent, rt.chunk)
+    update_agent_state(rt.agent, rt.chunk, world)
 
     with timed(f"{rt.tag} generate_interactions (LLM x2 + summary)"):
         rt.agent, _ = generate_interactions(
-            rt.agent, world, rt.observations, rt.planner
+            rt.agent, world, rt.observations, rt.planner, chunk=rt.chunk
         )
 
     world["agents"][rt.agent["id"]] = rt.agent  # keep world in sync
@@ -277,40 +435,47 @@ def apply_chunk(rt, world):
     print(f"[{rt.tag}] INTERACTING:  {rt.agent['interacting_with']}")
 
 
-def act_phase(rt, current_time, world):
+def react(rt, step, current_time, world):
+    """React with a short interruption instead of regenerating the day."""
+    print(f"[{rt.tag}] ACT: reacting ({rt.reaction})")
+    rt.last_react_step = step
+    rt.override = rt.planner.make_reaction_chunk(
+        rt.agent, current_time, rt.reaction, world
+    )
+    rt.chunk = rt.override
+    print(f"[{rt.tag}] REACTION CHUNK: {rt.chunk}")
+    apply_chunk(rt, world)
+    return True
+
+
+def act_phase(rt, step, current_time, world):
+
+    if rt.decision == "3":
+        return
+
     if rt.decision == "1":
         if rt.chunk is None:
             print(f"[{rt.tag}] ACT: no chunk, state unchanged")
             return
 
         if SKIP_UNCHANGED_CHUNKS and rt.chunk == rt.last_chunk:
-            print(f"[{rt.tag}] ACT: same chunk as last step, skipping update")
+            if rt.chunk.get("target_agent"):
+                # cheap check: did the target move?
+                old = rt.agent["current_location"]
+                update_agent_state(rt.agent, rt.chunk, world)
+                if rt.agent["current_location"] != old:
+                    apply_chunk(rt, world)
+                else:
+                    print(f"[{rt.tag}] ACT: target still here, skipping update")
+            else:
+                print(f"[{rt.tag}] ACT: same chunk as last step, skipping update")
             return
 
         apply_chunk(rt, world)
 
     elif rt.decision == "2":
-        print(f"[{rt.tag}] ACT: reacting, regenerating plan from {current_time}")
-
-        with timed(f"{rt.tag} regenerate plan (LLM)"):
-            daily_plan = rt.regenerate_plan_fn(
-                rt.agent, current_time, rt.chunk, rt.observations, rt.status, world
-            )
-
-        new_minute_chunks = build_plan_hierarchy(rt, daily_plan) if daily_plan else []
-
-        if not new_minute_chunks:
-            # Don't wipe the working plan if the model's output didn't parse.
-            print(f"WARNING [{rt.tag}]: regenerated plan was empty/unparseable, "
-                  f"keeping the old plan. Raw plan items: {daily_plan}")
+        if not react(rt, step, current_time, world):
             return
-
-        rt.minute_chunks = new_minute_chunks
-        rt.chunk = rt.planner.get_current_minute_chunk(current_time, rt.minute_chunks)
-        print(f"[{rt.tag}] NEW CURRENT CHUNK: {rt.chunk}")
-
-        if rt.chunk is not None:
-            apply_chunk(rt, world)
 
     rt.last_chunk = rt.chunk
 
@@ -322,10 +487,11 @@ def main():
     world = load_world()
     runtimes = [make_runtime("adam", world), make_runtime("eve", world)]
 
-    # Initial plans (the old time.sleep(45) pauses are gone; add them back
-    # inside build_plan_hierarchy if you need to throttle the GPU).
+    print(f"PAPER_STRICT={PAPER_STRICT} | EAGER_DECOMPOSITION={EAGER_DECOMPOSITION} | "
+          f"REACT_COOLDOWN_STEPS={REACT_COOLDOWN_STEPS}")
+
     for rt in runtimes:
-        initial_planning(rt)
+        initial_planning(rt, world)
 
     current_time = START_TIME
 
@@ -341,10 +507,12 @@ def main():
                 perceive_phase(rt, world)
 
             for rt in runtimes:
-                decide_phase(rt, current_time, world)
+                decide_phase(rt, step, current_time, world)
+
+            resolve_conversations(runtimes, step, current_time, world)
 
             for rt in runtimes:
-                act_phase(rt, current_time, world)
+                act_phase(rt, step, current_time, world)
 
             # One disk write per step instead of one per action / retrieval.
             save_world(world)
