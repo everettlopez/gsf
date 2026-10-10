@@ -212,3 +212,13 @@ def test_malformed_actions_are_refused_not_raised(w):
         {"action": "create_task", "title": ["not", "a", "string"]},
     ])
     assert done == [] and len(refused) == 2
+
+
+def test_notes_are_visible_to_anyone_reading_the_board(w):
+    pb.create_task(w, "eve", "Build the home page", area="frontend", assign_to_self=True)
+    pb.add_note(w, "eve", "T-1", "Adam, which accessibility standard should we follow?")
+
+    line = pb.board_observations(w)[1]
+    assert line.endswith('The latest note on it, from Eve Smith, says: '
+                         '"Adam, which accessibility standard should we follow?"')
+    assert "latest note (Eve Smith)" in pb.board_text_for_prompt(w)

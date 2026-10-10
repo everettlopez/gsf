@@ -257,6 +257,14 @@ def add_note(world, agent_id, task_id, note):
 # ---------------------------------------------------------------------------
 # Perception
 # ---------------------------------------------------------------------------
+def latest_note(task):
+    """The most recent note on a task, or None."""
+    for entry in reversed(task["history"]):
+        if entry.get("event") == "note":
+            return entry
+    return None
+
+
 def describe_task(world, task):
     """One stable line per task. Exact wording matters: perceive.py only stores
     lines that changed since the last step."""
@@ -268,7 +276,14 @@ def describe_task(world, task):
     blockers = _unmet_dependencies(world, task) if task["status"] != "done" else []
     if blockers:
         line += f", waiting on {', '.join(blockers)}"
-    return line + "."
+    line += "."
+    note = latest_note(task)
+    if note:
+        # Notes are how agents ask each other things on the board, so the
+        # latest one is part of what anyone reading the board sees.
+        line += (f" The latest note on it, from {_agent_name(world, note['agent'])}, "
+                 f"says: \"{note['note']}\"")
+    return line
 
 
 def board_observations(world):
@@ -303,8 +318,12 @@ def board_text_for_prompt(world):
     for t in project["tasks"]:
         who = _agent_name(world, t["assignee"]) if t["assignee"] else "unassigned"
         deps = f" depends on {', '.join(t['depends_on'])};" if t["depends_on"] else ""
-        rows.append(f"- {t['id']} [{t['status']}] {t['title']} ({t['area']}, "
-                    f"{t['priority']}, {who});{deps} done when: {t['done_when'] or 'n/a'}")
+        row = (f"- {t['id']} [{t['status']}] {t['title']} ({t['area']}, "
+               f"{t['priority']}, {who});{deps} done when: {t['done_when'] or 'n/a'}")
+        note = latest_note(t)
+        if note:
+            row += f"\n    latest note ({_agent_name(world, note['agent'])}): {note['note']}"
+        rows.append(row)
     return "\n".join(rows)
 
 
