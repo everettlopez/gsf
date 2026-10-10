@@ -204,3 +204,11 @@ def test_working_at_the_board_adds_tasks_and_remembers_it(fake_llm, isolated_dat
         ("Set up the website API", "adam", "adam")
     assert stream.memories[-1].description.startswith(
         "Adam Beck added task T-1 'Set up the website API'")
+
+
+def test_malformed_actions_are_refused_not_raised(w):
+    done, refused = pb.apply_actions(w, adam(w), [
+        {"action": "claim_task", "task_id": 7},
+        {"action": "create_task", "title": ["not", "a", "string"]},
+    ])
+    assert done == [] and len(refused) == 2

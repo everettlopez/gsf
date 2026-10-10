@@ -68,10 +68,15 @@ ROOM_PURPOSES = {
                        "and the team's project board (checking, adding and updating tasks)",
 }
 
+# The workday. The first plan item is given to the model, as in the paper.
+DAY_START = "7:00 am"
+DAY_END = "5:00 pm"
+FIRST_PLAN_ITEM = f"clock in and start work at {DAY_START}"
+
 # The example line shown to the model in the initial-plan prompt.
 PLAN_EXAMPLES = {
-    "adam": "3. work on the website's backend API from 10:00 am to 1:00 pm",
-    "eve": "3. build the website's home page from 10:00 am to 1:00 pm",
+    "adam": "2. check the project board in the conference room from 8:00 am to 9:00 am",
+    "eve": "2. check the project board in the conference room from 8:00 am to 9:00 am",
 }
 
 
@@ -108,7 +113,11 @@ class Planner:
         return done, remaining
 
     def generate_initial_plan(self, agent):
-        """Day plan in broad strokes, continuing the agent's profile (paper 4.3)."""
+        """Day plan in broad strokes, continuing the agent's profile (paper 4.3).
+
+        Like the paper's prompt, the first item of the day is written in for the
+        model ("1) wake up ..."), so the plan always starts at DAY_START instead
+        of wherever the model decides the interesting part of the day begins."""
         name = agent["name"]
         prompt = f"""
         {AGENT_PROFILES[agent["id"]]}
@@ -116,15 +125,30 @@ class Planner:
         Today is Thursday.
 
         Here is {name}'s plan today in broad strokes:
+        1. {FIRST_PLAN_ITEM}
 
-        Continue the plan as a numbered list.
+        Continue the plan as a numbered list, starting at item 2. Cover the whole
+        workday until {name} clocks out at {DAY_END}, with no gaps.
 
-        Return the plan in broad-strokes time blocks.
+        Return the plan in broad-strokes time blocks, each written as
+        "<activity> from H:MM am to H:MM pm".
 
         Example:
         {PLAN_EXAMPLES[agent["id"]]}
         """
-        return self._parse_numbered(llm.generate(prompt))
+        return self.ensure_day_start(self._parse_numbered(llm.generate(prompt)))
+
+    def ensure_day_start(self, items):
+        """Put the first item back if the model didn't repeat it, and only if
+        nothing already covers the start of the day."""
+        if any(re.search(r"\bclock(?:ing|ed)? in\b", i, re.IGNORECASE) for i in items):
+            return items
+        day_start = self._parse_time(DAY_START)
+        starts = [self._parse_time(self.extract_start_time(i)) for i in items]
+        starts = [t for t in starts if t is not None]
+        if starts and min(starts) <= day_start:
+            return items
+        return [FIRST_PLAN_ITEM] + items
 
     def regenerate_plan(self, agent, current_time, reaction, done_chunks, old_remaining, end_of_day="5:00 pm"):
         name = agent["name"]
@@ -298,7 +322,7 @@ class Planner:
         # Matches:
         # "work on project from 6:00 pm to 8:00 pm"
         match = re.search(
-        r"from\s+(\d{1,2}:\d{2}\s*(?:am|pm))",
+        r"from\s*(\d{1,2}:\d{2}\s*(?:am|pm))",
         activity
         )
         if match:
@@ -319,7 +343,7 @@ class Planner:
         activity = activity.lower()
 
         match = re.search(
-            r"from\s+(\d{1,2}):(\d{2})\s*(am|pm)\s+to\s+(\d{1,2}):(\d{2})\s*(am|pm)",
+            r"from\s*(\d{1,2}):(\d{2})\s*(am|pm)\s*to\s*(\d{1,2}):(\d{2})\s*(am|pm)",
             activity
         )
 

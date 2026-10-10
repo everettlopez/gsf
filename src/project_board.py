@@ -385,6 +385,9 @@ def apply_actions(world, agent, actions, limit=MAX_ACTIONS_PER_VISIT):
             done.append(apply_action(world, agent, action))
         except BoardError as e:
             refused.append(f"{action.get('action')}: {e}")
+        except (TypeError, AttributeError, ValueError) as e:
+            # Malformed fields from the model (a number where a string belongs, ...)
+            refused.append(f"{action.get('action')}: malformed action ({e})")
     return done, refused
 
 
