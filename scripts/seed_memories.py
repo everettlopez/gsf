@@ -1,13 +1,17 @@
-from pathlib import Path
+"""
+Seed Adam's and Eve's memory streams with their starting memories.
+
+Usage (from the repo root; needs Ollama running for embeddings + importance):
+
+    python scripts/seed_memories.py
+"""
+
 import sys
-import time
+from pathlib import Path
 
-sys.path.append(
-    str(Path(__file__).resolve().parent.parent / "src")
-)
+sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
 
-from memory_stream import MemoryStream
-
+from memory_stream import MemoryStream  # noqa: E402
 
 adam_seed_memories = [
     "Adam Beck is a 24 year old male.",
@@ -49,24 +53,15 @@ eve_seed_memories = [
     "Eve Smith is building a feature with Adam Beck.",
 ]
 
-def addAdamSeedMemories() -> MemoryStream:
-    stream = MemoryStream("adam")
-
-    for memory in adam_seed_memories:
+def seed(agent_id, memories):
+    stream = MemoryStream(agent_id)
+    for memory in memories:
         stream.add_observation(memory)
-        print("SEED MEMORY ADDED")
-
+    stream.flush()
+    print(f"seeded {len(memories)} memories for {agent_id}")
     return stream
 
-def addEveSeedMemories() -> MemoryStream:
-    stream = MemoryStream("eve")
-
-    for memory in eve_seed_memories:
-        stream.add_observation(memory)
-        print("SEED MEMORY ADDED")
-
-    return stream
 
 if __name__ == "__main__":
-    addAdamSeedMemories()
-    addEveSeedMemories()
+    seed("adam", adam_seed_memories)
+    seed("eve", eve_seed_memories)

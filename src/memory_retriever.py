@@ -1,10 +1,11 @@
-from memory_stream import MemoryStream
 from datetime import datetime
 
 import numpy as np
-import ollama
-import re
+
 import clock
+import llm
+from memory_stream import MemoryStream
+
 
 class MemoryRetriever:
     def __init__(self, agent_name: str, memory_stream=None):
@@ -42,15 +43,20 @@ class MemoryRetriever:
         if cached is not None:
             return cached
 
-        response = ollama.embed(model="nomic-embed-text", input=query)
-        embedding = np.array(response["embeddings"][0], dtype=float)
+        embedding = np.array(llm.embed(query), dtype=float)
 
         if len(self._query_cache) >= 256:
             self._query_cache.clear()
         self._query_cache[query] = embedding
         return embedding
 
-    def retrieve(self, query, n=15):
+    def retrieve(self, query, n=15, touch=True):
+        """Top-n memories by recency + importance + relevance (paper sec. 4.1).
+
+        `touch=True` refreshes last_accessed_at on the memories returned, which
+        is what keeps recently-used memories "recent". Pass touch=False for
+        background lookups (e.g. the agent summary) so they don't count as use.
+        """
         memories = self.memory_stream.get_memory_stream()
         if not memories:
             return []
@@ -89,7 +95,8 @@ class MemoryRetriever:
         now_iso = now.isoformat()
         results = []
         for i in top:
-            memories[i].last_accessed_at = now_iso
+            if touch:
+                memories[i].last_accessed_at = now_iso
             results.append({
                 "memory": memories[i],
                 "relevance": float(relevance[i]),
@@ -104,21 +111,9 @@ class MemoryRetriever:
                 "retrieval_score": float(total[i]),
             })
 
-        self.memory_stream.mark_dirty()
+        if touch:
+            self.memory_stream.mark_dirty()
         return results
-
-    def calculate_recency_score(self, memory):
-        last_accessed = datetime.fromisoformat(
-            memory.last_accessed_at
-        )
-
-        now = clock.now()
-
-        hours_since_access = (
-            now - last_accessed
-        ).total_seconds() / 3600
-
-        return self.recency_decay ** hours_since_access
 
     def normalize_scores(self, scores):
         minimum = scores.min()

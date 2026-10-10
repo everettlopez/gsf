@@ -1,12 +1,14 @@
-from memory_stream import MemoryStream
-from memory_retriever import MemoryRetriever
-from memory import Memory
 from datetime import datetime, timedelta
-
-import ollama 
-import re
 import json
+import re
 
+import llm
+import log
+from llm import CTX
+from memory_retriever import MemoryRetriever
+from memory_stream import MemoryStream
+
+TIME_FORMAT = "%I:%M %p"
 
 AGENT_PROFILES = {
     "adam": """Name: Adam Beck (age: 24)
@@ -65,7 +67,12 @@ ROOM_PURPOSES = {
     "conference_room": "meetings, group discussion, collaborating, presentations",
 }
 
-CTX = {"num_ctx": 8192}
+# The example line shown to the model in the initial-plan prompt.
+PLAN_EXAMPLES = {
+    "adam": "3. work on memory-system development from 10:00 am to 1:00 pm",
+    "eve": "3. work on navigation menu development from 10:00 am to 1:00 pm",
+}
+
 
 class Planner:
     def __init__(self, agent, memory_stream=None, memory_retriever=None):
@@ -99,135 +106,24 @@ class Planner:
                 remaining.append(c)
         return done, remaining
 
-    def generate_initial_plan_adam(self):
-
+    def generate_initial_plan(self, agent):
+        """Day plan in broad strokes, continuing the agent's profile (paper 4.3)."""
+        name = agent["name"]
         prompt = f"""
-        Name: Adam Beck (age: 24)
-
-        Innate traits: collaborative, technical, growth-oriented
-
-        Adam Beck is a backend software engineer who primarily develops software using Python and TypeScript.
-
-        He enjoys building reliable and scalable software systems and values clean code.
-
-        Adam Beck is currently working on a memory-system project. He has recently been focused on memory retrieval, memory-stream architecture, testing, and implementation work.
-
-        Adam Beck works closely with other engineers and enjoys collaborating on technical challenges.
-
-        Adam Beck hopes to become a software architect. He wants to build software that positively impacts many people.
-
-        Adam Beck is making good progress on the memory-system project and wants to continue improving it in the coming days.
-
-        On Wednesday, Adam:
-        1) clock in and start work at 7:00 am,
-        2) attended engineering meetings from 8:00 am to 9:00 am,
-        3) worked on memory-system development from 9:00 am to 12:00 pm,
-        4) took a lunch break in the break room from 12:00 pm to 1:00 pm,
-        5) collaborated with coworkers on technical challenges from 1:00 pm to 2:00 pm,
-        6) reviewed project updates, documentation, and testing progress from 2:00 pm to 5:00 pm,
-        7) clock out and finished work at 5:00 pm.
+        {AGENT_PROFILES[agent["id"]]}
 
         Today is Thursday.
 
-        Here is Adam's plan today in broad strokes:
+        Here is {name}'s plan today in broad strokes:
 
         Continue the plan as a numbered list.
 
         Return the plan in broad-strokes time blocks.
 
         Example:
-        3. work on memory-system development from 10:00 am to 1:00 pm
+        {PLAN_EXAMPLES[agent["id"]]}
         """
-
-        response = ollama.generate(
-            model="qwen3",
-            prompt=prompt,
-            think=False
-        )
-
-        plan_text = response["response"]
-
-        plan_items = []
-
-        for line in plan_text.splitlines():
-            line = line.strip()
-
-            match = re.match(r"^\d+\.\s*(.+)$", line)
-
-            if not match:
-                continue
-
-            item = match.group(1)
-
-            item = item.replace("**", "").strip()
-
-            plan_items.append(item)
-        return plan_items
-
-    def generate_initial_plan_eve(self):
-    
-        prompt = f"""
-        Name: Eve Smith (age: 21)
-
-        Innate traits: shy, detail-oriented, thoughtful
-
-        Eve Smith is a frontend software engineer who primarily develops software using TypeScript and React.
-
-        She enjoys building polished and accessible user interfaces and values clean code.
-
-        Eve Smith is currently working on a navigation menu redesign project. She has recently been focused on UI components, responsive layouts, accessibility, and implementation work.
-
-        Eve Smith works with designers and other engineers, and prefers collaborating one-on-one or in writing on technical challenges.
-
-        Eve Smith hopes to become a lead frontend engineer. She wants to build software that feels simple and welcoming for many people to use.
-
-        Eve Smith is making good progress on the navigation menu redesign and wants to continue improving it in the coming days.
-
-        On Wednesday, Eve:
-        1) clock in and start work at 7:00 am,
-        2) attended engineering meetings from 8:00 am to 9:00 am,
-        3) worked on navigation menu development from 9:00 am to 12:00 pm,
-        4) took a lunch break in the break room from 12:00 pm to 1:00 pm,
-        5) collaborated with coworkers on technical challenges from 1:00 pm to 2:00 pm,
-        6) reviewed project updates, documentation, and testing progress from 2:00 pm to 5:00 pm,
-        7) clock out and finished work at 5:00 pm.
-
-        Today is Thursday.
-
-        Here is Eve's plan today in broad strokes:
-
-        Continue the plan as a numbered list.
-
-        Return the plan in broad-strokes time blocks.
-
-        Example:
-        3. work on navigation menu development from 10:00 am to 1:00 pm
-        """
-
-        response = ollama.generate(
-            model="qwen3",
-            prompt=prompt,
-            think=False
-        )
-
-        plan_text = response["response"]
-
-        plan_items = []
-
-        for line in plan_text.splitlines():
-            line = line.strip()
-
-            match = re.match(r"^\d+\.\s*(.+)$", line)
-
-            if not match:
-                continue
-
-            item = match.group(1)
-
-            item = item.replace("**", "").strip()
-
-            plan_items.append(item)
-        return plan_items
+        return self._parse_numbered(llm.generate(prompt))
 
     def regenerate_plan(self, agent, current_time, reaction, done_chunks, old_remaining, end_of_day="5:00 pm"):
         name = agent["name"]
@@ -254,9 +150,9 @@ class Planner:
         Example:
         1. work on memory-system development from {current_time} to 1:00 pm"""
 
-        response = ollama.generate(model="qwen3", prompt=prompt, think=False, options={**CTX, "num_predict": 600, "temperature": 0.3})
+        response = llm.generate(prompt, options={**CTX, "num_predict": 600, "temperature": 0.3})
 
-        return self._parse_numbered(response["response"])
+        return self._parse_numbered(response)
 
     def create_chunks(self, daily_plan, agent, world=None):
         chunks = []
@@ -327,16 +223,16 @@ class Planner:
         }
 
         try:
-            response = ollama.generate(
-                model="qwen3", prompt=prompt, think=False, format=schema,
+            response = llm.generate(
+                prompt, format=schema,
                 options={**CTX, "num_predict": 300, "temperature": 0},
             )
-            result = json.loads(response["response"])
-            print(f"    [choose_location] {result['location']} ({result['reason']})")
+            result = json.loads(response)
+            log.debug(f"choose_location: {result['location']} ({result['reason']})")
             if result["location"] in valid:
                 return result["location"]
         except Exception as e:
-            print(f"    [choose_location] LLM failed ({e}), using keyword fallback")
+            log.warn(f"choose_location LLM failed ({e}), using keyword fallback")
 
         return suggested
 
@@ -467,11 +363,25 @@ class Planner:
         
         plan = self.memory_stream.add_plan(description)
 
-        print(plan.description)
+        log.debug(f"plan saved:\n{plan.description}")
 
         return plan
 
+    def _chunk_from_activity(self, activity, agent, parent, duration=None):
+        """Build a plan chunk from one parsed line, inheriting the parent's target."""
+        activity = activity.strip().rstrip(".")
+        chunk = {
+            "activity": activity,
+            "location": self.resolve_location(activity, agent),
+            "start_time": self.extract_start_time(activity),
+            "target_agent": parent.get("target_agent"),
+        }
+        if duration is not None:
+            chunk["duration"] = duration
+        return chunk
+
     def decompose_chunks(self, chunks, agent):
+        """Broad blocks -> one chunk per hour (paper: hour-long chunks)."""
         decomposed_chunks = []
 
         for chunk in chunks:
@@ -513,43 +423,18 @@ class Planner:
             Return only a numbered list.
             """
 
-            response = ollama.generate(
-                model="qwen3",
-                prompt=prompt,
-                think=False
-            )
-
-            for line in response["response"].splitlines():
-                line = line.strip()
-                
-                match = re.match(
-                r"^\d+\.\s*(.+)$",
-                line
+            for activity in self._parse_numbered(llm.generate(prompt)):
+                decomposed_chunks.append(
+                    self._chunk_from_activity(activity, agent, chunk, duration=60)
                 )
-                
-                if not match:
-                    continue
-                
-                activity = match.group(1).strip()
 
-                activity = activity.strip().rstrip(".")
-                
-                decomposed_chunks.append({
-                "activity": activity,
-                "location": self.resolve_location(activity, agent),
-                "start_time": self.extract_start_time(activity),
-                "duration": 60,
-                "target_agent": chunk.get("target_agent"),
-                })
-                
         return decomposed_chunks
 
     def decompose_hour_chunks(self, hour_chunks, agent):
-
+        """Hour chunks -> 5-15 minute actions (paper: finer-grained actions)."""
         minute_chunks = []
 
         for chunk in hour_chunks:
-
             prompt = f"""
             The following activity is one entry from an hourly plan.
 
@@ -578,121 +463,39 @@ class Planner:
             5. 4:50 pm: Organize notes and clean the workspace.
             """
 
-            response = ollama.generate(
-                model="qwen3",
-                prompt=prompt,
-                think=False
-            )
-
-            actions = []
-
-            for line in response["response"].splitlines():
-
-                line = line.strip()
-
-                match = re.match(
-                    r"^\d+\.\s*(.+)$",
-                    line
-                )
-
-                if not match:
-                    continue
-
-                activity = match.group(1).strip()
-
-                activity = activity.strip().rstrip(".")
-
-                actions.append({
-                    "activity": activity,
-                    "location": self.resolve_location(activity, agent),
-                    "start_time": self.extract_start_time(activity),
-                    "target_agent": chunk.get("target_agent"),
-                })
-
-            #
-            # Calculate durations from timestamps
-            #
-            for i, action in enumerate(actions):
-
-                if not action["start_time"]:
-                    action["duration"] = 10
-                    continue
-
-                if i < len(actions) - 1:
-
-                    next_start = actions[i + 1]["start_time"]
-
-                    try:
-                        start_dt = datetime.strptime(
-                            action["start_time"].upper(),
-                            "%I:%M %p"
-                        )
-
-                        next_dt = datetime.strptime(
-                            next_start.upper(),
-                            "%I:%M %p"
-                        )
-
-                        action["duration"] = int(
-                            (next_dt - start_dt).total_seconds() / 60
-                        )
-
-                    except Exception:
-                        action["duration"] = 10
-
-                else:
-                    #
-                    # Last action fills remaining hour
-                    #
-                    try:
-
-                        start_dt = datetime.strptime(
-                            action["start_time"].upper(),
-                            "%I:%M %p"
-                        )
-
-                        hour_start = datetime.strptime(
-                            chunk["start_time"].upper(),
-                            "%I:%M %p"
-                        )
-
-                        elapsed = int(
-                            (start_dt - hour_start).total_seconds() / 60
-                        )
-
-                        action["duration"] = max(
-                            5,
-                            60 - elapsed
-                        )
-
-                    except Exception:
-                        action["duration"] = 10
-
+            actions = [
+                self._chunk_from_activity(activity, agent, chunk)
+                for activity in self._parse_numbered(llm.generate(prompt))
+            ]
+            self._fill_durations(actions, hour_start=chunk.get("start_time"))
             minute_chunks.extend(actions)
 
         return minute_chunks
 
-    def minutes_between(self, start_time, end_time):
-        fmt = "%I:%M %p"
-        
-        start = datetime.strptime(
-        start_time.upper(),
-        fmt
-        )
-        
-        end = datetime.strptime(
-        end_time.upper(),
-        fmt
-        )
-        
-        return int(
-        (end - start).total_seconds() / 60
-        )
+    def _fill_durations(self, actions, hour_start, default=10):
+        """Each action lasts until the next one starts; the last one fills the
+        rest of the hour. Anything unparseable or non-positive gets `default`."""
+        for i, action in enumerate(actions):
+            start = self._parse_time(action["start_time"])
+            minutes = default
+
+            if start is not None:
+                if i < len(actions) - 1:
+                    following = self._parse_time(actions[i + 1]["start_time"])
+                    if following is not None:
+                        minutes = int((following - start).total_seconds() / 60)
+                else:
+                    anchor = self._parse_time(hour_start)
+                    if anchor is not None:
+                        elapsed = int((start - anchor).total_seconds() / 60)
+                        minutes = max(5, 60 - elapsed)
+
+            action["duration"] = minutes if minutes > 0 else default
 
     def get_current_status(self, agent, current_time):
         return (
             f"It is {current_time}. "
-            f"{agent["name"]} is currently at {agent["current_location"]} and is {agent["current_action"]}."
+            f"{agent['name']} is currently at {agent['current_location']} and is {agent['current_action']}."
         )
 
     def _parse_time(self, value):
@@ -759,7 +562,7 @@ class Planner:
 
         for entity_name, entity_status in entities:
             queries = [
-                f"What is {agent["name"]}'s relationship with {entity_name}",
+                f"What is {agent['name']}'s relationship with {entity_name}",
                 f"{entity_name} is {entity_status}"
             ]
 
@@ -797,26 +600,33 @@ class Planner:
         REACTION: <one short sentence, or "none">
         """
 
-        response = ollama.generate(
-            model="qwen3",
-            prompt=prompt,
-            think=False,
-            options={**CTX, "num_predict": 80, "temperature": 0}
+        return llm.generate(
+            prompt, options={**CTX, "num_predict": 80, "temperature": 0}
         )
 
-        return response["response"]
+    def invalidate_summary(self):
+        """Forget cached agent summaries (call after reflection adds new insights)."""
+        self._summary_cache.clear()
 
     def generate_agent_summary(self, agent):
+        """Paper sec. 4.1 agent summary: identity, occupation, recent progress.
+        Cached per agent until invalidate_summary() is called."""
+        cached = self._summary_cache.get(agent["id"])
+        if cached is not None:
+            return cached
+
+        # touch=False: building a summary isn't the agent *using* those memories,
+        # so it shouldn't refresh their recency.
         core_memories = self.memory_retriever.retrieve(
-            f"{agent['name']}'s core characteristics"
+            f"{agent['name']}'s core characteristics", touch=False
         )
 
         occupation_memories = self.memory_retriever.retrieve(
-            f"{agent['name']}'s current daily occupation"
+            f"{agent['name']}'s current daily occupation", touch=False
         )
 
         progress_memories = self.memory_retriever.retrieve(
-            f"{agent['name']}'s feeling about recent progress in life"
+            f"{agent['name']}'s feeling about recent progress in life", touch=False
         )
 
         all_memories = (
@@ -849,13 +659,9 @@ class Planner:
     Return the summary as a paragraph with no formatting.
     """
 
-        response = ollama.generate(
-            model="qwen3",
-            prompt=prompt,
-            think=False
-        )
-
-        return response["response"]
+        summary = llm.generate(prompt).strip()
+        self._summary_cache[agent["id"]] = summary
+        return summary
 
     def extract_target_agent(self, activity, agent, world):
         """Return the id of another agent named in the activity, else None."""
@@ -928,9 +734,9 @@ class Planner:
         }
         out = {"meeting": None, "commitments": {}}
         try:
-            r = ollama.generate(model="qwen3", prompt=prompt, think=False, format=schema,
-                                options={**CTX, "num_predict": 300, "temperature": 0})
-            data = json.loads(r["response"])
+            raw = llm.generate(prompt, format=schema,
+                               options={**CTX, "num_predict": 300, "temperature": 0})
+            data = json.loads(raw)
             if data["meeting_agreed"] and data["location"] in valid:
                 out["meeting"] = {
                     "location": data["location"],
@@ -942,5 +748,5 @@ class Planner:
                 if text:
                     out["commitments"][c["person"]] = text
         except Exception as e:
-            print(f"    [extract_outcomes] failed ({e})")
+            log.warn(f"extract_outcomes failed ({e})")
         return out

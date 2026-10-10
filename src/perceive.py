@@ -1,6 +1,6 @@
-from memory_stream import MemoryStream
+"""perceive.py - turn the world state around an agent into observation strings."""
 
-# perceive.py
+
 def build_observations(agent, world):
     room = agent["current_location"]
     room_data = world["locations"][room]

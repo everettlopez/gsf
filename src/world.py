@@ -1,16 +1,22 @@
 import json
 import re
+from pathlib import Path
+
 from lemminflect import getInflection
-import ollama
+
+import llm
+import log
+
+WORLD_PATH = Path(__file__).resolve().parent.parent / "data" / "world" / "world.json"
 
 
 def load_world():
-    with open("data/world/world.json", "r") as f:
+    with open(WORLD_PATH, "r") as f:
         return json.load(f)
 
 
 def save_world(world):
-    with open("data/world/world.json", "w") as f:
+    with open(WORLD_PATH, "w") as f:
         json.dump(world, f, indent=2)
 
 
@@ -26,8 +32,6 @@ def save_agent(agent):
 
 
 def update_agent_state(agent, current_chunk, world, location=None):
-    print("Updating Agent Info")
-
     activity = current_chunk["activity"]
     if ": " in activity:
         activity = activity.split(": ", 1)[1]
@@ -45,7 +49,7 @@ def update_agent_state(agent, current_chunk, world, location=None):
         new_loc = agent["current_location"]
 
     if new_loc not in world["locations"]:
-        print(f"WARNING: unknown location {new_loc!r}, staying put")
+        log.warn(f"unknown location {new_loc!r} for {agent['name']}, staying put")
         new_loc = agent["current_location"]
 
     if new_loc != agent["current_location"]:
@@ -94,10 +98,6 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
     room = agent["current_location"]
     room_data = world["locations"][room]
     room_objects = room_data["objects"]
-
-    print("ROOM: ", room)
-    print("ROOM OBJECTS: ", room_objects)
-    print("CURRENT ACTION: ", agent["current_action"])
 
     talking_to_agent = bool(chunk and chunk.get("target_agent"))
 
@@ -151,13 +151,7 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
     }}
     """
 
-        response = ollama.generate(
-            model="qwen3",
-            prompt=prompt,
-            think=False,
-            format="json",
-        )
-        result = _parse_json(response["response"])
+        result = _parse_json(llm.generate(prompt, format="json"))
 
         choice = result.get("interacting_with")
         agent["interacting_with"] = choice if choice in room_objects else None
@@ -168,7 +162,7 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
                 room_objects[obj]["state"] = change["new_state"]
 
     refresh_room_states(world)
-    print("NEW ROOM STATE: ", room_data["state"])
+    log.debug(f"{room}: {room_data['state']}; {agent['name']} using {agent['interacting_with']}")
 
     return agent, world
 
