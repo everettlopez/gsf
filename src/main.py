@@ -36,6 +36,7 @@ Assumes these are in place:
 
 import re
 import time
+import clock
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -146,6 +147,7 @@ class AgentRuntime:
     last_chunk: Optional[dict] = None
     last_react_step: int = -10_000
     override: Optional[dict] = None
+    queued: Optional[dict] = None
 
     # Per-step scratch space (filled in by the phases below)
     observations: list = field(default_factory=list)
@@ -257,12 +259,14 @@ def get_chunk_lazy(rt, current_time):
     """
     p = rt.planner
 
-    if rt.override:
+    while rt.override:
         now = p._parse_time(current_time)
         start = p._parse_time(rt.override["start_time"])
-        if start and now and start <= now < start + timedelta(minutes=rt.override["duration"]):
+        end = start + timedelta(minutes=rt.override["duration"])
+        if start <= now < end:
             return rt.override
-        rt.override = None          # expired, fall back to the real plan
+        # Expired: promote the queued chunk (or clear). Loop re-checks it.
+        rt.override, rt.queued = rt.queued, None
 
 
     broad = p.get_current_minute_chunk(current_time, rt.broad_chunks)
@@ -327,7 +331,7 @@ def decide_phase(rt, step, current_time, world):
 
     print(f"[{rt.tag}] STATUS: {rt.status}")
     if rt.chunk:
-        print(f"[{rt.tag}] PLANNED: {rt.chunk['activity']} at {rt.chunk['location']}")
+        print(f"[{rt.tag}] PLANNED: {rt.chunk['activity']} (default loc: {rt.chunk['location']})")
     else:
         print(f"[{rt.tag}] PLANNED: (no chunk covers {current_time})")
 
@@ -392,17 +396,52 @@ def resolve_conversations(runtimes, step, current_time, world):
 
         print(f"[{rt.tag}] CONVERSATION with {other.tag}: {rt.reaction}")
         with timed(f"{rt.tag}<->{other.tag} conversation (LLM per turn)"):
-            run_conversation(rt, other, current_time, rt.reaction)
+            history = run_conversation(rt, other, current_time, rt.reaction)
+
+        # One call: shared meeting (if any) + each agent's own commitment
+        outcomes = {"meeting": None, "commitments": {}}
+        if history:
+            transcript = "\n".join(f"{who}: {text}" for who, text in history)
+            with timed(f"{rt.tag}<->{other.tag} extract outcomes (LLM)"):
+                outcomes = rt.planner.extract_outcomes(
+                    transcript, rt.agent, other.agent, world
+                )
+            print(f"[{rt.tag}] OUTCOMES: {outcomes}")
 
         busy.update({rt.agent["id"], other.agent["id"]})
+
         for a, b in ((rt, other), (other, rt)):
-            settle_after_conversation(a, b, step, current_time, world)
+            commitment = outcomes["commitments"].get(a.agent["name"])
+            if commitment:
+                replan_after_conversation(a, commitment, current_time, world)
+            settle_after_conversation(a, b, step, current_time, world, outcomes["meeting"])
 
 
-def settle_after_conversation(rt, partner, step, current_time, world):
-    """Hold both agents in place for one step. No generate_interactions call,
-    which saves roughly 11s per agent."""
-    rt.last_react_step = step             # starts the react cooldown
+def replan_after_conversation(rt, commitment, current_time, world):
+    """Rewrite the rest of the day around a commitment (paper: replan after dialogue)."""
+    start = step_time(current_time)        # the talk override covers the current step
+    done, remaining = rt.planner.split_plan(rt.broad_chunks, start)
+
+    with timed(f"{rt.tag} replan after conversation (LLM)"):
+        items = rt.planner.regenerate_plan(
+            rt.agent, start, f"Committed in conversation: {commitment}", done, remaining
+        )
+    new_chunks = rt.planner.create_chunks(items, rt.agent, world)
+
+    if not new_chunks or any(c["start_time"] is None for c in new_chunks):
+        print(f"[{rt.tag}] replan unusable, keeping old plan")
+        return
+
+    rt.broad_chunks = done + new_chunks
+    rt.hour_cache, rt.minute_cache = {}, {}     # old decompositions are stale
+    rt.planner.create_plan(new_chunks)
+    rt.stream.add_observations([f"{rt.agent['name']} committed to: {commitment}"])
+    print(f"[{rt.tag}] REPLANNED around: {commitment}")
+
+    
+def settle_after_conversation(rt, partner, step, current_time, world, agreement=None):
+    """Hold both agents in place for one step, then send them to any agreed meeting."""
+    rt.last_react_step = step
     rt.override = {
         "activity": f"{current_time}: Talk with {partner.agent['name']}",
         "location": rt.agent["current_location"],
@@ -414,18 +453,46 @@ def settle_after_conversation(rt, partner, step, current_time, world):
     rt.chunk = rt.last_chunk = rt.override
     update_agent_state(rt.agent, rt.chunk, world)
     rt.agent["interacting_with"] = None
-    rt.decision = "3"                     # tells act_phase to skip this agent
+    rt.decision = "3"
+
+    if agreement:
+        start = step_time(current_time)
+        rt.queued = {
+            "activity": f"{start}: {agreement['activity']}",
+            "location": agreement["location"],
+            "start_time": start,
+            "duration": agreement["minutes"],
+            "target_agent": None,        # location is pinned, don't chase the partner
+            "is_reaction": True,
+            "pinned": True,
+        }
 
 # ---------------------------------------------------------------------------
 # PHASE 3: ACT
 # ---------------------------------------------------------------------------
 def apply_chunk(rt, world):
     """Move the agent to its chunk's action/location and update the world."""
-    update_agent_state(rt.agent, rt.chunk, world)
+    chunk = rt.chunk
+
+    if chunk.get("pinned"):
+        # Agreed meeting place: no LLM, no second-guessing
+        loc = chunk["location"]
+    elif chunk.get("target_agent"):
+        # update_agent_state follows the target agent's current room
+        loc = None
+    else:
+        with timed(f"{rt.tag} choose_location (LLM)"):
+            loc = rt.planner.choose_location(
+                chunk["activity"], rt.agent, world,
+                observations=rt.observations,
+            )
+        print(f"[{rt.tag}] CHOSE LOCATION: {loc}")
+
+    update_agent_state(rt.agent, chunk, world, location=loc)
 
     with timed(f"{rt.tag} generate_interactions (LLM x2 + summary)"):
         rt.agent, _ = generate_interactions(
-            rt.agent, world, rt.observations, rt.planner, chunk=rt.chunk
+            rt.agent, world, rt.observations, rt.planner, chunk=chunk
         )
 
     world["agents"][rt.agent["id"]] = rt.agent  # keep world in sync
@@ -490,14 +557,16 @@ def main():
     print(f"PAPER_STRICT={PAPER_STRICT} | EAGER_DECOMPOSITION={EAGER_DECOMPOSITION} | "
           f"REACT_COOLDOWN_STEPS={REACT_COOLDOWN_STEPS}")
 
+    current_time = START_TIME
+    clock.set_time(current_time)
+
     for rt in runtimes:
         initial_planning(rt, world)
-
-    current_time = START_TIME
 
     try:
         for step in range(1, NUM_STEPS + 1):
             step_start = time.time()
+            clock.set_time(current_time)
             print("\n" + "=" * 50)
             print(f"STEP {step}/{NUM_STEPS} | TIME: {current_time}")
 

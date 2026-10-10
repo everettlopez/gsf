@@ -4,6 +4,7 @@ from datetime import datetime
 import numpy as np
 import ollama
 import re
+import clock
 
 class MemoryRetriever:
     def __init__(self, agent_name: str, memory_stream=None):
@@ -63,7 +64,7 @@ class MemoryRetriever:
         else:
             relevance = matrix @ (query_vec / query_norm)
 
-        now = datetime.now()
+        now = clock.now()
         hours = np.array([
             (now - datetime.fromisoformat(m.last_accessed_at)).total_seconds() / 3600
             for m in memories
@@ -111,7 +112,7 @@ class MemoryRetriever:
             memory.last_accessed_at
         )
 
-        now = datetime.now()
+        now = clock.now()
 
         hours_since_access = (
             now - last_accessed

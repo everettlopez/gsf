@@ -49,7 +49,16 @@ eve_seed_memories = [
     "Eve Smith is building a feature with Adam Beck.",
 ]
 
-def addSeedMemories() -> MemoryStream:
+def addAdamSeedMemories() -> MemoryStream:
+    stream = MemoryStream("adam")
+
+    for memory in adam_seed_memories:
+        stream.add_observation(memory)
+        print("SEED MEMORY ADDED")
+
+    return stream
+
+def addEveSeedMemories() -> MemoryStream:
     stream = MemoryStream("eve")
 
     for memory in eve_seed_memories:
@@ -59,4 +68,5 @@ def addSeedMemories() -> MemoryStream:
     return stream
 
 if __name__ == "__main__":
-    addSeedMemories()
+    addAdamSeedMemories()
+    addEveSeedMemories()

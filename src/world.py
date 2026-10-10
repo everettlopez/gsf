@@ -3,8 +3,6 @@ import re
 from lemminflect import getInflection
 import ollama
 
-from plan import Planner
-
 
 def load_world():
     with open("data/world/world.json", "r") as f:
@@ -27,14 +25,7 @@ def save_agent(agent):
     save_world(world)
 
 
-def update_agent_state(agent, current_chunk, world):
-    """
-    Move the agent to its chunk's action/location.
-
-    - If the chunk targets another agent, go to wherever that agent is NOW.
-    - Clear interacting_with when the room changes, so stale objects
-      (e.g. the time_clock) don't follow the agent around.
-    """
+def update_agent_state(agent, current_chunk, world, location=None):
     print("Updating Agent Info")
 
     activity = current_chunk["activity"]
@@ -43,15 +34,18 @@ def update_agent_state(agent, current_chunk, world):
     activity = activity.strip().rstrip(".")
 
     target = current_chunk.get("target_agent")
-    if target and target in world["agents"]:
-        new_loc = world["agents"][target]["current_location"]
-    else:
-        new_loc = current_chunk["location"].lower().replace(" ", "_")
 
-    # Guard against a location the world doesn't have.
+    if location:                                   # resolver output (includes agreements)
+        new_loc = location
+    elif target and target in world["agents"]:     # "go find Eve"
+        new_loc = world["agents"][target]["current_location"]
+    elif current_chunk.get("location"):            # legacy chunk location
+        new_loc = current_chunk["location"].lower().replace(" ", "_")
+    else:
+        new_loc = agent["current_location"]
+
     if new_loc not in world["locations"]:
-        print(f"WARNING: unknown location {new_loc!r}, staying in "
-              f"{agent['current_location']!r}")
+        print(f"WARNING: unknown location {new_loc!r}, staying put")
         new_loc = agent["current_location"]
 
     if new_loc != agent["current_location"]:
@@ -59,6 +53,8 @@ def update_agent_state(agent, current_chunk, world):
 
     agent["current_location"] = new_loc
     agent["current_action"] = action_to_present(activity)
+
+    world["agents"][agent["id"]] = agent           # keep world in sync (see #2)
     return agent
 
 

@@ -34,13 +34,13 @@
       }
     },
     "office_1": {
-      "state": "occupied by Adam Beck",
+      "state": "empty",
       "objects": {
         "desk": {
           "state": "organized"
         },
         "computer": {
-          "state": "off"
+          "state": "on"
         },
         "chair": {
           "state": "available"
@@ -51,13 +51,13 @@
       }
     },
     "office_2": {
-      "state": "occupied by Eve Smith",
+      "state": "empty",
       "objects": {
         "desk": {
           "state": "organized"
         },
         "computer": {
-          "state": "off"
+          "state": "on"
         },
         "chair": {
           "state": "available"
@@ -73,17 +73,17 @@
       "id": "adam",
       "name": "Adam Beck",
       "office": "office_1",
-      "current_location": "office_1",
-      "current_action": "setting up the workspace and organize tools",
-      "interacting_with": "desk"
+      "current_location": "reception",
+      "current_action": "idle",
+      "interacting_with": "computer"
     },
     "eve": {
       "id": "eve",
       "name": "Eve Smith",
       "office": "office_2",
-      "current_location": "office_2",
-      "current_action": "setting up the workspace and organize necessary tools",
-      "interacting_with": null
+      "current_location": "reception",
+      "current_action": "idle",
+      "interacting_with": "computer"
     }
   }
 }

@@ -18,6 +18,8 @@ import re
 
 import ollama
 
+from plan import CTX
+
 MAX_TURNS = 6          # total utterances, both speakers combined
 MAX_LINE_TOKENS = 80
 
@@ -106,7 +108,7 @@ def _generate_line(speaker, listener, current_time, status, history, intent):
         model="qwen3",
         prompt=prompt,
         think=False,
-        options={"num_predict": MAX_LINE_TOKENS, "temperature": 0.7},
+        options={**CTX, "num_predict": MAX_LINE_TOKENS, "temperature": 0.7},
     )["response"]
 
     if history and raw.strip().upper().startswith("END"):
@@ -134,12 +136,14 @@ def run_conversation(initiator, partner, current_time, reaction):
             print(f"[{speaker.tag}] ENDS CONVERSATION")
             break
 
-        # Same line twice in a row = the models are echoing each other.
-        if history and line.lower() == history[-1][1].lower():
-            print(f"[{speaker.tag}] repeated the last line, ending")
+        sname, lname = speaker.agent["name"], listener.agent["name"]
+
+        # Reject a line this speaker already said earlier (echo loops)
+        said = {t.lower() for who, t in history if who == sname}
+        if line.lower() in said:
+            print(f"[{speaker.tag}] repeated an earlier line, ending")
             break
 
-        sname, lname = speaker.agent["name"], listener.agent["name"]
         history.append((sname, line))
         print(f'[{speaker.tag}] SAYS: "{line}"')
 

@@ -4,15 +4,16 @@ from memory import Memory, Reflection
 import json
 import ollama
 import re
+import os, time 
 
 
 class MemoryStream:
     def __init__(self, agent_name: str):
         root_dir = Path(__file__).parent.parent
         self.path = (root_dir / "data" / "agents" / agent_name / "memory_stream.json")
-        self.memories = self.load()
         self._importance_cache = {}
         self.dirty = False
+        self.memories = self.load()
 
     def load(self):
         if not self.path.exists():
@@ -35,9 +36,22 @@ class MemoryStream:
 
         return loaded_memories
 
+
     def save(self, memories):
-        with open(self.path, "w") as f:
-            json.dump([asdict(memory) for memory in memories], f, indent=2)
+        tmp = f"{self.path}.tmp"
+        data = json.dumps([asdict(m) for m in memories], indent=2)
+        for attempt in range(5):
+            try:
+                with open(tmp, "w") as f:
+                    f.write(data)
+                os.replace(tmp, self.path)
+                self.dirty = False
+                return
+            except OSError as e:
+                if attempt == 4:
+                    raise
+                print(f"    [save] {e}, retrying")
+                time.sleep(0.2 * (attempt + 1))
 
     def mark_dirty(self):
         self.dirty = True
@@ -62,7 +76,7 @@ class MemoryStream:
 
         self.memories.append(memory)
 
-        self.save(self.memories)
+        self.mark_dirty()
 
         return memory
 
@@ -82,7 +96,7 @@ class MemoryStream:
             self.memories.append(memory)
             created.append(memory)
 
-        self.save(self.memories)
+        self.mark_dirty()
         return created
 
     def cached_importance(self, description):
@@ -107,7 +121,7 @@ class MemoryStream:
         )
 
         self.memories.append(reflection)
-        self.save(self.memories)
+        self.mark_dirty()
 
         return reflection
 
@@ -161,5 +175,5 @@ class MemoryStream:
             importance=5,
         )
         self.memories.append(plan)
-        self.save(self.memories)
+        self.mark_dirty()
         return plan

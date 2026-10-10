@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 import ollama 
 import re
+import json
 
 
 AGENT_PROFILES = {
@@ -57,6 +58,14 @@ AGENT_PROFILES = {
         6) reviewed project updates, documentation, and testing progress from 2:00 pm to 5:00 pm,
         7) clock out and finished work at 5:00 pm.""",
 }
+
+ROOM_PURPOSES = {
+    "reception": "arriving, clocking in/out, visitors",
+    "break_room": "meals, coffee, breaks, casual chat",
+    "conference_room": "meetings, group discussion, collaborating, presentations",
+}
+
+CTX = {"num_ctx": 8192}
 
 class Planner:
     def __init__(self, agent, memory_stream=None, memory_retriever=None):
@@ -245,7 +254,7 @@ class Planner:
         Example:
         1. work on memory-system development from {current_time} to 1:00 pm"""
 
-        response = ollama.generate(model="qwen3", prompt=prompt, think=False, options={"num_predict": 300})
+        response = ollama.generate(model="qwen3", prompt=prompt, think=False, options={**CTX, "num_predict": 600, "temperature": 0.3})
 
         return self._parse_numbered(response["response"])
 
@@ -263,7 +272,75 @@ class Planner:
 
         return chunks
 
-    def resolve_location(self, activity, agent, default=None):
+    def resolve_location(self, activity, agent, world=None, default=None):
+        return self.resolve_location_keywords(activity, agent, default=default)
+
+    def choose_location(self, activity, agent, world, observations=None, recent_dialogue=None):
+        valid = list(world["locations"].keys())
+        owners = {a["office"]: a["name"] for a in world["agents"].values() if a.get("office")}
+
+        def describe(loc):
+            if loc in owners:
+                return f"- {loc}: {owners[loc]}'s private office, for solo focused work"
+            purpose = (world["locations"][loc].get("description")
+                       or ROOM_PURPOSES.get(loc, "general use"))
+            return f"- {loc}: {purpose}"
+
+        location_lines = "\n".join(describe(l) for l in valid)
+
+        # The keyword map's suggestion, normalized to a real room key
+        suggested = self.resolve_location_keywords(activity, agent).lower().replace(" ", "_")
+        if suggested not in valid:
+            suggested = agent["office"]
+
+        obs_text = "\n".join(f"- {o}" for o in (observations or []))
+
+        prompt = f"""
+        {agent['name']} is about to: {activity}
+        {agent['name']} is currently in {agent['current_location']}.
+        The plan suggests: {suggested}
+
+        Rooms:
+        {location_lines}
+
+        Recent observations:
+        {obs_text}
+
+        Which room should {agent['name']} go to in order to do this activity?
+
+        Rules:
+        - Choose the room whose purpose best matches the activity, even if that
+          means leaving the current room.
+        - Activities about meetings, group work, or collaborating belong in the
+          conference room. Solo focused work belongs in {agent['name']}'s own office.
+        - Do not stay in the current room just because it is the current room.
+        - Follow the plan's suggestion unless the observations clearly show a reason not to.
+        """
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string"},
+                "location": {"type": "string", "enum": valid},
+            },
+            "required": ["reason", "location"],
+        }
+
+        try:
+            response = ollama.generate(
+                model="qwen3", prompt=prompt, think=False, format=schema,
+                options={**CTX, "num_predict": 300, "temperature": 0},
+            )
+            result = json.loads(response["response"])
+            print(f"    [choose_location] {result['location']} ({result['reason']})")
+            if result["location"] in valid:
+                return result["location"]
+        except Exception as e:
+            print(f"    [choose_location] LLM failed ({e}), using keyword fallback")
+
+        return suggested
+
+    def resolve_location_keywords(self, activity, agent, default=None):
         """
         Map an activity description to a room. Order matters: explicit room
         names win, then specific activities, then the agent's default.
@@ -724,7 +801,7 @@ class Planner:
             model="qwen3",
             prompt=prompt,
             think=False,
-            options={"num_predict": 40, "temperature": 0}
+            options={**CTX, "num_predict": 80, "temperature": 0}
         )
 
         return response["response"]
@@ -803,3 +880,67 @@ class Planner:
             "target_agent": self.extract_target_agent(reaction, agent, world),
             "is_reaction": True,
         }
+
+    def extract_outcomes(self, transcript, agent_a, agent_b, world):
+        """One call: shared meeting (location-pinned) + each agent's own commitment."""
+        valid = list(world["locations"].keys())
+        owners = {a["office"]: a["name"] for a in world["agents"].values() if a.get("office")}
+        loc_lines = "\n".join(
+            f"- {l}" + (f" ({owners[l]}'s office)" if l in owners else "") for l in valid
+        )
+        names = [agent_a["name"], agent_b["name"]]
+
+        prompt = f"""
+        Conversation between {names[0]} and {names[1]}:
+        {transcript}
+
+        Locations:
+        {loc_lines}
+
+        1. Did they agree to meet or work together at a specific place right afterwards?
+        ("your desk" means the office of the person being addressed.)
+        If not, set meeting_agreed to false.
+        2. For each person, what did they commit to doing (a task, preparation, or
+        a meeting at a certain time)? Write one short sentence from their point
+        of view, including any time or place. Small talk is not a commitment.
+        Omit a person who committed to nothing.
+        """
+        schema = {
+            "type": "object",
+            "properties": {
+                "meeting_agreed": {"type": "boolean"},
+                "location": {"type": "string", "enum": valid},
+                "activity": {"type": "string"},
+                "minutes": {"type": "integer"},
+                "commitments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "person": {"type": "string", "enum": names},
+                            "commitment": {"type": "string"},
+                        },
+                        "required": ["person", "commitment"],
+                    },
+                },
+            },
+            "required": ["meeting_agreed", "location", "activity", "minutes", "commitments"],
+        }
+        out = {"meeting": None, "commitments": {}}
+        try:
+            r = ollama.generate(model="qwen3", prompt=prompt, think=False, format=schema,
+                                options={**CTX, "num_predict": 300, "temperature": 0})
+            data = json.loads(r["response"])
+            if data["meeting_agreed"] and data["location"] in valid:
+                out["meeting"] = {
+                    "location": data["location"],
+                    "activity": data["activity"],
+                    "minutes": max(10, min(data["minutes"] or 30, 60)),
+                }
+            for c in data["commitments"]:
+                text = c["commitment"].strip().rstrip(".")
+                if text:
+                    out["commitments"][c["person"]] = text
+        except Exception as e:
+            print(f"    [extract_outcomes] failed ({e})")
+        return out
