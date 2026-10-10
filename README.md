@@ -53,4 +53,78 @@ Planning
    ↓
 Action
    ↓
-Memory Update```
+Memory Update
+   ↓
+Reflection (twice a day)
+```
+
+---
+
+## Running
+
+```bash
+pip install -r requirements.txt        # numpy, ollama, lemminflect
+ollama pull qwen3 && ollama pull nomic-embed-text
+
+python scripts/seed_memories.py        # one-time: give Adam and Eve their starting memories
+python src/main.py                     # run the simulation
+```
+
+Simulation settings (start time, steps, cooldowns, reflection times, paper-strict
+mode) are constants at the top of `src/main.py`.
+
+### Reading the logs
+
+Verbosity is controlled by `GA_LOG`:
+
+| Level | Shows |
+| --- | --- |
+| `quiet` | warnings, conversations, reflections |
+| `info` (default) | the above plus a step header, one line per agent per step, reactions, commitments, replans |
+| `debug` | everything: observations, decisions and why, chosen rooms, per-call timings |
+
+```text
+━━ STEP 2/30 · 7:05 am ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  💬 ADAM ↔ EVE  (reception)  — greet Eve and suggest syncing
+      ADAM : "Morning Eve, want to sync in the conference room?"
+      EVE  : "Sounds good, see you there."
+  ▸ agreed to meet in conference_room: Sync on the project (30 min)
+  ADAM  reception        talking with Eve Smith
+  EVE   reception        talking with Adam Beck
+```
+
+`GA_LOG=debug python src/main.py` while tuning; `GA_LOG=quiet` for long runs.
+
+## Code map
+
+| File | Role |
+| --- | --- |
+| `src/main.py` | Simulation loop: perceive → decide → act → reflect |
+| `src/memory_stream.py`, `memory.py` | The memory stream (observations, plans, reflections) |
+| `src/memory_retriever.py` | Recency + importance + relevance retrieval |
+| `src/plan.py` | Daily plan, hour/minute decomposition, reactions, agent summaries |
+| `src/conversation.py` | Turn-based dialogue between agents |
+| `src/reflect.py` | Reflection: questions → retrieval → cited insights |
+| `src/world.py`, `perceive.py` | World state and what agents observe |
+| `src/llm.py` | The only module that talks to Ollama |
+| `src/log.py` | Logging levels and output layout |
+
+## Reflection
+
+Agents reflect twice per simulated day (`REFLECTION_TIMES`, default 12:00 pm and
+5:00 pm). Each pass looks at the (up to) 100 most recent observations since the
+last reflection, asks for the 3 most salient questions, retrieves memories for
+each, and stores 5 insights as `reflection` memories that cite their sources.
+Reflections are retrieved like any other memory, and the agent's cached summary is
+rebuilt afterwards.
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite runs without Ollama: `tests/conftest.py` swaps `llm.generate` / `llm.embed`
+for deterministic fakes, and includes full-loop runs covering planning, reflection,
+and the conversation → commitment → replan path.

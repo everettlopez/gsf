@@ -16,22 +16,12 @@ round trip per turn.
 
 import re
 
-import ollama
-
-from plan import CTX
+import llm
+import log
+from llm import CTX
 
 MAX_TURNS = 6          # total utterances, both speakers combined
 MAX_LINE_TOKENS = 80
-
-
-def _summary(rt):
-    """Agent summary, cached. Planner already has _summary_cache but
-    generate_agent_summary() never fills it, so we do it here."""
-    cache = rt.planner._summary_cache
-    key = rt.agent["id"]
-    if key not in cache:
-        cache[key] = rt.planner.generate_agent_summary(rt.agent)
-    return cache[key]
 
 
 def _context(rt, other_name, last_line=None, limit=8):
@@ -52,8 +42,6 @@ def _context(rt, other_name, last_line=None, limit=8):
 
 
 def _remember(rt, text):
-    # ASSUMPTION: matches the add_observations() listed in main.py's docstring.
-    # Adjust if your MemoryStream signature differs.
     rt.stream.add_observations([text])
 
 
@@ -92,7 +80,7 @@ def _generate_line(speaker, listener, current_time, status, history, intent):
         )
 
     prompt = f"""
-    {_summary(speaker)}
+    {speaker.planner.generate_agent_summary(speaker.agent)}
 
     It is {current_time}.
     {name}'s status: {status}
@@ -104,12 +92,9 @@ def _generate_line(speaker, listener, current_time, status, history, intent):
     {ask}
     """
 
-    raw = ollama.generate(
-        model="qwen3",
-        prompt=prompt,
-        think=False,
-        options={**CTX, "num_predict": MAX_LINE_TOKENS, "temperature": 0.7},
-    )["response"]
+    raw = llm.generate(
+        prompt, options={**CTX, "num_predict": MAX_LINE_TOKENS, "temperature": 0.7}
+    )
 
     if history and raw.strip().upper().startswith("END"):
         return None
@@ -133,7 +118,7 @@ def run_conversation(initiator, partner, current_time, reaction):
         )
 
         if line is None:
-            print(f"[{speaker.tag}] ENDS CONVERSATION")
+            log.debug(f"{speaker.tag} ends the conversation")
             break
 
         sname, lname = speaker.agent["name"], listener.agent["name"]
@@ -141,11 +126,11 @@ def run_conversation(initiator, partner, current_time, reaction):
         # Reject a line this speaker already said earlier (echo loops)
         said = {t.lower() for who, t in history if who == sname}
         if line.lower() in said:
-            print(f"[{speaker.tag}] repeated an earlier line, ending")
+            log.debug(f"{speaker.tag} repeated an earlier line, ending")
             break
 
         history.append((sname, line))
-        print(f'[{speaker.tag}] SAYS: "{line}"')
+        log.dialogue(speaker.tag, line)
 
         # Both agents experience the utterance as an observation.
         memory_text = f'{sname} said to {lname}: "{line}"'

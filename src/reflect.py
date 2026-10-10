@@ -1,152 +1,153 @@
-from memory_stream import MemoryStream
-from memory_retriever import MemoryRetriever
+"""
+reflect.py - reflection (paper section 4.2)
 
-import ollama
+When it runs (see main.py, REFLECTION_TIMES) an agent:
+    1. takes its most recent unreflected observations (paper: the last 100),
+    2. asks the LLM for the 3 most salient high-level questions about them,
+    3. retrieves memories relevant to each question,
+    4. asks for 5 insights, each citing the memories behind it, and
+    5. stores every insight in the memory stream as a Reflection, linked to the
+       memories it cites. Reflections are retrievable like any other memory, so
+       they feed back into plans, reactions and conversations.
+"""
+
 import re
 
-class Reflection:
-    def __init__(self, agent):
-        self.memory_stream = MemoryStream(agent["id"])
-        self.memory_retriever = MemoryRetriever(agent["id"])
+import llm
+import log
+
+NUM_QUESTIONS = 3
+NUM_INSIGHTS = 5
+RECENT_WINDOW = 100         # paper: reflect over the 100 most recent records
+MIN_MEMORIES = 5            # not worth an LLM round trip below this
+MEMORIES_PER_QUESTION = 10
+
+
+# ---------------------------------------------------------------------------
+# Parsing (pure functions, unit-tested)
+# ---------------------------------------------------------------------------
+_LEADING_LIST_MARKER = re.compile(r"^(?:\d+[.)]|[-*•])\s*")
+_CITATION = re.compile(r"\s*\((?:because of|from|based on)\s*([^)]*)\)\s*\.?$", re.IGNORECASE)
+
+
+def _clean_line(line):
+    line = line.strip().replace("**", "")
+    return _LEADING_LIST_MARKER.sub("", line).strip()
+
+
+def parse_questions(text, limit=NUM_QUESTIONS):
+    questions = []
+    for raw in text.splitlines():
+        line = _clean_line(raw)
+        if not line or line.lower().startswith("here are") or line.endswith(":"):
+            continue
+        questions.append(line)
+    return questions[:limit]
+
+
+def parse_insights(text, valid_ids, agent_name, limit=NUM_INSIGHTS):
+    """
+    Parse "insight (because of 1, 5, 3)" lines into (insight, [cited ids]).
+    Cited ids that aren't in `valid_ids` are dropped; if nothing valid is cited,
+    the insight is linked to every memory it was generated from.
+    """
+    valid_ids = set(valid_ids)
+    insights = []
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        # Sub-bullets under an insight are evidence/explanations, not insights.
+        if not line or line.startswith(("*", "-")) or line.lower().startswith("here are"):
+            continue
+
+        line = _clean_line(line)
+
+        cited = []
+        match = _CITATION.search(line)
+        if match:
+            cited = [int(n) for n in re.findall(r"\d+", match.group(1))]
+            line = line[:match.start()].strip()
+
+        if not line:
+            continue
+
+        line = _normalize_pronoun(line, agent_name)
+        sources = [i for i in cited if i in valid_ids] or sorted(valid_ids)
+        insights.append((line, sources))
+
+    return insights[:limit]
+
+
+def _normalize_pronoun(line, name):
+    """Reflections are stored as third-person statements about the agent."""
+    for pronoun, replacement in (("He is ", f"{name} is "), ("She is ", f"{name} is "),
+                                 ("He ", f"{name} "), ("She ", f"{name} "),
+                                 ("His ", f"{name}'s "), ("Her ", f"{name}'s ")):
+        if line.startswith(pronoun):
+            return replacement + line[len(pronoun):]
+    return line
+
+
+# ---------------------------------------------------------------------------
+# Reflector
+# ---------------------------------------------------------------------------
+class Reflector:
+    def __init__(self, agent, memory_stream, memory_retriever):
+        self.agent = agent
+        self.memory_stream = memory_stream
+        self.memory_retriever = memory_retriever
+
+    @property
+    def name(self):
+        return self.agent["name"]
 
     def reflect(self):
-        print("AGENT: REFLECTING")
+        """Run one reflection pass. Returns the list of new Reflection memories."""
+        recent = self.memory_stream.unreflected(RECENT_WINDOW)
 
-        reflection_threshold = 38
+        if len(recent) < MIN_MEMORIES:
+            log.debug(f"{self.name}: only {len(recent)} new memories, skipping reflection")
+            return []
 
-        memories = self.memory_stream.get_memory_stream()
+        questions = self.generate_questions(recent)
+        log.debug(f"{self.name} reflection questions: {questions}")
 
-        recent_memories = memories[-20:]
-
-        importance_sum = sum(memory.importance for memory in recent_memories)
-
-        if importance_sum < reflection_threshold:
-            print(f"Importance Sum of {importance_sum} does not meet the Reflection threshold of {reflection_threshold}")
-            return
-
-        questions = self.generate_reflection_questions(recent_memories)
-
-        total_relevant_memories = []
-
-        print("REFLECTION QUESTIONS")
+        relevant = {}
         for question in questions:
-            print(question)
-            relevant_memories = self.retrieve(question)
-            total_relevant_memories.extend(relevant_memories)
+            results = self.memory_retriever.retrieve(question, n=MEMORIES_PER_QUESTION)
+            for result in results:
+                relevant[result["memory"].id] = result["memory"]
 
-        unique_memories = {}
+        if not relevant:
+            return []
 
-        for result in total_relevant_memories:
-            memory = result["memory"]
-            unique_memories[memory.id] = memory
+        insights = self.generate_insights(list(relevant.values()))
 
-        relevant_memories = list(unique_memories.values())
+        return [
+            self.memory_stream.add_reflection(description=text, source_memory_ids=sources)
+            for text, sources in insights
+        ]
 
-        insights = self.generate_reflection_insights(relevant_memories)
-
-        for insight in insights:
-            print(insight)
-            self.memory_stream.add_reflection(description=insight, source_memory_ids=[memory.id for memory in relevant_memories])
-
-        print("Reflection complete!")
-
-    def generate_reflection_questions(self, recent_memories):
-            print("Generating reflection questions")
-            memory_text = "\n".join( [ memory.description for memory in recent_memories ] )
-    
-            prompt = f"""
-                {memory_text}
-    
-                Given only the information above, what are 3 most salient high-level questions we can answer about the subjects in the statements? Return only the 3 questions."""
-    
-            response = ollama.generate(model="qwen3", prompt=prompt, think=False)
-    
-            text = response["response"]
-    
-            questions = []
-    
-            for line in text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                line = re.sub(r"^\d+\.\s*", "", line)
-                questions.append(line)
-    
-            return questions
-    
-    def generate_reflection_insights(self, relevant_memories):
-        print("Generating insights")
-
-        memory_text = "\n".join(
-            f"{memory.id}. {memory.description}"
-            for memory in relevant_memories
-        )
-
-        print(memory_text)
+    def generate_questions(self, recent_memories):
+        memory_text = "\n".join(m.description for m in recent_memories)
 
         prompt = f"""
-    Statements about Adam Beck
+{memory_text}
 
-    {memory_text}
+Given only the information above, what are {NUM_QUESTIONS} most salient high-level questions we can answer about the subjects in the statements? Return only the {NUM_QUESTIONS} questions as a numbered list."""
 
-    What 5 high-level insights can you infer from the above statements?
-    (example format: insight (because of 1, 5, 3))
-    """
+        return parse_questions(llm.generate(prompt, options=llm.CTX))
 
-        response = ollama.generate(
-            model="qwen3",
-            prompt=prompt,
-            think=False
-        )
+    def generate_insights(self, memories):
+        memory_text = "\n".join(f"{m.id}. {m.description}" for m in memories)
 
-        insights = []
+        prompt = f"""
+Statements about {self.name}
 
-        for line in response["response"].splitlines():
-            line = line.strip()
+{memory_text}
 
-            if not line:
-                continue
-
-            # Ignore intro text
-            if line.lower().startswith("here are"):
-                continue
-
-            # Ignore evidence/explanation lines
-            if line.startswith("*"):
-                continue
-
-            if line.startswith("-"):
-                continue
-
-            # Remove numbering
-            line = re.sub(r"^\d+[\.\)]\s*", "", line)
-
-            # Remove markdown bold
-            line = line.replace("**", "")
-
-            # Remove cited evidence
-            line = re.sub(
-                r"\s*\(because of.*?\)$",
-                "",
-                line,
-                flags=re.IGNORECASE
-            )
-
-            line = line.strip()
-
-            if not line:
-                continue
-
-            # Normalize pronouns
-            if line.startswith("He is "):
-                line = "Adam Beck is " + line[len("He is "):]
-
-            elif line.startswith("He "):
-                line = "Adam Beck " + line[len("He "):]
-
-            elif line.startswith("His "):
-                line = "Adam Beck's " + line[len("His "):]
-
-            insights.append(line)
-
-        return insights
+What {NUM_INSIGHTS} high-level insights can you infer from the above statements?
+(example format: insight (because of 1, 5, 3))
+"""
+        raw = llm.generate(prompt, options=llm.CTX)
+        return parse_insights(raw, [m.id for m in memories], self.name)

@@ -22,33 +22,29 @@ stream as a plan either way.
 On a reaction, only the plan from the current time onward is regenerated;
 what already happened today is kept (the chunk in progress is cut at "now").
 
-Assumes these are in place:
-    - perceive_environment(agent, world, stream, prev_obs) -> (all_obs, new_obs)
-    - Planner(agent, memory_stream, memory_retriever)
-    - Planner.split_plan(chunks, current_time) -> (done, remaining)
-    - Planner.regenerate_plan(agent, current_time, reaction, done, remaining)
-    - Planner.continue_plan_or_react(agent, status, chunk, observations, world) ->
-      text containing "DECISION: 1|2" and "REACTION: ..."
-    - MemoryRetriever(agent_id, memory_stream)
-    - MemoryStream.flush() / mark_dirty() / add_observations() / add_plan()
-    - generate_interactions(agent, world, observations, planner)
+Reflection (paper section 4.2) runs twice per simulated day, at the times in
+REFLECTION_TIMES. Each agent reflects on what it has experienced since its last
+reflection, and the resulting insights go back into its memory stream.
+
+Verbosity: set GA_LOG=quiet|info|debug (default info). See log.py.
 """
 
 import re
 import time
-import clock
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Callable, Optional
+from typing import Optional
 
+import clock
+import log
+from conversation import run_conversation
 from memory_retriever import MemoryRetriever
 from memory_stream import MemoryStream
 from perceive import perceive_environment
 from plan import Planner
+from reflect import Reflector
 from world import generate_interactions, load_world, save_world, update_agent_state
-
-from conversation import run_conversation
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +55,9 @@ NUM_STEPS = 30
 STEP_MINUTES = 5            # simulated minutes per step
 STEP_DELAY_SECONDS = 0      # wall-clock padding per step (0 = run flat out)
 
-DEBUG_OBSERVATIONS = False  # True = print every observation each step
+# Reflection happens twice a day (paper 4.2: "two or three times a day").
+# Each time is reached once per simulated day; times before START_TIME are skipped.
+REFLECTION_TIMES = ["12:00 pm", "5:00 pm"]
 
 # --- Efficiency shortcuts (NOT in the paper) --------------------------------
 
@@ -113,16 +111,15 @@ def timed(label):
         dt = time.time() - t0
         total, count = timings.get(label, (0.0, 0))
         timings[label] = (total + dt, count + 1)
-        print(f"    [timing] {label}: {dt:.1f}s")
+        log.debug(f"timing {label}: {dt:.1f}s")
 
 
 def print_timing_summary():
     if not timings:
         return
-    print("\n" + "=" * 50)
-    print("TIMING SUMMARY (slowest first)")
+    log.banner("TIMING SUMMARY (slowest first)")
     for label, (total, count) in sorted(timings.items(), key=lambda kv: -kv[1][0]):
-        print(f"  {total:7.1f}s total | {count:3d} calls | {total / count:6.1f}s avg | {label}")
+        log.info(f"  {total:7.1f}s total | {count:3d} calls | {total / count:6.1f}s avg | {label}")
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +132,8 @@ class AgentRuntime:
     stream: MemoryStream
     retriever: MemoryRetriever
     planner: Planner
-    initial_plan_fn: Callable        # planner.generate_initial_plan_<name>
+    reflector: Reflector
+    reflected_at: set = field(default_factory=set)   # REFLECTION_TIMES already handled
 
     # The plan, at three levels of detail. The two caches are keyed by
     # (start_time, activity), so a replan can never hit a stale entry.
@@ -162,13 +160,6 @@ class AgentRuntime:
         return self.agent["id"].upper()
 
 
-# Adam and Eve still have separate initial-plan prompts.
-INITIAL_PLAN_METHODS = {
-    "adam": "generate_initial_plan_adam",
-    "eve": "generate_initial_plan_eve",
-}
-
-
 def make_runtime(agent_id, world):
     # Use the agent dict that lives inside world so there is a single source of
     # truth (previously load_agent() and load_world() gave two diverging copies).
@@ -183,7 +174,7 @@ def make_runtime(agent_id, world):
         stream=stream,
         retriever=retriever,
         planner=planner,
-        initial_plan_fn=getattr(planner, INITIAL_PLAN_METHODS[agent_id]),
+        reflector=Reflector(agent, stream, retriever),
     )
 
 
@@ -232,17 +223,19 @@ def expand_plan(rt, chunks):
 def initial_planning(rt, world):
     """Day plan in broad strokes, then (optionally) the full decomposition."""
     with timed(f"{rt.tag} initial broad plan (LLM)"):
-        daily_plan = rt.initial_plan_fn()
+        daily_plan = rt.planner.generate_initial_plan(rt.agent)
 
     rt.broad_chunks = rt.planner.create_chunks(daily_plan, rt.agent, world)
     rt.hour_cache, rt.minute_cache = {}, {}
 
-    print(f"{rt.tag} BROAD PLAN")
     if not rt.broad_chunks:
         # No chunks means get_chunk_lazy always returns None.
-        print(f"WARNING [{rt.tag}]: initial plan produced no chunks. "
-              f"Daily plan was: {daily_plan}")
+        log.warn(f"{rt.tag}: initial plan produced no chunks. Daily plan was: {daily_plan}")
         return
+
+    log.info(f"  {rt.tag} day plan:")
+    for chunk in rt.broad_chunks:
+        log.info(f"      {chunk['activity']}")
 
     rt.planner.create_plan(rt.broad_chunks)  # plans live in the memory stream
 
@@ -286,8 +279,8 @@ def get_chunk_lazy(rt, current_time):
 def step_time(current_time, minutes=STEP_MINUTES):
     current_dt = datetime.strptime(current_time.upper(), "%I:%M %p")
     new_dt = current_dt + timedelta(minutes=minutes)
-    # %I zero-pads ("07:05 am"), which the planner's strptime handles fine.
-    return new_dt.strftime("%I:%M %p").lower()
+    # Drop the zero-pad so times read "7:05 am", matching the plan's format.
+    return new_dt.strftime("%I:%M %p").lstrip("0").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -300,11 +293,10 @@ def perceive_phase(rt, world):
         )
     rt.prev_obs = rt.observations
 
-    print(f"[{rt.tag}] {len(rt.observations)} observations, {len(rt.new_obs)} new")
-    if DEBUG_OBSERVATIONS:
-        for obs in rt.observations:
-            marker = "*" if obs in rt.new_obs else " "
-            print(f"    {marker} {obs}")
+    log.debug(f"{rt.tag} {len(rt.observations)} observations, {len(rt.new_obs)} new")
+    for obs in rt.observations:
+        marker = "*" if obs in rt.new_obs else " "
+        log.debug(f"  {marker} {obs}")
 
 
 # ---------------------------------------------------------------------------
@@ -329,11 +321,11 @@ def decide_phase(rt, step, current_time, world):
     rt.status = planner.get_current_status(rt.agent, current_time)
     rt.chunk = get_chunk_lazy(rt, current_time)
 
-    print(f"[{rt.tag}] STATUS: {rt.status}")
+    log.debug(f"{rt.tag} status: {rt.status}")
     if rt.chunk:
-        print(f"[{rt.tag}] PLANNED: {rt.chunk['activity']} (default loc: {rt.chunk['location']})")
+        log.debug(f"{rt.tag} planned: {rt.chunk['activity']} (default loc: {rt.chunk['location']})")
     else:
-        print(f"[{rt.tag}] PLANNED: (no chunk covers {current_time})")
+        log.debug(f"{rt.tag} planned: (no chunk covers {current_time})")
 
     steps_since_react = step - rt.last_react_step
 
@@ -365,7 +357,7 @@ def decide_phase(rt, step, current_time, world):
             rt.decision, rt.reaction = parse_decision(raw)
             reason = f"LLM said {raw.strip()!r} after {len(candidates)} obs"
 
-    print(f"[{rt.tag}] DECISION: {rt.decision} ({reason})")
+    log.debug(f"{rt.tag} decision {rt.decision}: {reason}")
 
 def parse_decision(raw):
     m = re.search(r"DECISION:\s*([12])", raw)
@@ -394,7 +386,7 @@ def resolve_conversations(runtimes, step, current_time, world):
                 or other.agent["current_location"] != rt.agent["current_location"]):
             continue                      # not a conversation; normal react() runs
 
-        print(f"[{rt.tag}] CONVERSATION with {other.tag}: {rt.reaction}")
+        log.conversation_start(rt.tag, other.tag, rt.agent["current_location"], rt.reaction)
         with timed(f"{rt.tag}<->{other.tag} conversation (LLM per turn)"):
             history = run_conversation(rt, other, current_time, rt.reaction)
 
@@ -406,7 +398,7 @@ def resolve_conversations(runtimes, step, current_time, world):
                 outcomes = rt.planner.extract_outcomes(
                     transcript, rt.agent, other.agent, world
                 )
-            print(f"[{rt.tag}] OUTCOMES: {outcomes}")
+            log_outcomes(rt, other, outcomes)
 
         busy.update({rt.agent["id"], other.agent["id"]})
 
@@ -415,6 +407,20 @@ def resolve_conversations(runtimes, step, current_time, world):
             if commitment:
                 replan_after_conversation(a, commitment, current_time, world)
             settle_after_conversation(a, b, step, current_time, world, outcomes["meeting"])
+
+
+def log_outcomes(rt, other, outcomes):
+    """Readable summary of what a conversation led to."""
+    meeting = outcomes["meeting"]
+    if meeting:
+        log.event(f"agreed to meet in {meeting['location']}: "
+                  f"{meeting['activity']} ({meeting['minutes']} min)")
+    for who in (rt, other):
+        commitment = outcomes["commitments"].get(who.agent["name"])
+        if commitment:
+            log.event(f"{who.tag} committed: {commitment}")
+    if not meeting and not outcomes["commitments"]:
+        log.event("no commitments made")
 
 
 def replan_after_conversation(rt, commitment, current_time, world):
@@ -429,14 +435,14 @@ def replan_after_conversation(rt, commitment, current_time, world):
     new_chunks = rt.planner.create_chunks(items, rt.agent, world)
 
     if not new_chunks or any(c["start_time"] is None for c in new_chunks):
-        print(f"[{rt.tag}] replan unusable, keeping old plan")
+        log.warn(f"{rt.tag}: replan unusable, keeping old plan")
         return
 
     rt.broad_chunks = done + new_chunks
     rt.hour_cache, rt.minute_cache = {}, {}     # old decompositions are stale
     rt.planner.create_plan(new_chunks)
     rt.stream.add_observations([f"{rt.agent['name']} committed to: {commitment}"])
-    print(f"[{rt.tag}] REPLANNED around: {commitment}")
+    log.event(f"{rt.tag} replanned the day around: {commitment}")
 
     
 def settle_after_conversation(rt, partner, step, current_time, world, agreement=None):
@@ -486,7 +492,7 @@ def apply_chunk(rt, world):
                 chunk["activity"], rt.agent, world,
                 observations=rt.observations,
             )
-        print(f"[{rt.tag}] CHOSE LOCATION: {loc}")
+        log.debug(f"{rt.tag} chose location: {loc}")
 
     update_agent_state(rt.agent, chunk, world, location=loc)
 
@@ -497,20 +503,16 @@ def apply_chunk(rt, world):
 
     world["agents"][rt.agent["id"]] = rt.agent  # keep world in sync
 
-    print(f"[{rt.tag}] NEW ACTION:   {rt.agent['current_action']}")
-    print(f"[{rt.tag}] NEW ROOM:     {rt.agent['current_location']}")
-    print(f"[{rt.tag}] INTERACTING:  {rt.agent['interacting_with']}")
-
 
 def react(rt, step, current_time, world):
     """React with a short interruption instead of regenerating the day."""
-    print(f"[{rt.tag}] ACT: reacting ({rt.reaction})")
+    log.event(f"{rt.tag} reacts: {rt.reaction}")
     rt.last_react_step = step
     rt.override = rt.planner.make_reaction_chunk(
         rt.agent, current_time, rt.reaction, world
     )
     rt.chunk = rt.override
-    print(f"[{rt.tag}] REACTION CHUNK: {rt.chunk}")
+    log.debug(f"{rt.tag} reaction chunk: {rt.chunk}")
     apply_chunk(rt, world)
     return True
 
@@ -522,7 +524,7 @@ def act_phase(rt, step, current_time, world):
 
     if rt.decision == "1":
         if rt.chunk is None:
-            print(f"[{rt.tag}] ACT: no chunk, state unchanged")
+            log.debug(f"{rt.tag} act: no chunk, state unchanged")
             return
 
         if SKIP_UNCHANGED_CHUNKS and rt.chunk == rt.last_chunk:
@@ -533,9 +535,9 @@ def act_phase(rt, step, current_time, world):
                 if rt.agent["current_location"] != old:
                     apply_chunk(rt, world)
                 else:
-                    print(f"[{rt.tag}] ACT: target still here, skipping update")
+                    log.debug(f"{rt.tag} act: target still here, skipping update")
             else:
-                print(f"[{rt.tag}] ACT: same chunk as last step, skipping update")
+                log.debug(f"{rt.tag} act: same chunk as last step, skipping update")
             return
 
         apply_chunk(rt, world)
@@ -548,27 +550,72 @@ def act_phase(rt, step, current_time, world):
 
 
 # ---------------------------------------------------------------------------
+# PHASE 4: REFLECT (twice a day) and per-step summary
+# ---------------------------------------------------------------------------
+def due_reflection_times(rt, current_time):
+    """Scheduled reflection times that have arrived and haven't run yet."""
+    now = rt.planner._parse_time(current_time)
+    return [
+        t for t in REFLECTION_TIMES
+        if t not in rt.reflected_at
+        and (scheduled := rt.planner._parse_time(t)) is not None
+        and now >= scheduled
+    ]
+
+
+def reflect_phase(rt, current_time):
+    due = due_reflection_times(rt, current_time)
+    if not due:
+        return
+
+    rt.reflected_at.update(due)   # a late start still reflects once, not once per time
+    log.reflection_header(rt.tag, current_time)
+
+    with timed(f"{rt.tag} reflect (LLM x3+)"):
+        reflections = rt.reflector.reflect()
+
+    if not reflections:
+        log.event(f"{rt.tag} had nothing new to reflect on")
+        return
+
+    for reflection in reflections:
+        log.reflection_item(reflection.description)
+
+    # New insights change who the agent is: rebuild the summary next time it's needed.
+    rt.planner.invalidate_summary()
+
+
+def log_step_summary(rt):
+    """One compact line per agent: where they are, what they're doing, what they're using."""
+    a = rt.agent
+    log.agent_line(rt.tag, a["current_location"], a["current_action"], a["interacting_with"])
+
+
+# ---------------------------------------------------------------------------
 # MAIN LOOP
 # ---------------------------------------------------------------------------
 def main():
     world = load_world()
     runtimes = [make_runtime("adam", world), make_runtime("eve", world)]
 
-    print(f"PAPER_STRICT={PAPER_STRICT} | EAGER_DECOMPOSITION={EAGER_DECOMPOSITION} | "
-          f"REACT_COOLDOWN_STEPS={REACT_COOLDOWN_STEPS}")
+    log.banner(f"Generative Agents · {START_TIME} · {NUM_STEPS} steps x {STEP_MINUTES} min")
+    log.info(f"  PAPER_STRICT={PAPER_STRICT} EAGER_DECOMPOSITION={EAGER_DECOMPOSITION} "
+             f"REACT_COOLDOWN_STEPS={REACT_COOLDOWN_STEPS} REFLECTION_TIMES={REFLECTION_TIMES}")
 
     current_time = START_TIME
     clock.set_time(current_time)
 
     for rt in runtimes:
+        # A reflection time that is already behind us at start-up never fires.
+        start = rt.planner._parse_time(START_TIME)
+        rt.reflected_at = {t for t in REFLECTION_TIMES if rt.planner._parse_time(t) < start}
         initial_planning(rt, world)
 
     try:
         for step in range(1, NUM_STEPS + 1):
             step_start = time.time()
             clock.set_time(current_time)
-            print("\n" + "=" * 50)
-            print(f"STEP {step}/{NUM_STEPS} | TIME: {current_time}")
+            log.step_header(step, NUM_STEPS, current_time)
 
             # Run each phase for every agent before moving on, so one agent's
             # actions don't leak into the other's perception mid-step.
@@ -583,19 +630,25 @@ def main():
             for rt in runtimes:
                 act_phase(rt, step, current_time, world)
 
+            for rt in runtimes:
+                log_step_summary(rt)
+
+            for rt in runtimes:
+                reflect_phase(rt, current_time)
+
             # One disk write per step instead of one per action / retrieval.
             save_world(world)
             for rt in runtimes:
                 rt.stream.flush()
 
             elapsed = time.time() - step_start
-            print(f"\nStep {step} took {elapsed:.1f}s")
+            log.debug(f"step {step} took {elapsed:.1f}s")
 
             current_time = step_time(current_time)
 
             sleep_time = max(0, STEP_DELAY_SECONDS - elapsed)
             if sleep_time > 0:
-                print(f"Sleeping for {sleep_time:.1f} seconds...")
+                log.debug(f"sleeping {sleep_time:.1f}s")
                 time.sleep(sleep_time)
 
     finally:
