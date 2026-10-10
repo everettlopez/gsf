@@ -92,6 +92,20 @@ class BoardError(ValueError):
     """An action the board refuses (unknown task, duplicate title, ...)."""
 
 
+class NoChange(BoardError):
+    """The action asks for what is already true (e.g. a status a task already
+    has). Skipped quietly: it is not a mistake worth remembering."""
+
+
+WIP_LIMIT = 1            # tasks one agent can have in progress at once
+MAX_BOARD_NOTES = 20     # board-level notes kept on the project
+
+# Titles that describe a meeting or a review, not something to build or ship.
+_NOT_A_DELIVERABLE = re.compile(
+    r"^\s*(?:review|meet|meeting|discuss|sync|align|check[- ]in|stand-?up|coordinate"
+    r"|catch up|follow up|talk)\b", re.IGNORECASE)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -115,6 +129,7 @@ def get_project(world):
     project.setdefault("description", "")
     project.setdefault("status", "not_started")
     project.setdefault("tasks", [])
+    project.setdefault("notes", [])
     for task in project["tasks"]:
         task.setdefault("approved_by", [])
     return project
@@ -290,6 +305,9 @@ def create_task(world, agent_id, title, description="", area="general",
     title = _clean(title, 80)
     if not title:
         raise BoardError("a task needs a title")
+    if _NOT_A_DELIVERABLE.match(title):
+        raise BoardError("tasks are things to build or ship; reviews happen with "
+                         "approve_task and meetings in conversation")
 
     key = _normalize(title)
     for existing in project["tasks"]:
@@ -335,7 +353,7 @@ def update_status(world, agent_id, task_id, status, note=""):
     if status not in STATUSES:
         raise BoardError(f"unknown status {status!r}")
     if task["status"] == status:
-        raise BoardError(f"{task['id']} is already {status}")
+        raise NoChange(f"{task['id']} is already {status}")
     if task["assignee"] and task["assignee"] != agent_id:
         raise BoardError(f"{task['id']} belongs to {_agent_name(world, task['assignee'])}")
     if not task["assignee"] and status != "in_progress":
@@ -344,6 +362,12 @@ def update_status(world, agent_id, task_id, status, note=""):
         blockers = _unmet_dependencies(world, task)
         if blockers:
             raise BoardError(f"{task['id']} is waiting on {', '.join(blockers)}")
+        busy = [t["id"] for t in get_project(world)["tasks"]
+                if t["assignee"] == agent_id and t["status"] == "in_progress"
+                and t["id"] != task["id"]]
+        if len(busy) >= WIP_LIMIT:
+            raise BoardError(f"{_agent_name(world, agent_id)} is already working on "
+                             f"{', '.join(busy)}; move it to review or blocked first")
         if not task["assignee"]:
             task["assignee"] = agent_id              # starting work claims it
             mark_workload_changed(agent_id)
@@ -446,6 +470,20 @@ def approve_task(world, agent_id, task_id, note=""):
     return task
 
 
+def add_board_note(world, agent_id, note):
+    """A note on the board itself, not on one task (a blocker, a decision,
+    something for whoever comes by next)."""
+    note = _clean(note)
+    if not note:
+        raise BoardError("an empty note")
+    notes = get_project(world)["notes"]
+    if notes and notes[-1]["agent"] == agent_id and notes[-1]["note"] == note:
+        raise NoChange("that note is already on the board")
+    notes.append({"time": _now(), "agent": agent_id, "note": note})
+    del notes[:-MAX_BOARD_NOTES]
+    return notes[-1]
+
+
 def add_note(world, agent_id, task_id, note):
     task = get_task(world, task_id)
     note = _clean(note)
@@ -496,7 +534,7 @@ def board_observations(world):
     tasks = project["tasks"]
     if not tasks:
         lines.append("The project board has no tasks on it yet.")
-        return lines
+        return lines + _board_note_lines(world)
 
     open_tasks = [t for t in tasks if t["status"] != "done"]
     done = [t for t in tasks if t["status"] == "done"]
@@ -509,7 +547,17 @@ def board_observations(world):
         lines.append(f"The project board has {len(open_tasks) - MAX_TASKS_SHOWN} more open tasks.")
     if done:
         lines.append(f"The project board shows {len(done)} of {len(tasks)} tasks done.")
+    lines.extend(_board_note_lines(world))
     return lines
+
+
+def _board_note_lines(world):
+    notes = get_project(world)["notes"]
+    if not notes:
+        return []
+    n = notes[-1]
+    return [f"The latest note on the project board, from {_agent_name(world, n['agent'])}, "
+            f"says: \"{n['note']}\""]
 
 
 def status_for_agent(world, agent_id):
@@ -569,8 +617,10 @@ def status_for_agent(world, agent_id):
 def board_text_for_prompt(world):
     """Fuller view for the agent who is actually working at the board."""
     project = get_project(world)
+    notes = "".join(f"\n- board note ({_agent_name(world, n['agent'])}, {n['time']}): {n['note']}"
+                    for n in project["notes"][-3:])
     if not project["tasks"]:
-        return "(the board is empty)"
+        return "(no tasks yet)" + notes
     rows = []
     for t in project["tasks"]:
         who = _agent_name(world, t["assignee"]) if t["assignee"] else "unassigned"
@@ -583,7 +633,7 @@ def board_text_for_prompt(world):
         if note:
             row += f"\n    latest note ({_agent_name(world, note['agent'])}): {note['note']}"
         rows.append(row)
-    return "\n".join(rows)
+    return "\n".join(rows) + notes
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +738,10 @@ def apply_action(world, agent, action):
         return (f"{name} approved {_agent_name(world, t['assignee'])}'s task {t['id']} "
                 f"'{t['title']}' on the project board.")
 
+    if kind == "add_note" and not action.get("task_id"):
+        n = add_board_note(world, aid, action.get("note"))
+        return f"{name} left a note on the project board: {n['note']}."
+
     if kind == "add_note":
         t = add_note(world, aid, action.get("task_id"), action.get("note"))
         return f"{name} left a note on task {t['id']} '{t['title']}': {_clean(action.get('note'))}."
@@ -704,6 +758,8 @@ def apply_actions(world, agent, actions, limit=MAX_ACTIONS_PER_VISIT):
             continue
         try:
             done.append(apply_action(world, agent, action))
+        except NoChange as e:
+            log.debug(f"{agent['name']}: {action.get('action')} skipped ({e})")
         except BoardError as e:
             refused.append(f"{action.get('action')}: {e}")
         except (TypeError, AttributeError, ValueError) as e:
@@ -795,14 +851,20 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
     - approve_task: sign off on a teammate's task that is in review, once
       {agent['name']} has looked it over or talked it through with them.
     - add_note: leave a note a teammate can act on: a question, a decision, a
-      blocker, or what someone needs to know before starting. Never a note that
-      only says what {agent['name']} is doing right now.
+      blocker, or what someone needs to know before starting. Set task_id to
+      put it on a task, or leave task_id out for a note on the board itself.
+      Never a note that only says what {agent['name']} is doing right now.
 
     Rules:
     - Do what {agent['name']} promised teammates first, if anything.
     - If {agent['name']}'s area has no tasks yet, add the work it needs.
     - Update {agent['name']}'s own tasks if their status is out of date.
     - Only add tasks that move the team toward the goal, and never duplicate a task.
+    - A task is something to build or ship (a page, an endpoint, a deployment),
+      never a meeting or a review; reviews happen with approve_task.
+    - {agent['name']} works on one task at a time: move the current one to
+      review or blocked before starting the next.
+    - Only change a status when it actually changed; leave it alone otherwise.
     - Prefer tasks in {agent['name']}'s own area; leave other areas for teammates.
     - Keep tasks small enough for one person to finish in a day or two.
     - Do only what the current activity calls for; doing nothing is fine.

@@ -18,6 +18,7 @@ import re
 
 import llm
 import log
+import project_board
 from llm import CTX
 
 MAX_TURNS = 6          # total utterances, both speakers combined
@@ -54,7 +55,26 @@ def _clean(raw, speaker_name):
     return line
 
 
-def _generate_line(speaker, listener, current_time, status, history, intent):
+def _board_context(speaker, listener, world):
+    """What the speaker knows from the project board that bears on this talk:
+    their own situation and the listener's open tasks. Lets them talk about
+    T-numbers instead of 'the integration issues'."""
+    if not world or "project" not in world:
+        return ""
+    lines = project_board.status_for_agent(world, speaker.agent["id"])
+    theirs = project_board.open_tasks_for(world, listener.agent["id"])
+    other = listener.agent["name"]
+    if theirs:
+        lines.append(f"{other}'s open tasks: " + ", ".join(
+            f"{t['id']} '{t['title']}' ({t['status'].replace('_', ' ')})" for t in theirs) + ".")
+    body = "\n".join(f"    - {line}" for line in lines)
+    return f"""
+    What {speaker.agent['name']} knows from the project board:
+{body}
+"""
+
+
+def _generate_line(speaker, listener, current_time, status, history, intent, world=None):
     """Return the next utterance, or None if the speaker ends the conversation."""
     name = speaker.agent["name"]
     other = listener.agent["name"]
@@ -87,8 +107,9 @@ def _generate_line(speaker, listener, current_time, status, history, intent):
 
     Summary of relevant context from {name}'s memory:
     {context}
-
-    {name} is talking with {other}.
+{_board_context(speaker, listener, world)}
+    {name} is talking with {other}. Be specific: name the tasks (T-1, T-2, ...)
+    and the concrete next step when it helps, and don't repeat what was already said.
     {ask}
     """
 
@@ -103,7 +124,7 @@ def _generate_line(speaker, listener, current_time, status, history, intent):
     return line or None
 
 
-def run_conversation(initiator, partner, current_time, reaction):
+def run_conversation(initiator, partner, current_time, reaction, world=None):
     """
     Run a full conversation. Both arguments are AgentRuntime objects.
     Returns the list of (speaker_name, line) in order.
@@ -114,7 +135,7 @@ def run_conversation(initiator, partner, current_time, reaction):
     for _ in range(MAX_TURNS):
         line = _generate_line(
             speaker, listener, current_time,
-            status=speaker.status, history=history, intent=reaction,
+            status=speaker.status, history=history, intent=reaction, world=world,
         )
 
         if line is None:

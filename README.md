@@ -164,7 +164,21 @@ pattern for objects:
 8. **Notes.** Handing a task to a teammate, blocking a task, and asking for
    review all require a note (what it needs, what blocks it, what to check). The
    handoff note goes with the assignment notice.
-9. **Reflection and conversation.** Board memories feed reflection, reactions and
+9. **One task at a time.** An agent can have one task in progress; to start
+   another they move the current one to review or blocked. Re-sending a status
+   a task already has is skipped quietly (not refused, not remembered). Tasks
+   are things to build or ship: titles that describe a meeting or a review are
+   refused. Notes can go on a task or on the board itself.
+10. **Conversations.** Both speakers see what the board says about them and each
+    other, so they talk about specific tasks. After a talk both remember it
+    ("Adam and Eve talked at 10:25 about …"); the same two agents don't start
+    another conversation within `CONVERSATION_COOLDOWN_MINUTES` unless the
+    reaction names a task; and a promise an agent already planned around doesn't
+    trigger another replan.
+11. **No gaps.** Replans must cover the rest of the day without gaps; if one
+    still leaves a gap, the agent keeps working on their in-progress task in
+    their office until the next block starts.
+12. **Reflection and conversation.** Board memories feed reflection, reactions and
    conversations like any other memory. Changes on the board (a task moving to
    review, a new note) are new observations for whoever walks up next, so they can
    start a conversation there.

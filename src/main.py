@@ -48,7 +48,7 @@ from conversation import run_conversation
 from memory_retriever import MemoryRetriever
 from memory_stream import MemoryStream
 from perceive import perceive_environment
-from plan import Planner
+from plan import DAY_END, Planner
 from reflect import Reflector
 from world import generate_interactions, load_world, save_world, update_agent_state
 
@@ -83,6 +83,11 @@ SKIP_UNCHANGED_CHUNKS = True
 # After a react (replan), don't ask the LLM about reacting again for this many
 # steps. Stops agents from replanning on nearly every step.
 REACT_COOLDOWN_STEPS = 6
+
+# The same two agents don't start another conversation within this many
+# minutes, unless the reaction names a specific task (T-3). Stops the loop of
+# meeting -> commitment "review with Eve" -> meeting again.
+CONVERSATION_COOLDOWN_MINUTES = 60
 
 # Plan chunks this short are already at the paper's 5-15 minute grain, so they
 # aren't sent to the LLM for minute-level decomposition (e.g. board steps).
@@ -156,6 +161,7 @@ class AgentRuntime:
     last_react_step: int = -10_000
     override: Optional[dict] = None
     queued: Optional[dict] = None
+    commitments: list = field(default_factory=list)   # promises already planned around
 
     # Per-step scratch space (filled in by the phases below)
     observations: list = field(default_factory=list)
@@ -256,7 +262,7 @@ def initial_planning(rt, world):
         expand_plan(rt, rt.broad_chunks)
 
 
-def get_chunk_lazy(rt, current_time):
+def get_chunk_lazy(rt, current_time, world=None):
     """
     Return the minute-level chunk covering current_time.
 
@@ -278,6 +284,12 @@ def get_chunk_lazy(rt, current_time):
     broad = p.get_current_minute_chunk(current_time, rt.broad_chunks)
     if broad is None:
         return None
+    if not p.covers(broad, current_time):
+        # The broad plan itself has a gap (a replan ended a block at 11:20 and
+        # the next starts at 12:30). Don't replay the last block that started.
+        broad = gap_block(rt, current_time, world)
+        if broad is None:
+            return None
 
     hour = p.get_current_minute_chunk(current_time, expand_hours(rt, broad))
     if hour is None or not p.covers(hour, current_time):
@@ -289,6 +301,44 @@ def get_chunk_lazy(rt, current_time):
             return None
 
     return p.get_current_minute_chunk(current_time, expand_minutes(rt, hour))
+
+
+def gap_block(rt, current_time, world=None):
+    """A broad block filling a gap in the plan: from where the last block ended
+    to where the next one starts (or the end of the day). The agent carries on
+    with the task they have in progress, or their own work if they have none."""
+    p = rt.planner
+    now = p._parse_time(current_time)
+    ends, starts = [], []
+    for c in rt.broad_chunks:
+        start = p._parse_time(c.get("start_time"))
+        if start is None:
+            continue
+        end = start + timedelta(minutes=c.get("duration") or 0)
+        if end <= now:
+            ends.append(end)
+        elif start > now:
+            starts.append(start)
+    day_end = p._parse_time(DAY_END)
+    gap_start = max(ends) if ends else now
+    gap_end = min(starts + [day_end])
+    if gap_end <= now:
+        return None                                    # the workday is over
+
+    working = [t for t in project_board.open_tasks_for(world, rt.agent["id"])
+               if t["status"] == "in_progress"] if world else []
+    what = (f"keep working on {working[0]['id']} '{working[0]['title']}'"
+            if working else f"focus on {rt.agent['name']}'s own work")
+    start_text, end_text = p._fmt(gap_start), p._fmt(gap_end)
+    log.debug(f"{rt.tag} broad plan gap {start_text}-{end_text}: {what}")
+    return {
+        "activity": f"{what} in the office from {start_text} to {end_text}",
+        "location": rt.agent.get("office"),
+        "start_time": start_text,
+        "duration": int((gap_end - gap_start).total_seconds() // 60),
+        "target_agent": None,
+        "board_work": False,
+    }
 
 
 def gap_hour(rt, broad, current_time):
@@ -375,7 +425,7 @@ def decide_phase(rt, step, current_time, world):
     rt.reaction = ""
 
     rt.status = planner.get_current_status(rt.agent, current_time)
-    rt.chunk = get_chunk_lazy(rt, current_time)
+    rt.chunk = get_chunk_lazy(rt, current_time, world)
 
     log.debug(f"{rt.tag} status: {rt.status}")
     if rt.chunk:
@@ -442,9 +492,16 @@ def resolve_conversations(runtimes, step, current_time, world):
                 or other.agent["current_location"] != rt.agent["current_location"]):
             continue                      # not a conversation; normal react() runs
 
+        if talked_recently(rt, other, current_time) and not TASK_ID.search(rt.reaction):
+            # They just talked; nothing specific is new. Keep working instead.
+            log.debug(f"{rt.tag} skips talking to {other.tag} again so soon: {rt.reaction}")
+            rt.decision, rt.reaction = "1", ""
+            continue
+
         log.conversation_start(rt.tag, other.tag, rt.agent["current_location"], rt.reaction)
         with timed(f"{rt.tag}<->{other.tag} conversation (LLM per turn)"):
-            history = run_conversation(rt, other, current_time, rt.reaction)
+            history = run_conversation(rt, other, current_time, rt.reaction, world)
+        remember_conversation(rt, other, current_time, rt.reaction)
 
         # One call: shared meeting (if any) + each agent's own commitment
         outcomes = {"meeting": None, "commitments": {}}
@@ -460,11 +517,46 @@ def resolve_conversations(runtimes, step, current_time, world):
 
         for a, b in ((rt, other), (other, rt)):
             commitment = outcomes["commitments"].get(a.agent["name"])
-            if commitment:
-                replan_after_conversation(a, commitment, current_time, world)
+            replanned = bool(commitment) and replan_after_conversation(
+                a, commitment, current_time, world)
             settle_after_conversation(a, b, step, current_time, world, outcomes["meeting"])
-            if commitment and not outcomes["meeting"]:
+            if replanned and not outcomes["meeting"]:
                 queue_board_visit(a, commitment, current_time, world)
+
+
+TASK_ID = re.compile(r"\bT-\d+\b", re.IGNORECASE)
+_last_talk = {}          # frozenset({id_a, id_b}) -> datetime of their last conversation
+
+
+def talked_recently(rt, other, current_time):
+    last = _last_talk.get(frozenset((rt.agent["id"], other.agent["id"])))
+    now = rt.planner._parse_time(current_time)
+    return (last is not None and now is not None
+            and now - last < timedelta(minutes=CONVERSATION_COOLDOWN_MINUTES))
+
+
+def remember_conversation(rt, other, current_time, topic):
+    """Both agents remember that this talk happened and what it was about, so
+    later reactions (and reflection) can see they already covered it."""
+    _last_talk[frozenset((rt.agent["id"], other.agent["id"]))] = rt.planner._parse_time(current_time)
+    a, b = rt.agent["name"], other.agent["name"]
+    line = f"{a} and {b} talked at {current_time} about: {topic.strip().rstrip('.')}."
+    rt.stream.add_observations([line])
+    other.stream.add_observations([line])
+
+
+def _words(text):
+    return {w for w in re.findall(r"[a-z0-9-]+", text.lower()) if len(w) > 3}
+
+
+def is_repeat_commitment(rt, commitment, threshold=0.5):
+    """Is this (nearly) a promise the agent already planned around today?"""
+    new = _words(commitment)
+    for old in rt.commitments:
+        before = _words(old)
+        if new and before and len(new & before) / len(new | before) >= threshold:
+            return True
+    return False
 
 
 def log_outcomes(rt, other, outcomes):
@@ -514,7 +606,12 @@ def replan_rest_of_day(rt, start, reason, world, label, extra_guidance=""):
 def replan_after_conversation(rt, commitment, current_time, world):
     """Rewrite the rest of the day around a commitment (paper: replan after dialogue).
     A promise that can only be kept at the board is also remembered for the next
-    board visit, and the new plan has to include that visit."""
+    board visit, and the new plan has to include that visit. A promise the agent
+    already planned around is not planned again. Returns True if it replanned."""
+    if is_repeat_commitment(rt, commitment):
+        log.event(f"{rt.tag} already planned around this: {commitment}")
+        return False
+    rt.commitments.append(commitment)
     start = step_time(current_time)        # the talk override covers the current step
     extra = ""
     if project_board.is_board_commitment(commitment):
@@ -524,11 +621,13 @@ def replan_after_conversation(rt, commitment, current_time, world):
         plan must include a short visit to update the project board in the
         conference room soon after {start}.
         """
-    if not replan_rest_of_day(rt, start, f"Committed in conversation: {commitment}",
+    if not replan_rest_of_day(rt, start,
+                              f"{rt.agent['name']} agreed in a conversation to: {commitment}",
                               world, "replan after conversation", extra):
-        return
+        return False
     rt.stream.add_observations([f"{rt.agent['name']} committed to: {commitment}"])
     log.event(f"{rt.tag} replanned the day around: {commitment}")
+    return True
 
 
 def replan_after_board(rt, current_time, world):
@@ -746,6 +845,7 @@ def main():
     clock.set_time(current_time)
     project_board.clear_workload_changed()      # nothing carried over from a previous run
     project_board.clear_commitments()
+    _last_talk.clear()
 
     for rt in runtimes:
         # A reflection time that is already behind us at start-up never fires.

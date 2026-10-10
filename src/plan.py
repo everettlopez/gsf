@@ -187,11 +187,13 @@ class Planner:
         {name}'s previous plan for the rest of the day:
         {old_text}
 
-        Just now, {name} decided to react: {reaction}
+        What just happened: {reaction}
         {guidance}
         Revise {name}'s plan from {current_time} until {end_of_day}.
         Return a numbered list of broad-strokes blocks, each written as
-        "<activity> from H:MM am to H:MM pm". The first block must start at {current_time}.
+        "<activity> from H:MM am to H:MM pm". The first block must start at {current_time},
+        each block must start when the previous one ends (no gaps), and the last
+        one must end at {end_of_day}. Describe what {name} will do, not the reason.
         
         Example:
         1. work on the website's backend API from {current_time} to 1:00 pm"""
@@ -293,11 +295,12 @@ class Planner:
                 out.append(c)
                 continue
 
-            to_start = [t for t in named if own[t]["status"] == "todo" and t not in visited]
+            # One task at a time: only the first todo task named here is started.
+            to_start = [t for t in named if own[t]["status"] == "todo" and t not in visited][:1]
             to_wrap = [t for t in named if last.get(t) == i]
             if to_start:
                 out.append(self._board_step(agent, start, minutes,
-                                            f"move {', '.join(to_start)} to in progress"))
+                                            f"start {to_start[0]} (move it to in progress)"))
                 visited.update(to_start)
                 start += timedelta(minutes=minutes)
                 minutes_total -= minutes
@@ -307,7 +310,7 @@ class Planner:
             if to_wrap:
                 out.append(self._board_step(
                     agent, start + timedelta(minutes=minutes_total), minutes,
-                    f"update {', '.join(to_wrap)} (in progress, review or blocked)"))
+                    f"report progress on {', '.join(to_wrap)}"))
         return out
 
     def create_chunks(self, daily_plan, agent, world=None):

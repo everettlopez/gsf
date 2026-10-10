@@ -118,7 +118,7 @@ def test_board_prompt_shows_area_status_and_note_guidance(w):
     assert "Adam Beck's area: backend" in prompt
     assert "What stands out on the board for Adam Beck:" in prompt
     assert "no open backend tasks" in prompt
-    assert "Never a note that\n      only says what Adam Beck is doing right now" in prompt
+    assert "Never a note that only says what Adam Beck is doing right now" in " ".join(prompt.split())
 
 
 # --- planning from the project's state (paper 4.3) -----------------------------
@@ -171,11 +171,10 @@ def test_checkpoints_wrap_work_on_a_todo_task(fake_llm, isolated_data, w):
     assert [(c["start_time"], c["duration"], c["board_work"]) for c in out] == [
         ("9:00 am", 10, True), ("9:10 am", 100, False), ("10:50 am", 10, True),
         ("12:00 pm", 60, False)]
-    assert out[0]["activity"] == ("move T-1 to in progress on the project board "
+    assert out[0]["activity"] == ("start T-1 (move it to in progress) on the project board "
                                   "from 9:00 am to 9:10 am")
     assert out[1]["activity"] == "work on T-1 'Set up the API' from 9:10 am to 10:50 am"
-    assert out[2]["activity"].startswith("update T-1 (in progress, review or blocked) "
-                                         "on the project board")
+    assert out[2]["activity"].startswith("report progress on T-1 on the project board")
 
 
 def test_task_already_in_progress_only_gets_the_wrap_up(fake_llm, isolated_data, w):
