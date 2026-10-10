@@ -9,7 +9,8 @@ from plan import Planner
 from world import generate_interactions, mentions_board
 
 TASK_FIELDS = {"id", "title", "description", "area", "priority", "status", "assignee",
-               "created_by", "depends_on", "done_when", "created_at", "updated_at", "history"}
+               "created_by", "depends_on", "done_when", "approved_by", "created_at",
+               "updated_at", "history"}
 
 
 @pytest.fixture
@@ -86,22 +87,124 @@ def test_starting_a_task_claims_it_and_respects_dependencies(w):
 
     pb.update_status(w, "adam", "T-1", "in_progress")
     assert pb.get_task(w, "T-1")["assignee"] == "adam"
-    pb.update_status(w, "adam", "T-1", "done", note="deployed")
+    finish(w, "T-1", note="deployed")
     pb.update_status(w, "eve", "T-2", "in_progress")
     assert pb.get_task(w, "T-1")["history"][-1]["note"] == "deployed"
 
 
-def test_only_the_assignee_moves_a_task_except_into_review(w):
+def finish(w, task_id, owner="adam", reviewer="eve", note=""):
+    """Walk an assigned task through review and approval to done."""
+    if pb.get_task(w, task_id)["status"] != "in_progress":
+        pb.update_status(w, owner, task_id, "in_progress")
+    pb.update_status(w, owner, task_id, "review")
+    pb.approve_task(w, reviewer, task_id)
+    pb.update_status(w, owner, task_id, "done", note=note)
+
+
+def test_only_the_assignee_moves_a_task(w):
     pb.create_task(w, "adam", "Set up the API", assign_to_self=True)
-    with pytest.raises(pb.BoardError, match="belongs to Adam Beck"):
-        pb.update_status(w, "eve", "T-1", "done")
-    pb.update_status(w, "eve", "T-1", "review")      # asking for review is allowed
+    for status in ("in_progress", "review", "done"):
+        with pytest.raises(pb.BoardError, match="belongs to Adam Beck"):
+            pb.update_status(w, "eve", "T-1", status)
 
 
 def test_project_is_done_when_every_task_is(w):
     pb.create_task(w, "adam", "Set up the API", assign_to_self=True)
-    pb.update_status(w, "adam", "T-1", "done")
+    finish(w, "T-1")
     assert pb.get_project(w)["status"] == "done"
+
+
+# --- review and approval ---------------------------------------------------
+def test_done_requires_review_and_a_teammates_approval(w):
+    pb.create_task(w, "adam", "Set up the API", assign_to_self=True)
+    pb.update_status(w, "adam", "T-1", "in_progress")
+    with pytest.raises(pb.BoardError, match="go to review"):
+        pb.update_status(w, "adam", "T-1", "done")
+
+    pb.update_status(w, "adam", "T-1", "review")
+    with pytest.raises(pb.BoardError, match="needs a teammate to approve"):
+        pb.update_status(w, "adam", "T-1", "done")
+
+    pb.approve_task(w, "eve", "T-1", note="looks good")
+    pb.update_status(w, "adam", "T-1", "done")
+    assert pb.get_task(w, "T-1")["status"] == "done"
+
+
+def test_approval_rules(w):
+    pb.create_task(w, "adam", "Set up the API", assign_to_self=True)
+    with pytest.raises(pb.BoardError, match="not in review"):
+        pb.approve_task(w, "eve", "T-1")
+
+    pb.update_status(w, "adam", "T-1", "in_progress")
+    pb.update_status(w, "adam", "T-1", "review")
+    with pytest.raises(pb.BoardError, match="your own task"):
+        pb.approve_task(w, "adam", "T-1")
+
+    pb.approve_task(w, "eve", "T-1")
+    with pytest.raises(pb.BoardError, match="already approved"):
+        pb.approve_task(w, "eve", "T-1")
+
+
+def test_reopening_a_task_clears_its_approvals(w):
+    pb.create_task(w, "adam", "Set up the API", assign_to_self=True)
+    pb.update_status(w, "adam", "T-1", "in_progress")
+    pb.update_status(w, "adam", "T-1", "review")
+    pb.approve_task(w, "eve", "T-1")
+    pb.update_status(w, "adam", "T-1", "in_progress", note="found a bug")
+    assert pb.get_task(w, "T-1")["approved_by"] == []
+
+
+def test_unassigned_tasks_must_be_taken_before_moving(w):
+    pb.create_task(w, "adam", "Set up the API")
+    with pytest.raises(pb.BoardError, match="take it on first"):
+        pb.update_status(w, "adam", "T-1", "review")
+
+
+def test_approval_shows_on_the_board(w):
+    pb.create_task(w, "adam", "Set up the API", area="backend", priority="high",
+                   assign_to_self=True)
+    pb.update_status(w, "adam", "T-1", "in_progress")
+    pb.update_status(w, "adam", "T-1", "review")
+    pb.approve_task(w, "eve", "T-1")
+    assert pb.board_observations(w)[1] == (
+        "Task T-1 on the project board, 'Set up the API' (backend, high priority), "
+        "is review and assigned to Adam Beck, approved by Eve Smith.")
+
+
+def test_approve_action_line(w):
+    pb.create_task(w, "adam", "Set up the API", assign_to_self=True)
+    pb.update_status(w, "adam", "T-1", "in_progress")
+    pb.update_status(w, "adam", "T-1", "review")
+    done, _ = pb.apply_actions(w, eve(w), [{"action": "approve_task", "task_id": "T-1"}])
+    assert done == ["Eve Smith approved Adam Beck's task T-1 'Set up the API' on the project board."]
+
+
+# --- workload changes (drive the replan in main.py) ------------------------
+def test_taking_on_or_finishing_work_marks_a_workload_change(w):
+    pb.clear_workload_changed()
+    pb.create_task(w, "eve", "Write docs")
+    assert not pb.workload_changed("eve")            # created, not taken on
+
+    pb.claim_task(w, "eve", "T-1")
+    assert pb.workload_changed("eve")
+    pb.clear_workload_changed("eve")
+
+    pb.update_status(w, "eve", "T-1", "in_progress")
+    pb.update_status(w, "eve", "T-1", "review")
+    assert not pb.workload_changed("eve")            # progress alone keeps the plan
+
+    pb.approve_task(w, "adam", "T-1")
+    pb.update_status(w, "eve", "T-1", "done")
+    assert pb.workload_changed("eve")
+    pb.clear_workload_changed()
+
+
+def test_open_tasks_for_skips_done_and_other_peoples_tasks(w):
+    pb.create_task(w, "adam", "Set up the API", assign_to_self=True)
+    pb.create_task(w, "eve", "Build the home page", assign_to_self=True)
+    pb.create_task(w, "adam", "Write docs", assign_to_self=True)
+    finish(w, "T-3")
+    assert [t["id"] for t in pb.open_tasks_for(w, "adam")] == ["T-1"]
 
 
 # --- what agents see -------------------------------------------------------

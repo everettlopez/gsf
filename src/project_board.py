@@ -27,10 +27,16 @@ Every task has the same shape (see ``new_task``):
       "created_by": "adam",
       "depends_on": ["T-2"],          # ids of tasks that must be done first
       "done_when": "How the team knows it is finished.",
+      "approved_by": ["eve"],         # teammates who signed off while in review
       "created_at": "7:35 am",
       "updated_at": "7:35 am",
       "history": [{"time": "7:35 am", "agent": "adam", "event": "created"}]
     }
+
+Review rule: the assignee moves their own task todo -> in_progress -> review.
+While it is in review, a teammate (anyone but the assignee) approves it at the
+board; only then can the assignee move it to done. Moving it back out of review
+clears the approvals.
 
 How agents change it (paper: an action changes the state of the object being
 used): when an agent is interacting with the board, ``interact`` makes one
@@ -53,7 +59,7 @@ BOARD_OBJECT = "project_board"
 STATUSES = ("todo", "in_progress", "blocked", "review", "done")
 PRIORITIES = ("high", "medium", "low")
 AREAS = ("backend", "frontend", "design", "devops", "testing", "general")
-ACTIONS = ("create_task", "claim_task", "update_status", "add_note")
+ACTIONS = ("create_task", "claim_task", "update_status", "add_note", "approve_task")
 
 MAX_ACTIONS_PER_VISIT = 4     # keeps one board visit from flooding the board
 MAX_TASKS_SHOWN = 12          # observations get long fast; done tasks are summarized
@@ -86,6 +92,8 @@ def get_project(world):
     project.setdefault("description", "")
     project.setdefault("status", "not_started")
     project.setdefault("tasks", [])
+    for task in project["tasks"]:
+        task.setdefault("approved_by", [])
     return project
 
 
@@ -158,6 +166,34 @@ def sync_board_object(world):
 
 
 # ---------------------------------------------------------------------------
+# Workload changes (read by main.py to replan the rest of the agent's day)
+# ---------------------------------------------------------------------------
+_workload_changed = set()
+
+
+def mark_workload_changed(agent_id):
+    _workload_changed.add(agent_id)
+
+
+def workload_changed(agent_id):
+    """Did this agent take on or finish a task since the last replan?"""
+    return agent_id in _workload_changed
+
+
+def clear_workload_changed(agent_id=None):
+    if agent_id is None:
+        _workload_changed.clear()
+    else:
+        _workload_changed.discard(agent_id)
+
+
+def open_tasks_for(world, agent_id):
+    """The agent's own tasks that are not done yet."""
+    return [t for t in get_project(world)["tasks"]
+            if t["assignee"] == agent_id and t["status"] != "done"]
+
+
+# ---------------------------------------------------------------------------
 # Board operations (deterministic; these are the only ways tasks change)
 # ---------------------------------------------------------------------------
 def new_task(task_id, agent_id, title, description="", area="general",
@@ -174,6 +210,7 @@ def new_task(task_id, agent_id, title, description="", area="general",
         "created_by": agent_id,
         "depends_on": list(depends_on),
         "done_when": done_when,
+        "approved_by": [],
         "created_at": now,
         "updated_at": now,
         "history": [{"time": now, "agent": agent_id, "event": "created"}],
@@ -202,6 +239,7 @@ def create_task(world, agent_id, title, description="", area="general",
     if assign_to_self:
         task["assignee"] = agent_id
         _log_event(task, agent_id, "claimed")
+        mark_workload_changed(agent_id)
     project["tasks"].append(task)
     refresh_project_status(world)
     sync_board_object(world)
@@ -218,30 +256,59 @@ def claim_task(world, agent_id, task_id):
         raise BoardError(f"{task['id']} is already done")
     task["assignee"] = agent_id
     _log_event(task, agent_id, "claimed")
+    mark_workload_changed(agent_id)
     sync_board_object(world)
     return task
 
 
 def update_status(world, agent_id, task_id, status, note=""):
+    """Only the assignee moves a task (starting an unassigned task claims it).
+    Done needs a teammate's approval while the task is in review."""
     task = get_task(world, task_id)
     if status not in STATUSES:
         raise BoardError(f"unknown status {status!r}")
     if task["status"] == status:
         raise BoardError(f"{task['id']} is already {status}")
-    if task["assignee"] and task["assignee"] != agent_id and status != "review":
+    if task["assignee"] and task["assignee"] != agent_id:
         raise BoardError(f"{task['id']} belongs to {_agent_name(world, task['assignee'])}")
+    if not task["assignee"] and status != "in_progress":
+        raise BoardError(f"{task['id']} has no one on it yet; take it on first")
     if status == "in_progress":
         blockers = _unmet_dependencies(world, task)
         if blockers:
             raise BoardError(f"{task['id']} is waiting on {', '.join(blockers)}")
         if not task["assignee"]:
             task["assignee"] = agent_id              # starting work claims it
+            mark_workload_changed(agent_id)
+    if status == "done":
+        if task["status"] != "review":
+            raise BoardError(f"{task['id']} has to go to review before it is done")
+        if not task["approved_by"]:
+            raise BoardError(f"{task['id']} needs a teammate to approve it first")
 
     old = task["status"]
+    if old == "review" and status != "done":
+        task["approved_by"] = []                     # reopened: approvals no longer apply
     task["status"] = status
     _log_event(task, agent_id, f"{old} -> {status}", _clean(note) or None)
+    if status == "done":
+        mark_workload_changed(agent_id)
     refresh_project_status(world)
     sync_board_object(world)
+    return task
+
+
+def approve_task(world, agent_id, task_id, note=""):
+    """A teammate signs off on a task that is in review."""
+    task = get_task(world, task_id)
+    if task["status"] != "review":
+        raise BoardError(f"{task['id']} is not in review")
+    if task["assignee"] == agent_id:
+        raise BoardError(f"{task['id']} is your own task; a teammate has to approve it")
+    if agent_id in task["approved_by"]:
+        raise BoardError(f"you already approved {task['id']}")
+    task["approved_by"].append(agent_id)
+    _log_event(task, agent_id, "approved", _clean(note) or None)
     return task
 
 
@@ -276,6 +343,8 @@ def describe_task(world, task):
     blockers = _unmet_dependencies(world, task) if task["status"] != "done" else []
     if blockers:
         line += f", waiting on {', '.join(blockers)}"
+    if task["approved_by"]:
+        line += ", approved by " + " and ".join(_agent_name(world, a) for a in task["approved_by"])
     line += "."
     note = latest_note(task)
     if note:
@@ -318,8 +387,10 @@ def board_text_for_prompt(world):
     for t in project["tasks"]:
         who = _agent_name(world, t["assignee"]) if t["assignee"] else "unassigned"
         deps = f" depends on {', '.join(t['depends_on'])};" if t["depends_on"] else ""
+        approved = (" approved by " + ", ".join(_agent_name(world, a) for a in t["approved_by"])
+                    + ";") if t["approved_by"] else ""
         row = (f"- {t['id']} [{t['status']}] {t['title']} ({t['area']}, "
-               f"{t['priority']}, {who});{deps} done when: {t['done_when'] or 'n/a'}")
+               f"{t['priority']}, {who});{deps}{approved} done when: {t['done_when'] or 'n/a'}")
         note = latest_note(t)
         if note:
             row += f"\n    latest note ({_agent_name(world, note['agent'])}): {note['note']}"
@@ -386,6 +457,11 @@ def apply_action(world, agent, action):
         return (f"{name} moved task {t['id']} '{t['title']}' to "
                 f"{t['status'].replace('_', ' ')} on the project board.")
 
+    if kind == "approve_task":
+        t = approve_task(world, aid, action.get("task_id"), action.get("note", ""))
+        return (f"{name} approved {_agent_name(world, t['assignee'])}'s task {t['id']} "
+                f"'{t['title']}' on the project board.")
+
     if kind == "add_note":
         t = add_note(world, aid, action.get("task_id"), action.get("note"))
         return f"{name} left a note on task {t['id']} '{t['title']}': {_clean(action.get('note'))}."
@@ -427,7 +503,28 @@ def _role_context(agent, retriever, limit=6):
     return "\n".join(lines[:limit])
 
 
-def build_prompt(agent, world, activity, summary, role_context):
+def _progress_context(agent, world, retriever, per_task=3, limit=10):
+    """What the agent has actually done on each of their open tasks, from memory,
+    so status changes at the board reflect real work."""
+    tasks = open_tasks_for(world, agent["id"])
+    if retriever is None or not tasks:
+        return ""
+    seen, lines = set(), []
+    for t in tasks:
+        query = f"{agent['name']}'s progress working on {t['title']}"
+        for r in retriever.retrieve(query, n=per_task + 2, touch=False):
+            d = r["memory"].description
+            # Board lines describe the board, not the work.
+            if d in seen or "project board" in d:
+                continue
+            seen.add(d)
+            lines.append(f"- {d}")
+            if len(lines) >= limit:
+                return "\n".join(lines)
+    return "\n".join(lines)
+
+
+def build_prompt(agent, world, activity, summary, role_context, progress=""):
     project = get_project(world)
     others = ", ".join(a["name"] for a in world["agents"].values() if a["id"] != agent["id"])
     return f"""
@@ -446,17 +543,27 @@ def build_prompt(agent, world, activity, summary, role_context):
     The board right now:
     {board_text_for_prompt(world)}
 
+    What {agent['name']} has been doing lately:
+    {progress or '- (nothing recorded yet)'}
+
     What does {agent['name']} do at the board right now? Choose 0 to {MAX_ACTIONS_PER_VISIT} actions:
+    - update_status: keep {agent['name']}'s own tasks current, based on what
+      {agent['name']} has actually been doing: in_progress once work has started,
+      blocked (with a note saying why) when stuck or waiting on someone, review
+      when the work is finished, and done only after a teammate has approved it.
+      Add a short note about the progress.
     - create_task: add work the goal needs that is not on the board yet. Give a short
       title, a one-sentence description, an area, a priority, depends_on (ids of
       tasks that must finish first), and done_when (how the team knows it is done).
       Set assign_to_self to true only if it fits {agent['name']}'s role.
     - claim_task: take an unassigned task that fits {agent['name']}'s role.
-    - update_status: move one of {agent['name']}'s own tasks (todo, in_progress,
-      blocked, review, done). Add a short note.
-    - add_note: leave a short note on a task, e.g. a question for a teammate.
+    - approve_task: sign off on a teammate's task that is in review, once
+      {agent['name']} has looked it over or talked it through with them.
+    - add_note: leave a short note on a task, e.g. progress, a question, or what
+      someone needs to know.
 
     Rules:
+    - Update {agent['name']}'s own tasks first if their status is out of date.
     - Only add tasks that move the team toward the goal, and never duplicate a task.
     - Prefer tasks in {agent['name']}'s own area; leave other areas for teammates.
     - Keep tasks small enough for one person to finish in a day or two.
@@ -473,7 +580,8 @@ def interact(agent, world, activity, planner=None, retriever=None, memory_stream
     retriever = retriever or getattr(planner, "memory_retriever", None)
     memory_stream = memory_stream or getattr(planner, "memory_stream", None)
 
-    prompt = build_prompt(agent, world, activity, summary, _role_context(agent, retriever))
+    prompt = build_prompt(agent, world, activity, summary, _role_context(agent, retriever),
+                          _progress_context(agent, world, retriever))
     try:
         raw = llm.generate(prompt, format=action_schema(world),
                            options={**CTX, "num_predict": 700, "temperature": 0.3})

@@ -21,7 +21,7 @@ AGENT_PROFILES = {
 
         Adam Beck's team has been asked to build and deploy the company website. Adam owns the backend side of it: the API, the data it needs, and getting the site deployed. Eve Smith owns the frontend.
 
-        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Adam checks the project board at the start of each workday and adds any backend work the website still needs.
+        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Adam checks the project board at the start of each workday and adds any backend work the website still needs. When Adam starts, finishes, or gets stuck on a task, he walks to the project board to update it, and he updates his tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Adam looks it over with them and approves it at the board if it is ready.
 
         Adam Beck works closely with other engineers and enjoys collaborating on technical challenges.
 
@@ -45,7 +45,7 @@ AGENT_PROFILES = {
 
         Eve Smith's team has been asked to build and deploy the company website. Eve owns the frontend side of it: the pages, the layout, and how the site looks and feels. Adam Beck owns the backend.
 
-        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Eve checks the project board at the start of each workday and adds any frontend work the website still needs.
+        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Eve checks the project board at the start of each workday and adds any frontend work the website still needs. When Eve starts, finishes, or gets stuck on a task, she walks to the project board to update it, and she updates her tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Eve looks it over with them and approves it at the board if it is ready.
 
         Eve Smith works with designers and other engineers, and prefers collaborating one-on-one or in writing on technical challenges.
 
@@ -150,7 +150,8 @@ class Planner:
             return items
         return [FIRST_PLAN_ITEM] + items
 
-    def regenerate_plan(self, agent, current_time, reaction, done_chunks, old_remaining, end_of_day="5:00 pm"):
+    def regenerate_plan(self, agent, current_time, reaction, done_chunks, old_remaining,
+                        end_of_day="5:00 pm", guidance=""):
         name = agent["name"]
         done_text = "\n".join(f"- {c['activity']}" for c in done_chunks) or "- (nothing yet)"
         old_text = "\n".join(f"- {c['activity']}" for c in old_remaining) or "- (nothing left)"
@@ -167,17 +168,38 @@ class Planner:
         {old_text}
 
         Just now, {name} decided to react: {reaction}
-
+        {guidance}
         Revise {name}'s plan from {current_time} until {end_of_day}.
         Return a numbered list of broad-strokes blocks, each written as
         "<activity> from H:MM am to H:MM pm". The first block must start at {current_time}.
         
         Example:
-        1. work on memory-system development from {current_time} to 1:00 pm"""
+        1. work on the website's backend API from {current_time} to 1:00 pm"""
 
         response = llm.generate(prompt, options={**CTX, "num_predict": 600, "temperature": 0.3})
 
         return self._parse_numbered(response)
+
+    def task_guidance(self, agent, open_tasks):
+        """Planning instructions for an agent with tasks on the project board."""
+        if not open_tasks:
+            return ""
+        name = agent["name"]
+        task_lines = "\n".join(
+            f"        - {t['id']} '{t['title']}' ({t['status'].replace('_', ' ')})"
+            for t in open_tasks
+        )
+        return f"""
+        {name}'s tasks on the project board:
+{task_lines}
+
+        Plan the rest of the day around these tasks:
+        - Name the task in each work block, e.g. "work on {open_tasks[0]['id']} '{open_tasks[0]['title']}' in the office from ...".
+        - When {name} starts, finishes, or gets stuck on a task, add a short block
+          to update it on the project board in the conference room.
+        - Add a short block to update the project board before lunch and before
+          clocking out.
+        """
 
     def create_chunks(self, daily_plan, agent, world=None):
         chunks = []

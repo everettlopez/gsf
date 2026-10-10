@@ -132,12 +132,23 @@ pattern for objects:
    changes, and a new line can trigger a reaction.
 3. **Action.** When an agent interacts with the board, one schema-constrained LLM
    call proposes up to 4 actions (`create_task`, `claim_task`, `update_status`,
-   `add_note`). Plain Python validates and applies them (no duplicate titles, no
-   taking someone else's task, no starting work before its dependencies are done)
-   and writes each change to the agent's memory stream. The LLM never edits the
-   board JSON directly.
-4. **Reflection and conversation.** Board memories feed reflection, reactions and
-   conversations like any other memory.
+   `approve_task`, `add_note`). The prompt includes what the agent has actually
+   been doing on each of their open tasks (retrieved from memory), so status
+   changes follow real work. Plain Python validates and applies the actions (no
+   duplicate titles, no moving someone else's task, no starting work before its
+   dependencies are done) and writes each change to the agent's memory stream.
+   The LLM never edits the board JSON directly.
+4. **Review.** The assignee moves their task `todo → in_progress → review`. A
+   teammate then approves it at the board, and only after that can the assignee
+   move it to `done`. Moving it back out of review clears the approvals.
+5. **Replanning.** When an agent takes on or finishes a task at the board, the rest
+   of their day is replanned around their open tasks once they step away: work
+   blocks name the task, and short trips back to the board are scheduled when a
+   task starts, finishes or gets stuck, and before lunch and clock-out.
+6. **Reflection and conversation.** Board memories feed reflection, reactions and
+   conversations like any other memory. Changes on the board (a task moving to
+   review, a new note) are new observations for whoever walks up next, so they can
+   start a conversation there.
 
 `python scripts/seed_memories.py --reset` clears the board along with the memory
 streams.

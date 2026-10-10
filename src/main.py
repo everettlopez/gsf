@@ -26,6 +26,11 @@ Reflection (paper section 4.2) runs twice per simulated day, at the times in
 REFLECTION_TIMES. Each agent reflects on what it has experienced since its last
 reflection, and the resulting insights go back into its memory stream.
 
+Project board (see project_board.py): when an agent takes on or finishes a
+task at the board, the rest of their day is replanned around their open tasks
+once they step away from it, so later work blocks name the task and include
+return trips to the board to keep it up to date.
+
 Verbosity: set GA_LOG=quiet|info|debug (default info). See log.py.
 """
 
@@ -38,6 +43,7 @@ from typing import Optional
 
 import clock
 import log
+import project_board
 from conversation import run_conversation
 from memory_retriever import MemoryRetriever
 from memory_stream import MemoryStream
@@ -423,28 +429,64 @@ def log_outcomes(rt, other, outcomes):
         log.event("no commitments made")
 
 
-def replan_after_conversation(rt, commitment, current_time, world):
-    """Rewrite the rest of the day around a commitment (paper: replan after dialogue)."""
-    start = step_time(current_time)        # the talk override covers the current step
+def replan_rest_of_day(rt, start, reason, world, label):
+    """Regenerate the plan from `start` on, keeping what already happened.
+    If the agent has tasks on the board, the new plan is built around them.
+    Returns True if the new plan was used."""
     done, remaining = rt.planner.split_plan(rt.broad_chunks, start)
+    guidance = rt.planner.task_guidance(
+        rt.agent, project_board.open_tasks_for(world, rt.agent["id"])
+    )
 
-    with timed(f"{rt.tag} replan after conversation (LLM)"):
+    with timed(f"{rt.tag} {label} (LLM)"):
         items = rt.planner.regenerate_plan(
-            rt.agent, start, f"Committed in conversation: {commitment}", done, remaining
+            rt.agent, start, reason, done, remaining, guidance=guidance
         )
     new_chunks = rt.planner.create_chunks(items, rt.agent, world)
 
     if not new_chunks or any(c["start_time"] is None for c in new_chunks):
         log.warn(f"{rt.tag}: replan unusable, keeping old plan")
-        return
+        return False
 
     rt.broad_chunks = done + new_chunks
     rt.hour_cache, rt.minute_cache = {}, {}     # old decompositions are stale
     rt.planner.create_plan(new_chunks)
+    log.debug(f"{rt.tag} new plan from {start}:")
+    for chunk in new_chunks:
+        log.debug(f"    {chunk['activity']}")
+    return True
+
+
+def replan_after_conversation(rt, commitment, current_time, world):
+    """Rewrite the rest of the day around a commitment (paper: replan after dialogue)."""
+    start = step_time(current_time)        # the talk override covers the current step
+    if not replan_rest_of_day(rt, start, f"Committed in conversation: {commitment}",
+                              world, "replan after conversation"):
+        return
     rt.stream.add_observations([f"{rt.agent['name']} committed to: {commitment}"])
     log.event(f"{rt.tag} replanned the day around: {commitment}")
 
-    
+
+def replan_after_board(rt, current_time, world):
+    """After a board visit where the agent took on or finished work, plan the
+    rest of the day around their open tasks. Waits until they've stepped away
+    from the board, so one visit leads to one replan."""
+    if not project_board.workload_changed(rt.agent["id"]):
+        return
+    if rt.agent["interacting_with"] == project_board.BOARD_OBJECT:
+        return
+
+    project_board.clear_workload_changed(rt.agent["id"])
+    tasks = project_board.open_tasks_for(world, rt.agent["id"])
+    summary = ", ".join(f"{t['id']} ({t['status'].replace('_', ' ')})" for t in tasks)
+    reason = (f"updated the project board; {rt.agent['name']}'s open tasks are now "
+              f"{summary or 'none'}")
+
+    if replan_rest_of_day(rt, step_time(current_time), reason, world,
+                          "replan after project board"):
+        log.event(f"{rt.tag} replanned the day around their tasks: {summary or 'none open'}")
+
+
 def settle_after_conversation(rt, partner, step, current_time, world, agreement=None):
     """Hold both agents in place for one step, then send them to any agreed meeting."""
     rt.last_react_step = step
@@ -604,6 +646,7 @@ def main():
 
     current_time = START_TIME
     clock.set_time(current_time)
+    project_board.clear_workload_changed()      # nothing carried over from a previous run
 
     for rt in runtimes:
         # A reflection time that is already behind us at start-up never fires.
@@ -629,6 +672,9 @@ def main():
 
             for rt in runtimes:
                 act_phase(rt, step, current_time, world)
+
+            for rt in runtimes:
+                replan_after_board(rt, current_time, world)
 
             for rt in runtimes:
                 log_step_summary(rt)
