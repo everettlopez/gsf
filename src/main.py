@@ -456,6 +456,8 @@ def resolve_conversations(runtimes, step, current_time, world):
             if commitment:
                 replan_after_conversation(a, commitment, current_time, world)
             settle_after_conversation(a, b, step, current_time, world, outcomes["meeting"])
+            if commitment and not outcomes["meeting"]:
+                queue_board_visit(a, commitment, current_time, world)
 
 
 def log_outcomes(rt, other, outcomes):
@@ -472,14 +474,14 @@ def log_outcomes(rt, other, outcomes):
         log.event("no commitments made")
 
 
-def replan_rest_of_day(rt, start, reason, world, label):
+def replan_rest_of_day(rt, start, reason, world, label, extra_guidance=""):
     """Regenerate the plan from `start` on, keeping what already happened.
     If the agent has tasks on the board, the new plan is built around them.
     Returns True if the new plan was used."""
     done, remaining = rt.planner.split_plan(rt.broad_chunks, start)
     guidance = rt.planner.task_guidance(
         rt.agent, project_board.open_tasks_for(world, rt.agent["id"])
-    )
+    ) + extra_guidance
 
     with timed(f"{rt.tag} {label} (LLM)"):
         items = rt.planner.regenerate_plan(
@@ -501,10 +503,20 @@ def replan_rest_of_day(rt, start, reason, world, label):
 
 
 def replan_after_conversation(rt, commitment, current_time, world):
-    """Rewrite the rest of the day around a commitment (paper: replan after dialogue)."""
+    """Rewrite the rest of the day around a commitment (paper: replan after dialogue).
+    A promise that can only be kept at the board is also remembered for the next
+    board visit, and the new plan has to include that visit."""
     start = step_time(current_time)        # the talk override covers the current step
+    extra = ""
+    if project_board.is_board_commitment(commitment):
+        project_board.add_commitment(rt.agent["id"], commitment)
+        extra = f"""
+        {rt.agent['name']} can only keep this promise at the project board, so the
+        plan must include a short visit to update the project board in the
+        conference room soon after {start}.
+        """
     if not replan_rest_of_day(rt, start, f"Committed in conversation: {commitment}",
-                              world, "replan after conversation"):
+                              world, "replan after conversation", extra):
         return
     rt.stream.add_observations([f"{rt.agent['name']} committed to: {commitment}"])
     log.event(f"{rt.tag} replanned the day around: {commitment}")
@@ -519,11 +531,18 @@ def replan_after_board(rt, current_time, world):
     if rt.agent["interacting_with"] == project_board.BOARD_OBJECT:
         return
 
+    notices = project_board.workload_notices(rt.agent["id"])
     project_board.clear_workload_changed(rt.agent["id"])
+    if notices:
+        # The board's notification: a teammate handed them work.
+        rt.stream.add_observations(notices)
+        for notice in notices:
+            log.event(f"{rt.tag} notified: {notice}")
+
     tasks = project_board.open_tasks_for(world, rt.agent["id"])
     summary = ", ".join(f"{t['id']} ({t['status'].replace('_', ' ')})" for t in tasks)
-    reason = (f"updated the project board; {rt.agent['name']}'s open tasks are now "
-              f"{summary or 'none'}")
+    reason = " ".join(notices) or "updated the project board;"
+    reason += f" {rt.agent['name']}'s open tasks are now {summary or 'none'}"
 
     if replan_rest_of_day(rt, step_time(current_time), reason, world,
                           "replan after project board"):
@@ -558,6 +577,26 @@ def settle_after_conversation(rt, partner, step, current_time, world, agreement=
             "pinned": True,
         }
 
+def queue_board_visit(rt, commitment, current_time, world, minutes=10):
+    """Promised something about the board while standing at it: do it right after
+    the conversation instead of hoping the replan comes back to it."""
+    room = project_board.board_location(world)
+    if (room is None or rt.agent["current_location"] != room
+            or not project_board.is_board_commitment(commitment)):
+        return
+    start = step_time(current_time)
+    rt.queued = {
+        "activity": f"{start}: update the project board: {commitment}",
+        "location": room,
+        "start_time": start,
+        "duration": minutes,
+        "target_agent": None,
+        "is_reaction": True,
+        "pinned": True,
+    }
+    log.event(f"{rt.tag} heads straight to the board to: {commitment}")
+
+
 # ---------------------------------------------------------------------------
 # PHASE 3: ACT
 # ---------------------------------------------------------------------------
@@ -565,9 +604,14 @@ def apply_chunk(rt, world):
     """Move the agent to its chunk's action/location and update the world."""
     chunk = rt.chunk
 
+    board_room = project_board.board_location(world)
     if chunk.get("pinned"):
         # Agreed meeting place: no LLM, no second-guessing
         loc = chunk["location"]
+    elif board_room and project_board.mentions_board_explicitly(chunk["activity"]):
+        # Board work happens at the board (also "review the board with Eve"):
+        # no LLM, so it can't send them to their office instead.
+        loc = board_room
     elif chunk.get("target_agent"):
         # update_agent_state follows the target agent's current room
         loc = None
@@ -690,6 +734,7 @@ def main():
     current_time = START_TIME
     clock.set_time(current_time)
     project_board.clear_workload_changed()      # nothing carried over from a previous run
+    project_board.clear_commitments()
 
     for rt in runtimes:
         # A reflection time that is already behind us at start-up never fires.

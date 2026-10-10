@@ -59,7 +59,30 @@ BOARD_OBJECT = "project_board"
 STATUSES = ("todo", "in_progress", "blocked", "review", "done")
 PRIORITIES = ("high", "medium", "low")
 AREAS = ("backend", "frontend", "design", "devops", "testing", "general")
-ACTIONS = ("create_task", "claim_task", "update_status", "add_note", "approve_task")
+ACTIONS = ("create_task", "claim_task", "assign_task", "update_status", "edit_task",
+           "add_note", "approve_task")
+
+# An activity that is explicitly about the board (routes the agent to it).
+_BOARD = re.compile(
+    r"\b(?:project board|task board|the board|board)\b"
+    r"|\btasks? (?:status(?:es)?|assignments?)\b"            # "update task statuses"
+    r"|\bupdat\w* (?:the )?(?:status of )?(?:tasks?\b|T-\d+)"  # "update T-1"
+    r"|\b(?:assign|claim|approv)\w*\b.*?\b(?:tasks?\b|T-\d+)",  # "assign T-4 to Adam"
+    re.IGNORECASE,
+)
+# A commitment that can only be kept at the board.
+_BOARD_COMMITMENT = re.compile(
+    r"\b(?:board|tasks?|T-\d+|assign\w*|status|review|approv\w*|dependenc\w*|priorit\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def mentions_board_explicitly(activity):
+    return bool(_BOARD.search(activity or ""))
+
+
+def is_board_commitment(text):
+    return bool(_BOARD_COMMITMENT.search(text or ""))
 
 MAX_ACTIONS_PER_VISIT = 4     # keeps one board visit from flooding the board
 MAX_TASKS_SHOWN = 12          # observations get long fast; done tasks are summarized
@@ -168,23 +191,67 @@ def sync_board_object(world):
 # ---------------------------------------------------------------------------
 # Workload changes (read by main.py to replan the rest of the agent's day)
 # ---------------------------------------------------------------------------
-_workload_changed = set()
+_workload_changed = {}       # agent id -> notices about what changed for them
 
 
-def mark_workload_changed(agent_id):
-    _workload_changed.add(agent_id)
+def mark_workload_changed(agent_id, notice=None):
+    notices = _workload_changed.setdefault(agent_id, [])
+    if notice and notice not in notices:
+        notices.append(notice)
 
 
 def workload_changed(agent_id):
-    """Did this agent take on or finish a task since the last replan?"""
+    """Did this agent's workload change (took on, finished, or was handed a task)?"""
     return agent_id in _workload_changed
+
+
+def workload_notices(agent_id):
+    """What changed for this agent that they didn't do themselves, e.g. a
+    teammate assigning them a task (the board's notification)."""
+    return list(_workload_changed.get(agent_id, []))
 
 
 def clear_workload_changed(agent_id=None):
     if agent_id is None:
         _workload_changed.clear()
     else:
-        _workload_changed.discard(agent_id)
+        _workload_changed.pop(agent_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Promises made in conversation that have to be kept at the board
+# ---------------------------------------------------------------------------
+COMMITMENT_VISITS = 2        # give up on a promise after this many visits without acting
+_commitments = {}            # agent id -> [{"text": ..., "visits": n}]
+
+
+def add_commitment(agent_id, text):
+    items = _commitments.setdefault(agent_id, [])
+    if all(c["text"] != text for c in items):
+        items.append({"text": text, "visits": 0})
+
+
+def commitments_for(agent_id):
+    return [c["text"] for c in _commitments.get(agent_id, [])]
+
+
+def clear_commitments(agent_id=None):
+    if agent_id is None:
+        _commitments.clear()
+    else:
+        _commitments.pop(agent_id, None)
+
+
+def _after_visit(agent_id, acted):
+    """A visit where the agent changed something settles their promises;
+    otherwise they get one more visit before the promise is dropped."""
+    if acted:
+        clear_commitments(agent_id)
+        return
+    items = _commitments.get(agent_id, [])
+    for c in items:
+        c["visits"] += 1
+    _commitments[agent_id] = [c for c in items if c["visits"] < COMMITMENT_VISITS]
 
 
 def open_tasks_for(world, agent_id):
@@ -296,6 +363,67 @@ def update_status(world, agent_id, task_id, status, note=""):
     refresh_project_status(world)
     sync_board_object(world)
     return task
+
+
+def assign_task(world, agent_id, task_id, assignee):
+    """Give an unassigned task, or your own task, to a teammate (or yourself)."""
+    task = get_task(world, task_id)
+    to = (assignee or "").strip().lower()
+    if to not in world["agents"]:
+        # Accept a name ("Adam Beck", "adam") as well as an id
+        to = next((a["id"] for a in world["agents"].values()
+                   if a["name"].lower() == to or a["name"].split()[0].lower() == to), to)
+    if to not in world["agents"]:
+        raise BoardError(f"there is no teammate called {assignee!r}")
+    if task["status"] == "done":
+        raise BoardError(f"{task['id']} is already done")
+    if task["assignee"] == to:
+        raise BoardError(f"{task['id']} is already assigned to {_agent_name(world, to)}")
+    if task["assignee"] and task["assignee"] != agent_id:
+        raise BoardError(f"{task['id']} belongs to {_agent_name(world, task['assignee'])}; "
+                         f"only they can hand it over")
+
+    previous = task["assignee"]
+    task["assignee"] = to
+    task["approved_by"] = []
+    _log_event(task, agent_id, f"assigned to {to}")
+    if to != agent_id:
+        mark_workload_changed(to, f"{_agent_name(world, agent_id)} assigned task {task['id']} "
+                                  f"'{task['title']}' to {_agent_name(world, to)} on the project board.")
+    else:
+        mark_workload_changed(to)
+    if previous == agent_id and to != agent_id:
+        mark_workload_changed(agent_id)               # handed off their own work
+    sync_board_object(world)
+    return task
+
+
+def edit_task(world, agent_id, task_id, depends_on=None, priority=None,
+              description=None, done_when=None):
+    """Change a task's details. The assignee can, or anyone while it's unassigned."""
+    task = get_task(world, task_id)
+    if task["assignee"] and task["assignee"] != agent_id:
+        raise BoardError(f"{task['id']} belongs to {_agent_name(world, task['assignee'])}")
+    changed = []
+    if depends_on is not None:
+        known = {t["id"] for t in get_project(world)["tasks"]} - {task["id"]}
+        deps = sorted({d.strip().upper() for d in depends_on if d and d.strip().upper() in known})
+        if deps != task["depends_on"]:
+            task["depends_on"] = deps
+            changed.append("dependencies")
+    if priority in PRIORITIES and priority != task["priority"]:
+        task["priority"] = priority
+        changed.append("priority")
+    if description and _clean(description, 300) != task["description"]:
+        task["description"] = _clean(description, 300)
+        changed.append("description")
+    if done_when and _clean(done_when, 200) != task["done_when"]:
+        task["done_when"] = _clean(done_when, 200)
+        changed.append("finish line")
+    if not changed:
+        raise BoardError(f"nothing to change on {task['id']}")
+    _log_event(task, agent_id, "edited " + ", ".join(changed))
+    return task, changed
 
 
 def approve_task(world, agent_id, task_id, note=""):
@@ -422,6 +550,7 @@ def action_schema(world):
                         "done_when": {"type": "string"},
                         "depends_on": {"type": "array", "items": {"type": "string"}},
                         "assign_to_self": {"type": "boolean"},
+                        "assignee": {"type": "string", "enum": list(world["agents"])},
                         "status": {"type": "string", "enum": list(STATUSES)},
                         "note": {"type": "string"},
                     },
@@ -456,6 +585,20 @@ def apply_action(world, agent, action):
                           action.get("note", ""))
         return (f"{name} moved task {t['id']} '{t['title']}' to "
                 f"{t['status'].replace('_', ' ')} on the project board.")
+
+    if kind == "assign_task":
+        t = assign_task(world, aid, action.get("task_id"), action.get("assignee"))
+        return (f"{name} assigned task {t['id']} '{t['title']}' to "
+                f"{_agent_name(world, t['assignee'])} on the project board.")
+
+    if kind == "edit_task":
+        deps = action.get("depends_on")
+        if isinstance(deps, str):
+            deps = [deps]
+        t, changed = edit_task(world, aid, action.get("task_id"), deps,
+                               action.get("priority"), action.get("description"),
+                               action.get("done_when"))
+        return f"{name} updated the {', '.join(changed)} of task {t['id']} '{t['title']}' on the project board."
 
     if kind == "approve_task":
         t = approve_task(world, aid, action.get("task_id"), action.get("note", ""))
@@ -524,7 +667,7 @@ def _progress_context(agent, world, retriever, per_task=3, limit=10):
     return "\n".join(lines)
 
 
-def build_prompt(agent, world, activity, summary, role_context, progress=""):
+def build_prompt(agent, world, activity, summary, role_context, progress="", commitments=()):
     project = get_project(world)
     others = ", ".join(a["name"] for a in world["agents"].values() if a["id"] != agent["id"])
     return f"""
@@ -545,7 +688,7 @@ def build_prompt(agent, world, activity, summary, role_context, progress=""):
 
     What {agent['name']} has been doing lately:
     {progress or '- (nothing recorded yet)'}
-
+{_commitments_block(agent, commitments)}
     What does {agent['name']} do at the board right now? Choose 0 to {MAX_ACTIONS_PER_VISIT} actions:
     - update_status: keep {agent['name']}'s own tasks current, based on what
       {agent['name']} has actually been doing: in_progress once work has started,
@@ -557,18 +700,44 @@ def build_prompt(agent, world, activity, summary, role_context, progress=""):
       tasks that must finish first), and done_when (how the team knows it is done).
       Set assign_to_self to true only if it fits {agent['name']}'s role.
     - claim_task: take an unassigned task that fits {agent['name']}'s role.
+    - assign_task: give an unassigned task (or one of {agent['name']}'s own) to the
+      teammate who should do it. Set task_id and assignee.
+    - edit_task: change an unassigned or own task's depends_on, priority,
+      description or done_when.
     - approve_task: sign off on a teammate's task that is in review, once
       {agent['name']} has looked it over or talked it through with them.
     - add_note: leave a short note on a task, e.g. progress, a question, or what
       someone needs to know.
 
     Rules:
-    - Update {agent['name']}'s own tasks first if their status is out of date.
+    - Do what {agent['name']} promised teammates first, if anything.
+    - Update {agent['name']}'s own tasks if their status is out of date.
     - Only add tasks that move the team toward the goal, and never duplicate a task.
     - Prefer tasks in {agent['name']}'s own area; leave other areas for teammates.
     - Keep tasks small enough for one person to finish in a day or two.
     - Do only what the current activity calls for; doing nothing is fine.
     """
+
+
+def _refusal_memory(name, refusal):
+    """'claim_task: T-1 is already claimed by Adam Beck' ->
+    'Adam Beck tried to claim a task on the project board but couldn't: T-1 is ...'"""
+    kind, _, reason = refusal.partition(": ")
+    what = {"create_task": "add a task", "claim_task": "take on a task",
+            "assign_task": "assign a task", "update_status": "move a task",
+            "edit_task": "edit a task", "add_note": "leave a note",
+            "approve_task": "approve a task"}.get(kind, "change the board")
+    return f"{name} tried to {what} on the project board but couldn't: {reason}."
+
+
+def _commitments_block(agent, commitments):
+    if not commitments:
+        return ""
+    lines = "\n".join(f"    - {c}" for c in commitments)
+    return f"""
+    {agent['name']} promised teammates to do this on the board:
+{lines}
+"""
 
 
 def interact(agent, world, activity, planner=None, retriever=None, memory_stream=None):
@@ -580,8 +749,9 @@ def interact(agent, world, activity, planner=None, retriever=None, memory_stream
     retriever = retriever or getattr(planner, "memory_retriever", None)
     memory_stream = memory_stream or getattr(planner, "memory_stream", None)
 
+    promised = commitments_for(agent["id"])
     prompt = build_prompt(agent, world, activity, summary, _role_context(agent, retriever),
-                          _progress_context(agent, world, retriever))
+                          _progress_context(agent, world, retriever), promised)
     try:
         raw = llm.generate(prompt, format=action_schema(world),
                            options={**CTX, "num_predict": 700, "temperature": 0.3})
@@ -591,12 +761,17 @@ def interact(agent, world, activity, planner=None, retriever=None, memory_stream
         return []
 
     done, refused = apply_actions(world, agent, result.get("actions"))
+    _after_visit(agent["id"], acted=bool(done))
     log.debug(f"{agent['name']} at board: {result.get('reason', '')}")
     for line in done:
         log.event(f"📋 {line}")
     for line in refused:
-        log.debug(f"board refused {agent['name']}'s {line}")
+        log.event(f"📋✗ {agent['name']} couldn't {line}")
 
-    if done and memory_stream is not None:
-        memory_stream.add_observations(done)
+    # A refusal is something the agent learns ("T-1 needs a teammate to approve
+    # it first"), which is exactly what should send them to talk to someone.
+    remembered = done + [_refusal_memory(agent["name"], line) for line in refused
+                         if "malformed action" not in line]     # model noise, not a lesson
+    if remembered and memory_stream is not None:
+        memory_stream.add_observations(remembered)
     return done

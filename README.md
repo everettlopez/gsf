@@ -131,8 +131,8 @@ pattern for objects:
    todo and unassigned."). Like other observations, a line is stored only when it
    changes, and a new line can trigger a reaction.
 3. **Action.** When an agent interacts with the board, one schema-constrained LLM
-   call proposes up to 4 actions (`create_task`, `claim_task`, `update_status`,
-   `approve_task`, `add_note`). The prompt includes what the agent has actually
+   call proposes up to 4 actions (`create_task`, `claim_task`, `assign_task`,
+   `update_status`, `edit_task`, `approve_task`, `add_note`). The prompt includes what the agent has actually
    been doing on each of their open tasks (retrieved from memory), so status
    changes follow real work. Plain Python validates and applies the actions (no
    duplicate titles, no moving someone else's task, no starting work before its
@@ -145,7 +145,15 @@ pattern for objects:
    of their day is replanned around their open tasks once they step away: work
    blocks name the task, and short trips back to the board are scheduled when a
    task starts, finishes or gets stuck, and before lunch and clock-out.
-6. **Reflection and conversation.** Board memories feed reflection, reactions and
+6. **Follow-through.** Anything clearly about the board ("review the project
+   board", "update task statuses", "assign T-4 to Adam") is routed to the board
+   without an LLM call, and other work in the conference room can't touch the
+   board. A promise about the board made in conversation is kept for the agent's
+   next board visit and shown first in that prompt. If they made it while
+   standing at the board, they go straight back to it after the conversation.
+   Refused actions ("T-1 needs a teammate to approve it first") are remembered,
+   and an agent who is assigned a task is notified and replans around it.
+7. **Reflection and conversation.** Board memories feed reflection, reactions and
    conversations like any other memory. Changes on the board (a task moving to
    review, a new note) are new observations for whoever walks up next, so they can
    start a conversation there.

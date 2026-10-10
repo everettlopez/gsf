@@ -105,12 +105,17 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
     activity = (chunk or {}).get("activity") or agent["current_action"]
     board_here = project_board.BOARD_OBJECT in room_objects
 
-    if talking_to_agent or not room_objects:
+    # Only board work can pick the board; otherwise "design the homepage" in the
+    # conference room ends up "using" the board and editing tasks at random.
+    usable = {name: data for name, data in room_objects.items()
+              if name != project_board.BOARD_OBJECT}
+
+    if board_here and mentions_board(activity):
+        # Plainly board work (even "review the board with Eve"): no LLM needed.
+        agent["interacting_with"] = project_board.BOARD_OBJECT
+    elif talking_to_agent or not usable:
         # Conversations don't involve objects, and empty rooms have none.
         agent["interacting_with"] = None
-    elif board_here and mentions_board(activity):
-        # Plainly board work: no need to ask the LLM which object it is.
-        agent["interacting_with"] = project_board.BOARD_OBJECT
     else:
         agent_summary = planner.generate_agent_summary(agent)  # cached
         observations_text = "\n".join(
@@ -129,7 +134,7 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
     {observations_text}
 
     Available objects:
-    {json.dumps(room_objects, indent=2)}
+    {json.dumps(usable, indent=2)}
 
     Determine:
     1. Which object the agent is interacting with.
@@ -161,13 +166,12 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
         result = _parse_json(llm.generate(prompt, format="json"))
 
         choice = result.get("interacting_with")
-        agent["interacting_with"] = choice if choice in room_objects else None
+        agent["interacting_with"] = choice if choice in usable else None
 
         for change in result.get("changes") or []:
             obj = change.get("object")
-            if obj == project_board.BOARD_OBJECT:
-                continue        # the board only changes through project_board actions
-            if obj in room_objects and change.get("new_state"):
+            # (the board only changes through project_board actions)
+            if obj in usable and change.get("new_state"):
                 room_objects[obj]["state"] = change["new_state"]
 
     if agent["interacting_with"] == project_board.BOARD_OBJECT:
@@ -187,7 +191,8 @@ _BOARD_WORDS = re.compile(
 
 def mentions_board(activity):
     """Does this activity plainly involve the project board?"""
-    return bool(_BOARD_WORDS.search(activity or ""))
+    return bool(_BOARD_WORDS.search(activity or "")
+                or project_board.mentions_board_explicitly(activity))
 
 
 def action_to_present(action):
