@@ -78,7 +78,8 @@
       "office": "office_1",
       "current_location": "reception",
       "current_action": "idle",
-      "interacting_with": null
+      "interacting_with": null,
+      "area": "backend"
     },
     "eve": {
       "id": "eve",
@@ -86,7 +87,8 @@
       "office": "office_2",
       "current_location": "reception",
       "current_action": "idle",
-      "interacting_with": null
+      "interacting_with": null,
+      "area": "frontend"
     }
   },
   "project": {

@@ -84,6 +84,10 @@ SKIP_UNCHANGED_CHUNKS = True
 # steps. Stops agents from replanning on nearly every step.
 REACT_COOLDOWN_STEPS = 6
 
+# Plan chunks this short are already at the paper's 5-15 minute grain, so they
+# aren't sent to the LLM for minute-level decomposition (e.g. board steps).
+SHORT_CHUNK_MINUTES = 15
+
 # Step 1 sees the whole room as "new". Treat it as a baseline and don't react.
 SKIP_REACT_ON_FIRST_STEP = True
 
@@ -207,6 +211,9 @@ def expand_minutes(rt, hour):
     """hour chunk -> 5-15 minute chunks (cached, saved to the memory stream)."""
     p = rt.planner
     hkey = (hour["start_time"], hour["activity"])
+
+    if hkey not in rt.minute_cache and (hour.get("duration") or 60) <= SHORT_CHUNK_MINUTES:
+        rt.minute_cache[hkey] = [hour]          # already 5-15 minutes: nothing to break down
 
     if hkey not in rt.minute_cache:
         with timed(f"{rt.tag} expand hour {hkey[0]} -> minutes (LLM)"):
@@ -479,9 +486,7 @@ def replan_rest_of_day(rt, start, reason, world, label, extra_guidance=""):
     If the agent has tasks on the board, the new plan is built around them.
     Returns True if the new plan was used."""
     done, remaining = rt.planner.split_plan(rt.broad_chunks, start)
-    guidance = rt.planner.task_guidance(
-        rt.agent, project_board.open_tasks_for(world, rt.agent["id"])
-    ) + extra_guidance
+    guidance = rt.planner.task_guidance(rt.agent, world) + extra_guidance
 
     with timed(f"{rt.tag} {label} (LLM)"):
         items = rt.planner.regenerate_plan(
@@ -492,6 +497,10 @@ def replan_rest_of_day(rt, start, reason, world, label, extra_guidance=""):
     if not new_chunks or any(c["start_time"] is None for c in new_chunks):
         log.warn(f"{rt.tag}: replan unusable, keeping old plan")
         return False
+
+    new_chunks = rt.planner.add_task_checkpoints(
+        new_chunks, rt.agent, project_board.open_tasks_for(world, rt.agent["id"])
+    )
 
     rt.broad_chunks = done + new_chunks
     rt.hour_cache, rt.minute_cache = {}, {}     # old decompositions are stale
@@ -593,6 +602,7 @@ def queue_board_visit(rt, commitment, current_time, world, minutes=10):
         "target_agent": None,
         "is_reaction": True,
         "pinned": True,
+        "board_work": True,
     }
     log.event(f"{rt.tag} heads straight to the board to: {commitment}")
 
@@ -608,7 +618,8 @@ def apply_chunk(rt, world):
     if chunk.get("pinned"):
         # Agreed meeting place: no LLM, no second-guessing
         loc = chunk["location"]
-    elif board_room and project_board.mentions_board_explicitly(chunk["activity"]):
+    elif board_room and (chunk.get("board_work")
+                         or project_board.mentions_board_explicitly(chunk["activity"])):
         # Board work happens at the board (also "review the board with Eve"):
         # no LLM, so it can't send them to their office instead.
         loc = board_room

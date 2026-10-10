@@ -365,8 +365,9 @@ def update_status(world, agent_id, task_id, status, note=""):
     return task
 
 
-def assign_task(world, agent_id, task_id, assignee):
-    """Give an unassigned task, or your own task, to a teammate (or yourself)."""
+def assign_task(world, agent_id, task_id, assignee, note=""):
+    """Give an unassigned task, or your own task, to a teammate (or yourself).
+    A handoff note is stored as the task's latest note and sent with the notice."""
     task = get_task(world, task_id)
     to = (assignee or "").strip().lower()
     if to not in world["agents"]:
@@ -387,9 +388,14 @@ def assign_task(world, agent_id, task_id, assignee):
     task["assignee"] = to
     task["approved_by"] = []
     _log_event(task, agent_id, f"assigned to {to}")
+    note = _clean(note)
+    if note:
+        _log_event(task, agent_id, "note", note)
     if to != agent_id:
-        mark_workload_changed(to, f"{_agent_name(world, agent_id)} assigned task {task['id']} "
-                                  f"'{task['title']}' to {_agent_name(world, to)} on the project board.")
+        notice = (f"{_agent_name(world, agent_id)} assigned task {task['id']} "
+                  f"'{task['title']}' to {_agent_name(world, to)} on the project board")
+        notice += f", noting: \"{note}\"." if note else "."
+        mark_workload_changed(to, notice)
     else:
         mark_workload_changed(to)
     if previous == agent_id and to != agent_id:
@@ -506,6 +512,60 @@ def board_observations(world):
     return lines
 
 
+def status_for_agent(world, agent_id):
+    """What the board means for this agent right now: gaps in their area, work
+    waiting on them, and their own tasks. Plain lines, used both at the board
+    and when planning the rest of the day after a visit."""
+    project = get_project(world)
+    tasks = project["tasks"]
+    agent = world["agents"][agent_id]
+    name, area = agent["name"], agent.get("area")
+    lines = []
+
+    if not tasks:
+        lines.append("The project board has no tasks yet; the work toward the goal still has to be laid out.")
+    else:
+        done = sum(t["status"] == "done" for t in tasks)
+        lines.append(f"{done} of {len(tasks)} tasks are done.")
+        areas = sorted({a.get("area") for a in world["agents"].values() if a.get("area")}
+                       | {t["area"] for t in tasks})
+        per_area = ", ".join(f"{a} {sum(t['area'] == a and t['status'] != 'done' for t in tasks)}"
+                             for a in areas)
+        lines.append(f"Open tasks per area: {per_area}.")
+
+    if area:
+        mine_area = [t for t in tasks if t["area"] == area and t["status"] != "done"]
+        if not mine_area:
+            lines.append(f"There are no open {area} tasks on the board, and {area} is "
+                         f"{name}'s area: {name} should add the {area} work the goal needs.")
+        unassigned = [t for t in mine_area if not t["assignee"]]
+        if unassigned:
+            lines.append(f"Unassigned {area} tasks: "
+                         + ", ".join(f"{t['id']} '{t['title']}'" for t in unassigned) + ".")
+
+    reviews = [t for t in tasks if t["status"] == "review" and t["assignee"]
+               and t["assignee"] != agent_id and agent_id not in t["approved_by"]]
+    for t in reviews:
+        lines.append(f"{_agent_name(world, t['assignee'])}'s {t['id']} '{t['title']}' is "
+                     f"waiting for a teammate's review.")
+
+    mine = open_tasks_for(world, agent_id)
+    mine_ids = {t["id"] for t in mine}
+    for t in tasks:
+        waiting = [d for d in t["depends_on"] if d in mine_ids]
+        if waiting and t["assignee"] != agent_id and t["status"] != "done":
+            who = _agent_name(world, t["assignee"]) if t["assignee"] else "An unassigned task"
+            lines.append(f"{who}'s {t['id']} '{t['title']}' is waiting on {name}'s "
+                         f"{', '.join(waiting)}.")
+
+    if mine:
+        lines.append(f"{name}'s open tasks: " + ", ".join(
+            f"{t['id']} '{t['title']}' ({t['status'].replace('_', ' ')})" for t in mine) + ".")
+    else:
+        lines.append(f"{name} has no open tasks.")
+    return lines
+
+
 def board_text_for_prompt(world):
     """Fuller view for the agent who is actually working at the board."""
     project = get_project(world)
@@ -562,8 +622,23 @@ def action_schema(world):
     }
 
 
+NOTE_REQUIRED = {"blocked": "say what is blocking it",
+                 "review": "say what the reviewer should check"}
+
+
+def _required_note(action, why):
+    note = _clean(action.get("note"))
+    if not note:
+        raise BoardError(f"needs a note to {why}")
+    return note
+
+
 def apply_action(world, agent, action):
-    """Apply one action dict. Returns a memory line, or raises BoardError."""
+    """Apply one action dict. Returns a memory line, or raises BoardError.
+
+    This is the agent-facing layer, so it also enforces the team's habits:
+    handing a task to someone, blocking a task, or asking for review always
+    comes with a note the teammate can act on."""
     kind = action.get("action")
     aid, name = agent["id"], agent["name"]
 
@@ -581,15 +656,23 @@ def apply_action(world, agent, action):
         return f"{name} took on task {t['id']} '{t['title']}' from the project board."
 
     if kind == "update_status":
-        t = update_status(world, aid, action.get("task_id"), action.get("status"),
+        status = action.get("status")
+        if status in NOTE_REQUIRED:
+            _required_note(action, NOTE_REQUIRED[status])
+        t = update_status(world, aid, action.get("task_id"), status,
                           action.get("note", ""))
         return (f"{name} moved task {t['id']} '{t['title']}' to "
                 f"{t['status'].replace('_', ' ')} on the project board.")
 
     if kind == "assign_task":
-        t = assign_task(world, aid, action.get("task_id"), action.get("assignee"))
-        return (f"{name} assigned task {t['id']} '{t['title']}' to "
-                f"{_agent_name(world, t['assignee'])} on the project board.")
+        to = (action.get("assignee") or "").strip().lower()
+        to_self = to in (aid, name.lower(), name.split()[0].lower())
+        note = "" if to_self else _required_note(
+            action, "tell the teammate what the task needs and why it is theirs")
+        t = assign_task(world, aid, action.get("task_id"), action.get("assignee"), note)
+        line = (f"{name} assigned task {t['id']} '{t['title']}' to "
+                f"{_agent_name(world, t['assignee'])} on the project board")
+        return f"{line}, noting: \"{note}\"." if note else line + "."
 
     if kind == "edit_task":
         deps = action.get("depends_on")
@@ -677,6 +760,7 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
     {role_context or '- (nothing specific)'}
 
     {agent['name']} is at the project board, about to: {activity}
+    {agent['name']}'s area: {agent.get('area') or 'general'}
     Teammates: {others}
 
     Project: {project['name']}
@@ -686,31 +770,37 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
     The board right now:
     {board_text_for_prompt(world)}
 
+    What stands out on the board for {agent['name']}:
+{chr(10).join("    - " + line for line in status_for_agent(world, agent["id"]))}
+
     What {agent['name']} has been doing lately:
     {progress or '- (nothing recorded yet)'}
 {_commitments_block(agent, commitments)}
     What does {agent['name']} do at the board right now? Choose 0 to {MAX_ACTIONS_PER_VISIT} actions:
     - update_status: keep {agent['name']}'s own tasks current, based on what
       {agent['name']} has actually been doing: in_progress once work has started,
-      blocked (with a note saying why) when stuck or waiting on someone, review
-      when the work is finished, and done only after a teammate has approved it.
-      Add a short note about the progress.
+      blocked when stuck or waiting on someone (note: what is blocking it), review
+      when the work is finished (note: what the reviewer should check), and done
+      only after a teammate has approved it.
     - create_task: add work the goal needs that is not on the board yet. Give a short
       title, a one-sentence description, an area, a priority, depends_on (ids of
       tasks that must finish first), and done_when (how the team knows it is done).
       Set assign_to_self to true only if it fits {agent['name']}'s role.
     - claim_task: take an unassigned task that fits {agent['name']}'s role.
     - assign_task: give an unassigned task (or one of {agent['name']}'s own) to the
-      teammate who should do it. Set task_id and assignee.
+      teammate who should do it. Set task_id, assignee, and a note telling them
+      what the task needs and why it is theirs.
     - edit_task: change an unassigned or own task's depends_on, priority,
       description or done_when.
     - approve_task: sign off on a teammate's task that is in review, once
       {agent['name']} has looked it over or talked it through with them.
-    - add_note: leave a short note on a task, e.g. progress, a question, or what
-      someone needs to know.
+    - add_note: leave a note a teammate can act on: a question, a decision, a
+      blocker, or what someone needs to know before starting. Never a note that
+      only says what {agent['name']} is doing right now.
 
     Rules:
     - Do what {agent['name']} promised teammates first, if anything.
+    - If {agent['name']}'s area has no tasks yet, add the work it needs.
     - Update {agent['name']}'s own tasks if their status is out of date.
     - Only add tasks that move the team toward the goal, and never duplicate a task.
     - Prefer tasks in {agent['name']}'s own area; leave other areas for teammates.

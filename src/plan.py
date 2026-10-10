@@ -5,6 +5,7 @@ import re
 
 import llm
 import log
+import project_board
 from llm import CTX
 from memory_retriever import MemoryRetriever
 from memory_stream import MemoryStream
@@ -22,7 +23,7 @@ AGENT_PROFILES = {
 
         Adam Beck's team has been asked to build and deploy the company website. Adam owns the backend side of it: the API, the data it needs, and getting the site deployed. Eve Smith owns the frontend.
 
-        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Adam checks the project board at the start of each workday and adds any backend work the website still needs. When Adam starts, finishes, or gets stuck on a task, he walks to the project board to update it, and he updates his tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Adam looks it over with them and approves it at the board if it is ready.
+        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Adam checks the project board at the start of each workday and adds any backend work the website still needs. When Adam starts, finishes, or gets stuck on a task, he walks to the project board to update it, and he updates his tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Adam looks it over with them and approves it at the board if it is ready. When Adam hands a task to a teammate, he leaves a note on it saying what it needs.
 
         Adam Beck works closely with other engineers and enjoys collaborating on technical challenges.
 
@@ -46,7 +47,7 @@ AGENT_PROFILES = {
 
         Eve Smith's team has been asked to build and deploy the company website. Eve owns the frontend side of it: the pages, the layout, and how the site looks and feels. Adam Beck owns the backend.
 
-        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Eve checks the project board at the start of each workday and adds any frontend work the website still needs. When Eve starts, finishes, or gets stuck on a task, she walks to the project board to update it, and she updates her tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Eve looks it over with them and approves it at the board if it is ready.
+        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Eve checks the project board at the start of each workday and adds any frontend work the website still needs. When Eve starts, finishes, or gets stuck on a task, she walks to the project board to update it, and she updates her tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Eve looks it over with them and approves it at the board if it is ready. When Eve hands a task to a teammate, she leaves a note on it saying what it needs.
 
         Eve Smith works with designers and other engineers, and prefers collaborating one-on-one or in writing on technical challenges.
 
@@ -122,7 +123,7 @@ class Planner:
         name = agent["name"]
         prompt = f"""
         {AGENT_PROFILES[agent["id"]]}
-
+{self.recent_project_context(agent)}
         Today is Thursday.
 
         Here is {name}'s plan today in broad strokes:
@@ -138,6 +139,24 @@ class Planner:
         {PLAN_EXAMPLES[agent["id"]]}
         """
         return self.ensure_day_start(self._parse_numbered(llm.generate(prompt)))
+
+    def recent_project_context(self, agent, n=8):
+        """The paper's initial plan uses the agent's summary description,
+        including "a summary of their recent experiences". Here that is what the
+        agent remembers about the project and the board: on the first day the
+        seeded goal and habits, after that what they saw on the board and agreed
+        with teammates. Retrieval only, no extra LLM call."""
+        results = self.memory_retriever.retrieve(
+            f"the company website project, the project board, and {agent['name']}'s tasks",
+            n=n, touch=False,
+        )
+        lines = [f"        - {r['memory'].description}" for r in results
+                 if r["memory"].memory_type != "plan"]
+        if not lines:
+            return ""
+        return f"""
+        What {agent['name']} remembers about the project:
+""" + "\n".join(lines) + "\n"
 
     def ensure_day_start(self, items):
         """Put the first item back if the model didn't repeat it, and only if
@@ -181,26 +200,115 @@ class Planner:
 
         return self._parse_numbered(response)
 
-    def task_guidance(self, agent, open_tasks):
-        """Planning instructions for an agent with tasks on the project board."""
-        if not open_tasks:
+    def task_guidance(self, agent, world):
+        """Planning instructions after the agent has seen the board: what the
+        project needs from them, and how to schedule their tasks around it."""
+        if world is None or "project" not in world:
             return ""
         name = agent["name"]
-        task_lines = "\n".join(
-            f"        - {t['id']} '{t['title']}' ({t['status'].replace('_', ' ')})"
-            for t in open_tasks
-        )
+        open_tasks = project_board.open_tasks_for(world, agent["id"])
+        status = "\n".join(f"        - {line}"
+                            for line in project_board.status_for_agent(world, agent["id"]))
+        example = (f"work on {open_tasks[0]['id']} '{open_tasks[0]['title']}' in the office from ..."
+                   if open_tasks else "work on T-3 'Set up the API' in the office from ...")
         return f"""
-        {name}'s tasks on the project board:
-{task_lines}
+        The project board, as {name} last saw it:
+{status}
 
-        Plan the rest of the day around these tasks:
-        - Name the task in each work block, e.g. "work on {open_tasks[0]['id']} '{open_tasks[0]['title']}' in the office from ...".
+        Plan the rest of the day around the project:
+        - Name the task in each work block, e.g. "{example}".
+        - If {name}'s area has no tasks, or nothing is waiting for {name}, add a
+          block to add or take on tasks at the project board.
         - When {name} starts, finishes, or gets stuck on a task, add a short block
           to update it on the project board in the conference room.
+        - If a teammate's task is waiting for review, add a block to review it
+          with them and approve it at the project board.
         - Add a short block to update the project board before lunch and before
           clocking out.
         """
+
+    _TASK_ID = re.compile(r"\bT-\d+\b", re.IGNORECASE)
+    _SPAN = re.compile(r"from\s*\d{1,2}:\d{2}\s*[ap]m\s*to\s*\d{1,2}:\d{2}\s*[ap]m",
+                       re.IGNORECASE)
+
+    def _fmt(self, dt):
+        return dt.strftime("%I:%M %p").lstrip("0").lower()
+
+    def _retimed(self, chunk, start, minutes):
+        """Copy of a chunk moved to [start, start + minutes), text included, so
+        later decomposition sees the same times the chunk has."""
+        c = dict(chunk)
+        end = start + timedelta(minutes=minutes)
+        span = f"from {self._fmt(start)} to {self._fmt(end)}"
+        c["activity"] = (self._SPAN.sub(span, c["activity"], count=1)
+                         if self._SPAN.search(c["activity"]) else f"{c['activity']} {span}")
+        c["start_time"], c["duration"] = self._fmt(start), minutes
+        return c
+
+    def _board_step(self, agent, start, minutes, text):
+        return {
+            "activity": f"{text} on the project board from {self._fmt(start)} to "
+                        f"{self._fmt(start + timedelta(minutes=minutes))}",
+            "location": "conference room",
+            "start_time": self._fmt(start),
+            "duration": minutes,
+            "target_agent": None,
+            "board_work": True,
+        }
+
+    def add_task_checkpoints(self, chunks, agent, open_tasks, minutes=10):
+        """Starting and finishing work go through the board.
+
+        For each of the agent's open tasks named in a work block: if the task is
+        still todo and nothing earlier in the plan visits the board for it, the
+        block starts with a short board step to move it to in progress; and the
+        last block that names it ends with a short board step to update it
+        (in progress, review or blocked, decided at the board from what the
+        agent actually did). Blocks are split, never moved, so the day's times
+        stay as planned."""
+        own = {t["id"]: t for t in open_tasks}
+        if not own:
+            return chunks
+
+        def ids(chunk):
+            return [i.upper() for i in dict.fromkeys(self._TASK_ID.findall(chunk["activity"]))
+                    if i.upper() in own]
+
+        last = {}
+        for i, c in enumerate(chunks):
+            if not c.get("board_work"):
+                for tid in ids(c):
+                    last[tid] = i
+
+        out, visited = [], set()
+        for i, c in enumerate(chunks):
+            named = ids(c)
+            start = self._parse_time(c.get("start_time"))
+            minutes_total = c.get("duration") or 0
+            if c.get("board_work"):
+                visited.update(named)
+                out.append(c)
+                continue
+            if not named or start is None or minutes_total < 3 * minutes:
+                out.append(c)
+                continue
+
+            to_start = [t for t in named if own[t]["status"] == "todo" and t not in visited]
+            to_wrap = [t for t in named if last.get(t) == i]
+            if to_start:
+                out.append(self._board_step(agent, start, minutes,
+                                            f"move {', '.join(to_start)} to in progress"))
+                visited.update(to_start)
+                start += timedelta(minutes=minutes)
+                minutes_total -= minutes
+            if to_wrap:
+                minutes_total -= minutes
+            out.append(self._retimed(c, start, minutes_total))
+            if to_wrap:
+                out.append(self._board_step(
+                    agent, start + timedelta(minutes=minutes_total), minutes,
+                    f"update {', '.join(to_wrap)} (in progress, review or blocked)"))
+        return out
 
     def create_chunks(self, daily_plan, agent, world=None):
         chunks = []
@@ -212,6 +320,7 @@ class Planner:
                 "start_time": self.extract_start_time(activity),
                 "duration": self.extract_duration(activity),
                 "target_agent": self.extract_target_agent(activity, agent, world),
+                "board_work": project_board.mentions_board_explicitly(activity),
             })
 
         return chunks
@@ -424,6 +533,10 @@ class Planner:
             "location": self.resolve_location(activity, agent),
             "start_time": self.extract_start_time(activity),
             "target_agent": parent.get("target_agent"),
+            # A board visit stays a board visit when it is broken down, even if
+            # a step reads "check all frontend tasks for updates".
+            "board_work": bool(parent.get("board_work"))
+                          or project_board.mentions_board_explicitly(activity),
         }
         if duration is not None:
             chunk["duration"] = duration
@@ -770,6 +883,7 @@ class Planner:
             "duration": minutes,
             "target_agent": self.extract_target_agent(reaction, agent, world),
             "is_reaction": True,
+            "board_work": project_board.mentions_board_explicitly(reaction),
         }
 
     def extract_outcomes(self, transcript, agent_a, agent_b, world):

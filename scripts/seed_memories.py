@@ -49,6 +49,8 @@ adam_seed_memories = [
     "Adam Beck updates his tasks on the project board before lunch and before clocking out.",
     "On the team, a task is only done after a teammate reviews and approves it on the project board.",
     "Adam Beck reviews Eve Smith's tasks with her when they are in review.",
+    "When Adam Beck hands a task to a teammate on the project board, he leaves a note saying what it needs.",
+    "Adam Beck leaves notes on the project board that teammates can act on, like questions, decisions and blockers.",
 ]
 
 eve_seed_memories = [
@@ -83,6 +85,8 @@ eve_seed_memories = [
     "Eve Smith updates her tasks on the project board before lunch and before clocking out.",
     "On the team, a task is only done after a teammate reviews and approves it on the project board.",
     "Eve Smith reviews Adam Beck's tasks with him when they are in review.",
+    "When Eve Smith hands a task to a teammate on the project board, she leaves a note saying what it needs.",
+    "Eve Smith leaves notes on the project board that teammates can act on, like questions, decisions and blockers.",
 ]
 
 def seed(agent_id, memories, reset=False):

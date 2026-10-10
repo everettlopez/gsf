@@ -78,11 +78,12 @@ def test_only_the_assignee_edits_an_assigned_task(w):
 def test_assign_and_edit_actions(w):
     pb.create_task(w, "eve", "Contact form backend", area="backend")
     done, refused = pb.apply_actions(w, w["agents"]["eve"], [
-        {"action": "assign_task", "task_id": "T-1", "assignee": "adam"},
+        {"action": "assign_task", "task_id": "T-1", "assignee": "adam",
+         "note": "Needs a POST endpoint that emails the form"},
         {"action": "edit_task", "task_id": "T-1", "priority": "high"},   # now Adam's
     ])
     assert done == ["Eve Smith assigned task T-1 'Contact form backend' to Adam Beck "
-                    "on the project board."]
+                    "on the project board, noting: \"Needs a POST endpoint that emails the form\"."]
     assert refused == ["edit_task: T-1 belongs to Adam Beck"]
 
 

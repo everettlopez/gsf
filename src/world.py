@@ -110,7 +110,7 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
     usable = {name: data for name, data in room_objects.items()
               if name != project_board.BOARD_OBJECT}
 
-    if board_here and mentions_board(activity):
+    if board_here and ((chunk or {}).get("board_work") or mentions_board(activity)):
         # Plainly board work (even "review the board with Eve"): no LLM needed.
         agent["interacting_with"] = project_board.BOARD_OBJECT
     elif talking_to_agent or not usable:

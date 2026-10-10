@@ -153,7 +153,18 @@ pattern for objects:
    standing at the board, they go straight back to it after the conversation.
    Refused actions ("T-1 needs a teammate to approve it first") are remembered,
    and an agent who is assigned a task is notified and replans around it.
-7. **Reflection and conversation.** Board memories feed reflection, reactions and
+7. **Planning from the project's state (paper 4.3).** The day plan is conditioned
+   on what the agent remembers about the project (the paper's "summary of their
+   recent experiences"), and every replan after a board visit or conversation
+   includes what the board means for that agent: gaps in their area, unassigned
+   work, reviews and dependencies waiting on them, and their own tasks. When a
+   replanned work block names one of their tasks, it starts with a short board
+   step if the task is still todo and the last block for it ends with one, so
+   starting and finishing work always go through the board.
+8. **Notes.** Handing a task to a teammate, blocking a task, and asking for
+   review all require a note (what it needs, what blocks it, what to check). The
+   handoff note goes with the assignment notice.
+9. **Reflection and conversation.** Board memories feed reflection, reactions and
    conversations like any other memory. Changes on the board (a task moving to
    review, a new note) are new observations for whoever walks up next, so they can
    start a conversation there.
