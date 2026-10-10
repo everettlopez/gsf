@@ -16,6 +16,9 @@
         },
         "chair": {
           "state": "available"
+        },
+        "project_board": {
+          "state": "blank, with no tasks on it yet"
         }
       }
     },
@@ -75,7 +78,7 @@
       "office": "office_1",
       "current_location": "reception",
       "current_action": "idle",
-      "interacting_with": "computer"
+      "interacting_with": null
     },
     "eve": {
       "id": "eve",
@@ -83,7 +86,14 @@
       "office": "office_2",
       "current_location": "reception",
       "current_action": "idle",
-      "interacting_with": "computer"
+      "interacting_with": null
     }
+  },
+  "project": {
+    "name": "Company Website",
+    "goal": "Build and deploy the company website",
+    "description": "A public website for the company with a home page, an about page and a contact form, backed by a small API and deployed online.",
+    "status": "not_started",
+    "tasks": []
   }
 }

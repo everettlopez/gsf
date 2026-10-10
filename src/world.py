@@ -6,6 +6,7 @@ from lemminflect import getInflection
 
 import llm
 import log
+import project_board
 
 WORLD_PATH = Path(__file__).resolve().parent.parent / "data" / "world" / "world.json"
 
@@ -72,6 +73,7 @@ def refresh_room_states(world):
         room_data["state"] = (
             "occupied by " + " and ".join(occupants) if occupants else "empty"
         )
+    project_board.sync_board_object(world)
 
 
 def _parse_json(text):
@@ -100,10 +102,15 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
     room_objects = room_data["objects"]
 
     talking_to_agent = bool(chunk and chunk.get("target_agent"))
+    activity = (chunk or {}).get("activity") or agent["current_action"]
+    board_here = project_board.BOARD_OBJECT in room_objects
 
     if talking_to_agent or not room_objects:
         # Conversations don't involve objects, and empty rooms have none.
         agent["interacting_with"] = None
+    elif board_here and mentions_board(activity):
+        # Plainly board work: no need to ask the LLM which object it is.
+        agent["interacting_with"] = project_board.BOARD_OBJECT
     else:
         agent_summary = planner.generate_agent_summary(agent)  # cached
         observations_text = "\n".join(
@@ -158,13 +165,29 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
 
         for change in result.get("changes") or []:
             obj = change.get("object")
+            if obj == project_board.BOARD_OBJECT:
+                continue        # the board only changes through project_board actions
             if obj in room_objects and change.get("new_state"):
                 room_objects[obj]["state"] = change["new_state"]
+
+    if agent["interacting_with"] == project_board.BOARD_OBJECT:
+        # Using the board means reading it and (maybe) editing tasks.
+        project_board.interact(agent, world, activity, planner=planner)
 
     refresh_room_states(world)
     log.debug(f"{room}: {room_data['state']}; {agent['name']} using {agent['interacting_with']}")
 
     return agent, world
+
+
+_BOARD_WORDS = re.compile(
+    r"\b(?:project board|task board|board|tasks?|backlog)\b", re.IGNORECASE
+)
+
+
+def mentions_board(activity):
+    """Does this activity plainly involve the project board?"""
+    return bool(_BOARD_WORDS.search(activity or ""))
 
 
 def action_to_present(action):

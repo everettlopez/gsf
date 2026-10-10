@@ -3,7 +3,9 @@ Seed Adam's and Eve's memory streams with their starting memories.
 
 Usage (from the repo root; needs Ollama running for embeddings + importance):
 
-    python scripts/seed_memories.py
+    python scripts/seed_memories.py            # add the seeds to the existing streams
+    python scripts/seed_memories.py --reset    # wipe both streams and clear the
+                                               # project board first, then seed
 """
 
 import sys
@@ -11,6 +13,8 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
 
+import project_board  # noqa: E402
+import world  # noqa: E402
 from memory_stream import MemoryStream  # noqa: E402
 
 adam_seed_memories = [
@@ -31,6 +35,16 @@ adam_seed_memories = [
     "Adam Beck knows Eve Smith is shy in large groups.",
     "Adam Beck thinks Eve Smith's ideas are thoughtful.",
     "Adam Beck prefers to check in with Eve Smith one-on-one.",
+    # The team's goal and how the team organizes work
+    "Adam Beck's team has been asked to build and deploy the company website.",
+    "Adam Beck is responsible for the website's backend: the API, the data, and deployment.",
+    "Eve Smith is responsible for the website's frontend.",
+    "The team tracks its work on the project board in the conference room.",
+    "Anyone on the team can add tasks to the project board, take them on, and update their status.",
+    "Adam Beck checks the project board at the start of each workday.",
+    "Adam Beck adds backend tasks to the project board when he sees work the website needs.",
+    "Adam Beck likes breaking big goals into small tasks with clear finish lines.",
+    "Adam Beck wants the company website live as soon as it is solid.",
 ]
 
 eve_seed_memories = [
@@ -51,10 +65,22 @@ eve_seed_memories = [
     "Eve Smith finds Adam Beck approachable.",
     "Eve Smith feels comfortable asking Adam Beck for help.",
     "Eve Smith is building a feature with Adam Beck.",
+    # The team's goal and how the team organizes work
+    "Eve Smith's team has been asked to build and deploy the company website.",
+    "Eve Smith is responsible for the website's frontend: the pages, layout, and look and feel.",
+    "Adam Beck is responsible for the website's backend.",
+    "The team tracks its work on the project board in the conference room.",
+    "Anyone on the team can add tasks to the project board, take them on, and update their status.",
+    "Eve Smith checks the project board at the start of each workday.",
+    "Eve Smith adds frontend tasks to the project board when she sees work the website needs.",
+    "Eve Smith finds it easier to raise ideas in writing, like a note on the project board, than in a meeting.",
+    "Eve Smith wants the company website to be accessible to everyone.",
 ]
 
-def seed(agent_id, memories):
+def seed(agent_id, memories, reset=False):
     stream = MemoryStream(agent_id)
+    if reset:
+        stream.memories = []
     for memory in memories:
         stream.add_observation(memory)
     stream.flush()
@@ -62,6 +88,20 @@ def seed(agent_id, memories):
     return stream
 
 
+def clear_board():
+    """Start the project over: no tasks on the board."""
+    w = world.load_world()
+    project = project_board.get_project(w)
+    project["tasks"] = []
+    project_board.refresh_project_status(w)
+    project_board.sync_board_object(w)
+    world.save_world(w)
+    print("cleared the project board")
+
+
 if __name__ == "__main__":
-    seed("adam", adam_seed_memories)
-    seed("eve", eve_seed_memories)
+    reset = "--reset" in sys.argv[1:]
+    if reset:
+        clear_board()
+    seed("adam", adam_seed_memories, reset=reset)
+    seed("eve", eve_seed_memories, reset=reset)

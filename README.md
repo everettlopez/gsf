@@ -66,7 +66,7 @@ Reflection (twice a day)
 pip install -r requirements.txt        # numpy, ollama, lemminflect
 ollama pull qwen3 && ollama pull nomic-embed-text
 
-python scripts/seed_memories.py        # one-time: give Adam and Eve their starting memories
+python scripts/seed_memories.py --reset   # fresh start: clear memories + board, then seed
 python src/main.py                     # run the simulation
 ```
 
@@ -106,8 +106,41 @@ Verbosity is controlled by `GA_LOG`:
 | `src/conversation.py` | Turn-based dialogue between agents |
 | `src/reflect.py` | Reflection: questions → retrieval → cited insights |
 | `src/world.py`, `perceive.py` | World state and what agents observe |
+| `src/project_board.py` | The shared project board: structured tasks and the actions agents take on them |
 | `src/llm.py` | The only module that talks to Ollama |
 | `src/log.py` | Logging levels and output layout |
+
+## Project board
+
+The team's work is tracked on a `project_board` object in the conference room. The
+data behind it is the top-level `project` record in `data/world/world.json`
+(goal, description, status, and a list of structured tasks). Each task has an id
+(`T-1`), title, description, area, priority, status
+(`todo | in_progress | blocked | review | done`), assignee, creator,
+dependencies, a "done when" line, timestamps, and a history of every change.
+
+Nothing about the board is special-cased in the agent loop. It follows the paper's
+pattern for objects:
+
+1. **Seeded identity.** The profiles in `plan.py` and the seeds in
+   `scripts/seed_memories.py` give each agent the team goal, their side of the
+   work, and the habit of checking the board each morning, so it shows up in
+   their day plan.
+2. **Perception.** An agent in the conference room reads the board as
+   observations ("The project board has no tasks on it yet.", "Task T-2 ... is
+   todo and unassigned."). Like other observations, a line is stored only when it
+   changes, and a new line can trigger a reaction.
+3. **Action.** When an agent interacts with the board, one schema-constrained LLM
+   call proposes up to 4 actions (`create_task`, `claim_task`, `update_status`,
+   `add_note`). Plain Python validates and applies them (no duplicate titles, no
+   taking someone else's task, no starting work before its dependencies are done)
+   and writes each change to the agent's memory stream. The LLM never edits the
+   board JSON directly.
+4. **Reflection and conversation.** Board memories feed reflection, reactions and
+   conversations like any other memory.
+
+`python scripts/seed_memories.py --reset` clears the board along with the memory
+streams.
 
 ## Reflection
 

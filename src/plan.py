@@ -12,29 +12,29 @@ TIME_FORMAT = "%I:%M %p"
 
 AGENT_PROFILES = {
     "adam": """Name: Adam Beck (age: 24)
-    
+
         Innate traits: collaborative, technical, growth-oriented
 
         Adam Beck is a backend software engineer who primarily develops software using Python and TypeScript.
 
         He enjoys building reliable and scalable software systems and values clean code.
 
-        Adam Beck is currently working on a memory-system project. He has recently been focused on memory retrieval, memory-stream architecture, testing, and implementation work.
+        Adam Beck's team has been asked to build and deploy the company website. Adam owns the backend side of it: the API, the data it needs, and getting the site deployed. Eve Smith owns the frontend.
+
+        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Adam checks the project board at the start of each workday and adds any backend work the website still needs.
 
         Adam Beck works closely with other engineers and enjoys collaborating on technical challenges.
 
         Adam Beck hopes to become a software architect. He wants to build software that positively impacts many people.
 
-        Adam Beck is making good progress on the memory-system project and wants to continue improving it in the coming days.
-
         On Wednesday, Adam:
-        1) clock in and start work at 7:00 am,
-        2) attended engineering meetings from 8:00 am to 9:00 am,
-        3) worked on memory-system development from 9:00 am to 12:00 pm,
+        1) clocked in and started work at 7:00 am,
+        2) attended the kickoff meeting for the company website project from 8:00 am to 9:00 am,
+        3) researched hosting and API options for the website from 9:00 am to 12:00 pm,
         4) took a lunch break in the break room from 12:00 pm to 1:00 pm,
         5) collaborated with coworkers on technical challenges from 1:00 pm to 2:00 pm,
-        6) reviewed project updates, documentation, and testing progress from 2:00 pm to 5:00 pm,
-        7) clock out and finished work at 5:00 pm.""",
+        6) reviewed documentation and set up his development environment from 2:00 pm to 5:00 pm,
+        7) clocked out and finished work at 5:00 pm.""",
     "eve": """Name: Eve Smith (age: 21)
 
         Innate traits: shy, detail-oriented, thoughtful
@@ -43,34 +43,35 @@ AGENT_PROFILES = {
 
         She enjoys building polished and accessible user interfaces and values clean code.
 
-        Eve Smith is currently working on a navigation menu redesign project. She has recently been focused on UI components, responsive layouts, accessibility, and implementation work.
+        Eve Smith's team has been asked to build and deploy the company website. Eve owns the frontend side of it: the pages, the layout, and how the site looks and feels. Adam Beck owns the backend.
+
+        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Eve checks the project board at the start of each workday and adds any frontend work the website still needs.
 
         Eve Smith works with designers and other engineers, and prefers collaborating one-on-one or in writing on technical challenges.
 
         Eve Smith hopes to become a lead frontend engineer. She wants to build software that feels simple and welcoming for many people to use.
 
-        Eve Smith is making good progress on the navigation menu redesign and wants to continue improving it in the coming days.
-
         On Wednesday, Eve:
-        1) clock in and start work at 7:00 am,
-        2) attended engineering meetings from 8:00 am to 9:00 am,
-        3) worked on navigation menu development from 9:00 am to 12:00 pm,
+        1) clocked in and started work at 7:00 am,
+        2) attended the kickoff meeting for the company website project from 8:00 am to 9:00 am,
+        3) sketched page layouts for the website from 9:00 am to 12:00 pm,
         4) took a lunch break in the break room from 12:00 pm to 1:00 pm,
         5) collaborated with coworkers on technical challenges from 1:00 pm to 2:00 pm,
-        6) reviewed project updates, documentation, and testing progress from 2:00 pm to 5:00 pm,
-        7) clock out and finished work at 5:00 pm.""",
+        6) reviewed documentation and set up her development environment from 2:00 pm to 5:00 pm,
+        7) clocked out and finished work at 5:00 pm.""",
 }
 
 ROOM_PURPOSES = {
     "reception": "arriving, clocking in/out, visitors",
     "break_room": "meals, coffee, breaks, casual chat",
-    "conference_room": "meetings, group discussion, collaborating, presentations",
+    "conference_room": "meetings, group discussion, collaborating, presentations, "
+                       "and the team's project board (checking, adding and updating tasks)",
 }
 
 # The example line shown to the model in the initial-plan prompt.
 PLAN_EXAMPLES = {
-    "adam": "3. work on memory-system development from 10:00 am to 1:00 pm",
-    "eve": "3. work on navigation menu development from 10:00 am to 1:00 pm",
+    "adam": "3. work on the website's backend API from 10:00 am to 1:00 pm",
+    "eve": "3. build the website's home page from 10:00 am to 1:00 pm",
 }
 
 
@@ -253,7 +254,8 @@ class Planner:
             return "reception"
         if has(r"\bbreak room\b", r"\bkitchen\b"):
             return "break room"
-        if has(r"\bconference room\b", r"\bmeeting room\b"):
+        if has(r"\bconference room\b", r"\bmeeting room\b",
+            r"\b(?:project|task) board\b", r"\bthe board\b"):
             return "conference room"
 
         # 2. Arriving / leaving
@@ -555,7 +557,9 @@ class Planner:
                 entities.append((other_agent["name"], other_agent["current_action"]))
 
         # ...THEN keep only the ones mentioned in what we're reacting to.
-        entities = [(n, s) for n, s in entities if any(n in o for o in observations)]
+        # (object keys use underscores, observations use spaces: "project board")
+        entities = [(n, s) for n, s in entities
+                    if any(n in o or n.replace("_", " ") in o for o in observations)]
 
         context_memories = []
         seen = set()
