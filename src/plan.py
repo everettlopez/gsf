@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import json
+import math
 import re
 
 import llm
@@ -437,17 +438,21 @@ class Planner:
                 decomposed_chunks.append(chunk)
                 continue
 
+            # Round UP: a 10:05-12:00 block (115 min) needs two hour chunks, not one,
+            # or 11:05-12:00 has nothing in it.
+            hours = math.ceil(chunk["duration"] / 60)
+
             prompt = f"""
             The following activity is one entry from a daily plan.
 
-            Create EXACTLY {chunk["duration"] // 60} hourly actions.
+            Create EXACTLY {hours} hourly actions.
 
             The first action starts at the activity's start time.
             Each following action occurs exactly one hour later.
 
             DO NOT create additional hours.
             DO NOT include the end time as another action.
-            DO NOT create more than {chunk["duration"] // 60} actions.
+            DO NOT create more than {hours} actions.
 
             Activity:
             {chunk["activity"]}
@@ -471,12 +476,42 @@ class Planner:
             Return only a numbered list.
             """
 
-            for activity in self._parse_numbered(llm.generate(prompt)):
-                decomposed_chunks.append(
-                    self._chunk_from_activity(activity, agent, chunk, duration=60)
-                )
+            hour_chunks = [
+                self._chunk_from_activity(activity, agent, chunk, duration=60)
+                for activity in self._parse_numbered(llm.generate(prompt))[:hours]
+            ]
+            self._fit_to_block(hour_chunks, chunk)
+            decomposed_chunks.extend(hour_chunks)
 
         return decomposed_chunks
+
+    def _fit_to_block(self, hour_chunks, block):
+        """Each hour chunk lasts until the next one starts or the broad block ends,
+        and never more than an hour (so a 115-minute block ends with a 55-minute
+        chunk). If the model returned too few hours, the rest is a gap that
+        main.get_chunk_lazy fills from the broad block."""
+        block_start = self._parse_time(block.get("start_time"))
+        if block_start is None:
+            return
+        block_end = block_start + timedelta(minutes=block["duration"])
+        for i, hc in enumerate(hour_chunks):
+            start = self._parse_time(hc.get("start_time"))
+            if start is None:
+                continue
+            end = block_end
+            if i + 1 < len(hour_chunks):
+                following = self._parse_time(hour_chunks[i + 1].get("start_time"))
+                if following is not None and following > start:
+                    end = min(following, block_end)
+            minutes = min(60, int((end - start).total_seconds() // 60))
+            hc["duration"] = minutes if minutes > 0 else 60
+
+    def covers(self, chunk, current_time):
+        """Is current_time inside this chunk (not just after its start)?"""
+        now, start = self._parse_time(current_time), self._parse_time(chunk.get("start_time"))
+        if now is None or start is None:
+            return False
+        return start <= now < start + timedelta(minutes=chunk.get("duration") or 0)
 
     def decompose_hour_chunks(self, hour_chunks, agent):
         """Hour chunks -> 5-15 minute actions (paper: finer-grained actions)."""

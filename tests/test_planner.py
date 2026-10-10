@@ -126,3 +126,12 @@ def test_plan_that_already_starts_the_day_is_left_alone(planner):
     clocked = ["Clock in at 7:00 am", "check the project board from 8:00 am to 9:00 am"]
     assert planner.ensure_day_start(covered) == covered
     assert planner.ensure_day_start(clocked) == clocked
+
+
+def test_hour_decomposition_covers_blocks_that_are_not_whole_hours(planner, adam):
+    block = {"activity": "work on T-1 'Set up the API' from 10:05 am to 12:00 pm",
+             "start_time": "10:05 am", "duration": 115, "target_agent": None}
+    hours = planner.decompose_chunks([block], adam)
+    assert [(h["start_time"], h["duration"]) for h in hours] == [("10:05 am", 60), ("11:05 am", 55)]
+    assert planner.covers(hours[1], "11:50 am")
+    assert not planner.covers(hours[0], "11:50 am")

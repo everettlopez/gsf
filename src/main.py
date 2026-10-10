@@ -273,10 +273,53 @@ def get_chunk_lazy(rt, current_time):
         return None
 
     hour = p.get_current_minute_chunk(current_time, expand_hours(rt, broad))
-    if hour is None:
-        return None
+    if hour is None or not p.covers(hour, current_time):
+        # The hour decomposition left a gap (the model returned too few hours).
+        # Fill it from the broad block instead of replaying the last minute action
+        # of an hour that already ended.
+        hour = gap_hour(rt, broad, current_time)
+        if hour is None:
+            return None
 
     return p.get_current_minute_chunk(current_time, expand_minutes(rt, hour))
+
+
+def gap_hour(rt, broad, current_time):
+    """An hour chunk covering `current_time`, cut from the broad block.
+
+    It is anchored where the gap starts (the end of the last hour chunk), in
+    whole hours, so every step inside the same gap gets the same chunk and it
+    is decomposed only once (cached by start time + activity)."""
+    p = rt.planner
+    now = p._parse_time(current_time)
+    block_start = p._parse_time(broad.get("start_time"))
+    if now is None or block_start is None:
+        return None
+    block_end = block_start + timedelta(minutes=broad.get("duration") or 0)
+    if now >= block_end:
+        return None
+
+    anchor = block_start
+    for hour in expand_hours(rt, broad):
+        hs = p._parse_time(hour.get("start_time"))
+        if hs is not None and hs <= now:
+            anchor = max(anchor, hs + timedelta(minutes=hour.get("duration") or 0))
+    if anchor > now:
+        anchor = block_start
+    whole_hours = int((now - anchor).total_seconds() // 3600)
+    start = anchor + timedelta(hours=whole_hours)
+    minutes = int(min(timedelta(hours=1), block_end - start).total_seconds() // 60)
+
+    start_text = start.strftime("%I:%M %p").lstrip("0").lower()
+    activity = re.sub(r"^\d{1,2}:\d{2}\s*[ap]m:\s*", "", broad["activity"], flags=re.IGNORECASE)
+    log.debug(f"{rt.tag} plan gap at {current_time}, filling from {start_text}: {activity}")
+    return {
+        "activity": f"{start_text}: {activity}",
+        "location": broad.get("location"),
+        "start_time": start_text,
+        "duration": minutes,
+        "target_agent": broad.get("target_agent"),
+    }
 
 
 # ---------------------------------------------------------------------------
