@@ -71,7 +71,11 @@ python src/main.py                     # run the simulation
 ```
 
 Simulation settings (start time, steps, cooldowns, reflection times, paper-strict
-mode) are constants at the top of `src/main.py`.
+mode) are constants at the top of `src/main.py`. Reacting regenerates the plan as
+in the paper by default (`REACT_REPLANS`). `PAPER_STRICT = True` also turns off the
+cost shortcuts (the react question every step about everything perceived, no
+cooldown, the whole plan decomposed up front, an object update every step), which
+is much slower on a local model.
 
 ### Reading the logs
 
@@ -193,12 +197,16 @@ pattern for objects:
     when the current plan chunk is about a teammate who is in the same room
     ("collaborate with Eve", or a reaction like "greet Eve" that walked over
     to her). A teammate walking into the room is considered even during the
-    react cooldown, and a reaction that only changes rooms ("move to office_1
-    to keep debugging") moves the agent without replanning or starting the
-    cooldown. Solo work never lands in a teammate's private office, and the
+    react cooldown, and a reaction that only changes rooms to keep doing the
+    same work ("move to office_1 to keep debugging") moves the agent without
+    replanning or starting the cooldown; a move with another purpose ("go to
+    the conference room to update the board") is a real reaction. Solo work never lands in a teammate's private office, and the
     location LLM is only asked when the answer isn't obvious (solo work goes to
     the agent's own office without a call). Finer steps of a "collaborate with
-    Eve" block only follow Eve when they are still about working with her.
+    Eve" block only follow Eve when they are still about working with her
+    ("discuss", "pair with", "review ... with Eve"; not "the discussion"), and
+    a block longer than an hour only follows a teammate when it is real
+    collaboration ("work on T-1 with Eve" all morning doesn't).
     Speakers are shown exactly where each task in play stands ("in progress
     since 7:10 am: not in review, not approved, not done") and told that talking
     doesn't change the board; something a speaker says they already did ("I've
@@ -217,12 +225,25 @@ pattern for objects:
     the automatic start/finish steps for each task plus one board visit before
     clocking out; plain "update the board" visits right after another board
     visit, repeated steps for the same task, and zero-length blocks are dropped.
+    Initial plans get the same cleanup. A board visit lasts at most 15 minutes
+    and is one step (one board LLM call), never broken into 5-minute pieces; the
+    day starts with a 5-minute clock-in instead of an hour of filler. Task
+    titles lose a copied "T-1:" prefix, and a board reply that runs out of
+    tokens in its reason still keeps its actions.
 14. **Team schedule.** `world.json` has the team's fixed meetings (`schedule`,
     by default a daily stand-up at 8:00 am in the conference room). Every plan
     and replan gets them at their real times, an agent's own stand-ups at other
     times are dropped, and the teammates who show up talk to each other, even
     if they talked shortly before.
-15. **Reflection and conversation.** Board memories feed reflection, reactions and
+15. **Reactions (paper 4.3.1).** When an agent reacts, it carries out the
+    reaction as a short block and then regenerates the rest of its day from
+    when that block ends (`REACT_REPLANS`; False brings back the old 10-minute
+    detour). `REACT_COOLDOWN_STEPS` is 2, the reaction's own 10 minutes.
+    Reactions that only repeat what is already happening are ignored without
+    starting the cooldown: the reaction the agent is already carrying out, and
+    going to update the board while at it or within
+    `BOARD_REACTION_GAP_MINUTES` of using it.
+16. **Reflection and conversation.** Board memories feed reflection, reactions and
    conversations like any other memory. Changes on the board (a task moving to
    review, a new note) are new observations for whoever walks up next, so they can
    start a conversation there.

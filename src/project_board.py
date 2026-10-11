@@ -82,7 +82,8 @@ _BOARD_COMMITMENT = re.compile(
 
 
 def mentions_board_explicitly(activity):
-    return bool(_BOARD.search(activity or ""))
+    # Reactions name the object as it appears in observations ("the project_board").
+    return bool(_BOARD.search((activity or "").replace("_", " ")))
 
 
 def is_board_commitment(text):
@@ -357,7 +358,9 @@ def new_task(task_id, agent_id, title, description="", area="general",
 def create_task(world, agent_id, title, description="", area="general",
                 priority="medium", depends_on=(), done_when="", assign_to_self=False):
     project = get_project(world)
-    title = _clean(title, 80)
+    # "T-1: Set up the API" -> "Set up the API": the board numbers tasks itself
+    # (a title copied from a promise showed up as "T-1 'T-1: Set up ...'").
+    title = _clean(re.sub(r"^\s*T-\d+\s*[:.\-\u2013\u2014]?\s*", "", title or "", flags=re.IGNORECASE), 80)
     if not title:
         raise BoardError("a task needs a title")
     if _NOT_A_DELIVERABLE.match(title):
@@ -788,10 +791,12 @@ def board_text_for_prompt(world):
 def action_schema(world):
     task_ids = [t["id"] for t in get_project(world)["tasks"]]
     task_id = {"type": "string", "enum": task_ids} if task_ids else {"type": "string"}
+    # "actions" comes first and "reason" last: the model writes fields in this
+    # order, so if it runs out of tokens mid-reason the actions are already
+    # complete and can be recovered (see _parse_board_reply).
     return {
         "type": "object",
         "properties": {
-            "reason": {"type": "string"},
             "actions": {
                 "type": "array",
                 "items": {
@@ -813,9 +818,30 @@ def action_schema(world):
                     "required": ["action"],
                 },
             },
+            "reason": {"type": "string"},
         },
-        "required": ["reason", "actions"],
+        "required": ["actions", "reason"],
     }
+
+
+def _parse_board_reply(raw):
+    """The board call's JSON, or what can be saved of it. A long "reason" once
+    ran past the token limit ("Unterminated string"), losing the whole visit;
+    with "actions" first, everything before "reason" is still usable."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        cut = raw.rfind(', "reason"')
+        if cut == -1:
+            cut = raw.rfind(',"reason"')
+        if cut != -1:
+            try:
+                result = json.loads(raw[:cut] + "}")
+                log.debug("board reply was cut off in its reason; kept its actions")
+                return {**result, "reason": "(cut off)"}
+            except json.JSONDecodeError:
+                pass
+        raise
 
 
 NOTE_REQUIRED = {"blocked": "say what is blocking it",
@@ -1076,7 +1102,8 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
     (If a memory or a conversation says a task is approved, done or unblocked and
     the board above says otherwise, the board is right.)
 {_commitments_block(agent, commitments, world)}
-    What does {agent['name']} do at the board right now? Choose 0 to {MAX_ACTIONS_PER_VISIT} actions:
+    What does {agent['name']} do at the board right now? Choose 0 to {MAX_ACTIONS_PER_VISIT} actions,
+    then give the reason in one short sentence:
     - update_status: keep {agent['name']}'s own tasks current, based on what
       {agent['name']} has actually been doing: in_progress once work has started,
       blocked when stuck or waiting on someone (note: what is blocking it), review
@@ -1259,8 +1286,8 @@ def interact(agent, world, activity, planner=None, retriever=None, memory_stream
                           _progress_context(agent, world, retriever), promised)
     try:
         raw = llm.generate(prompt, format=action_schema(world),
-                           options={**CTX, "num_predict": 700, "temperature": 0.3})
-        result = json.loads(raw)
+                           options={**CTX, "num_predict": 1000, "temperature": 0.3})
+        result = _parse_board_reply(raw)
     except Exception as e:
         log.warn(f"project board call failed for {agent['name']} ({e})")
         return []

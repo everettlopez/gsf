@@ -116,7 +116,7 @@ def test_time_parsing_tolerates_missing_spaces(planner):
 def test_plan_gets_its_clock_in_back_when_the_model_skips_it(planner):
     items = ["check the project board from 8:00 am to 9:00 am"]
     assert planner.ensure_day_start(items) == [
-        "clock in and start work at 7:00 am",
+        "clock in at reception from 7:00 am to 7:05 am",
         "check the project board from 8:00 am to 9:00 am",
     ]
 

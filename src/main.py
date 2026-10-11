@@ -80,11 +80,18 @@ REACT_ONLY_TO_EXTERNAL = True
 # skip update_agent_state + generate_interactions (2+ LLM calls).
 SKIP_UNCHANGED_CHUNKS = True
 
-# After a react (replan), don't ask the LLM about reacting again for this many
-# steps. Stops agents from replanning on nearly every step. A teammate walking
-# into the room still gets asked about (see decide_phase), and a reaction that
+# After a react, don't ask the LLM about reacting again for this many steps.
+# 2 steps = the reaction's own 10 minutes: an agent doesn't reconsider while
+# still carrying out what it just decided. (It was 6, which mostly hid junk
+# reactions; those are now filtered out instead, see pointless_reaction.) A
+# teammate walking into the room still gets asked about, and a reaction that
 # only moves the agent to another room doesn't start the cooldown.
-REACT_COOLDOWN_STEPS = 6
+REACT_COOLDOWN_STEPS = 2
+
+# A reaction to go update the board is ignored while the agent is at the board,
+# or within this many minutes of using it ("Move to the project_board to update
+# tasks" was 7 of the 9 reactions in a run, mostly made at the board itself).
+BOARD_REACTION_GAP_MINUTES = 30
 
 # The same two agents don't start another conversation within this many
 # minutes, unless the reaction names a specific task (T-3). Stops the loop of
@@ -98,6 +105,13 @@ SHORT_CHUNK_MINUTES = 15
 # Step 1 sees the whole room as "new". Treat it as a baseline and don't react.
 SKIP_REACT_ON_FIRST_STEP = True
 
+# --- Paper behaviour --------------------------------------------------------
+
+# Paper 4.3.1: when an agent reacts, its plan is regenerated from that moment.
+# True: carry out the reaction (a short block), then replan the rest of the day
+# around it. False: the old shortcut, a 10-minute detour and back to the old plan.
+REACT_REPLANS = True
+
 # --- One switch to turn all the shortcuts off -------------------------------
 # True = behave as the paper describes: decompose everything up front, and ask
 # the react/continue question every step about everything currently perceived.
@@ -110,6 +124,7 @@ if PAPER_STRICT:
     SKIP_UNCHANGED_CHUNKS = False
     REACT_COOLDOWN_STEPS = 0
     SKIP_REACT_ON_FIRST_STEP = False
+    REACT_REPLANS = True
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +175,7 @@ class AgentRuntime:
 
     prev_obs: list = field(default_factory=list)
     prev_company: set = field(default_factory=set)    # teammates in the room last step
+    last_board_at: Optional[datetime] = None          # last step spent using the board
     last_chunk: Optional[dict] = None
     last_react_step: int = -10_000
     override: Optional[dict] = None
@@ -205,6 +221,11 @@ def expand_hours(rt, broad):
     p = rt.planner
     bkey = (broad["start_time"], broad["activity"])
 
+    if bkey not in rt.hour_cache and (broad.get("board_work") or broad.get("meeting")):
+        # One board visit (or meeting) is one step: broken into 5-minute pieces,
+        # every piece was its own board LLM call (20 calls, 8 changes, in the run).
+        rt.hour_cache[bkey] = [broad]
+
     if bkey not in rt.hour_cache:
         with timed(f"{rt.tag} expand broad {bkey[0]} -> hours (LLM)"):
             hours = p.decompose_chunks([broad], rt.agent)
@@ -221,8 +242,9 @@ def expand_minutes(rt, hour):
     p = rt.planner
     hkey = (hour["start_time"], hour["activity"])
 
-    if hkey not in rt.minute_cache and (hour.get("duration") or 60) <= SHORT_CHUNK_MINUTES:
-        rt.minute_cache[hkey] = [hour]          # already 5-15 minutes: nothing to break down
+    if hkey not in rt.minute_cache and ((hour.get("duration") or 60) <= SHORT_CHUNK_MINUTES
+                                        or hour.get("board_work") or hour.get("meeting")):
+        rt.minute_cache[hkey] = [hour]          # already short, or one board visit: keep whole
 
     if hkey not in rt.minute_cache:
         with timed(f"{rt.tag} expand hour {hkey[0]} -> minutes (LLM)"):
@@ -247,8 +269,9 @@ def initial_planning(rt, world):
     with timed(f"{rt.tag} initial broad plan (LLM)"):
         daily_plan = rt.planner.generate_initial_plan(rt.agent, world)
 
-    rt.broad_chunks = rt.planner.apply_schedule(
-        rt.planner.create_chunks(daily_plan, rt.agent, world), world, START_TIME)
+    p = rt.planner
+    rt.broad_chunks = p.thin_board_visits(p.cap_board_blocks(
+        p.apply_schedule(p.create_chunks(daily_plan, rt.agent, world), world, START_TIME)))
     rt.hour_cache, rt.minute_cache = {}, {}
 
     if not rt.broad_chunks:
@@ -491,7 +514,13 @@ def decide_phase(rt, step, current_time, world):
             rt.decision, rt.reaction = parse_decision(raw)
             reason = f"LLM said {raw.strip()!r} after {len(candidates)} obs"
 
-            room = relocation_target(rt.reaction, rt.agent, world) if rt.decision == "2" else None
+            skip = pointless_reaction(rt, rt.reaction, current_time, world) if rt.decision == "2" else ""
+            if skip:
+                reason += f" -> ignored ({skip})"
+                rt.decision, rt.reaction = "1", ""
+
+            room = (relocation_target(rt.reaction, rt.agent, world, rt.chunk["activity"])
+                    if rt.decision == "2" else None)
             if room is not None:
                 # "Move to office_1 to keep debugging" isn't a reaction to
                 # anything: the plan is fine, only the room was wrong. Move
@@ -507,6 +536,37 @@ TIME_PREFIX = re.compile(r"^\d{1,2}:\d{2}\s*[ap]m:\s*", re.IGNORECASE)
 _MOVE_VERB = re.compile(
     r"^\s*(?:let'?s\s+)?(?:move|go|head|walk|return|relocate|switch|get)\w*\b(?:\s+back)?\s+to\b",
     re.IGNORECASE)
+
+
+def _gist(text):
+    text = TIME_PREFIX.sub("", text or "").lower()
+    return " ".join(re.findall(r"[a-z0-9-]+", text))
+
+
+def pointless_reaction(rt, reaction, current_time, world):
+    """Why a reaction would only repeat what is already happening, or "".
+
+    - the reaction the agent is already carrying out (Eve reacted "Move to the
+      project_board to update task T-2 ..." at 8:30 and again at 8:35);
+    - going to update the board while at the board, or right after using it."""
+    chunk = rt.chunk or {}
+    if chunk.get("is_reaction") and _gist(reaction) == _gist(chunk.get("activity")):
+        return "already doing this"
+    if not project_board.mentions_board_explicitly(reaction):
+        return ""
+    if chunk.get("board_work") and rt.agent["interacting_with"] == project_board.BOARD_OBJECT:
+        return "already at the board"
+    now = rt.planner._parse_time(current_time)
+    if (rt.last_board_at is not None and now is not None
+            and now - rt.last_board_at < timedelta(minutes=BOARD_REACTION_GAP_MINUTES)):
+        return f"used the board at {rt.planner._fmt(rt.last_board_at)}"
+    return ""
+
+
+def note_board_use(rt, current_time):
+    """Remember when the agent last used the board (see pointless_reaction)."""
+    if rt.agent["interacting_with"] == project_board.BOARD_OBJECT:
+        rt.last_board_at = rt.planner._parse_time(current_time)
 
 
 def teammates_here(rt, world):
@@ -551,11 +611,20 @@ def meeting_partner(rt, world, current_time):
     return None
 
 
-def relocation_target(reaction, agent, world):
+_SAME_WORK = re.compile(r"\b(?:continu\w*|keep\w*|resum\w*|carry on|as planned|get back to|finish\w*)\b",
+                        re.IGNORECASE)
+
+
+def relocation_target(reaction, agent, world, current_activity=""):
     """The room a reaction only moves the agent to ("Move to office_1 to keep
-    debugging"), or None if it is a real reaction (names a teammate, names no
-    room, or names a room the agent is already in)."""
+    debugging"), or None if it is a real reaction: it names a teammate, names
+    no room or the room the agent is already in, is about the board, or moves
+    the agent somewhere to do something else. ("Move to the conference room
+    to update the project board" was taken for a room change twice, and Eve
+    went on designing the homepage in the conference room.)"""
     if not reaction or not _MOVE_VERB.search(reaction):
+        return None
+    if project_board.mentions_board_explicitly(reaction):
         return None
     text = reaction.lower()
     for other in world["agents"].values():
@@ -569,7 +638,21 @@ def relocation_target(reaction, agent, world):
     rooms = [r for r in dict.fromkeys(rooms) if r]
     if len(rooms) != 1 or rooms[0] == agent["current_location"]:
         return None
-    return rooms[0]
+
+    # What the move is for: the words after the room ("... office_1 to set up the env").
+    room = rooms[0]
+    for name in (room, room.replace("_", " "), "my office", "own office"):
+        if name in text:
+            purpose = text.split(name, 1)[1]
+            break
+    else:
+        purpose = ""
+    purpose = re.sub(r"^\W*(?:to|and|for)\b", "", purpose).strip()
+    if not purpose or _SAME_WORK.search(purpose):
+        return room
+    current = {w for w in re.findall(r"[a-z]{4,}", current_activity.lower())}
+    wanted = {w for w in re.findall(r"[a-z]{4,}", purpose)}
+    return room if current & wanted else None
 
 
 def relocate(rt, room, current_time):
@@ -714,7 +797,7 @@ def replan_rest_of_day(rt, start, reason, world, label, extra_guidance=""):
         log.warn(f"{rt.tag}: replan unusable, keeping old plan")
         return False
 
-    new_chunks = rt.planner.apply_schedule(new_chunks, world, start)
+    new_chunks = rt.planner.cap_board_blocks(rt.planner.apply_schedule(new_chunks, world, start))
     new_chunks = rt.planner.add_task_checkpoints(
         new_chunks, rt.agent, project_board.open_tasks_for(world, rt.agent["id"])
     )
@@ -889,7 +972,9 @@ def apply_chunk(rt, world):
 
 
 def react(rt, step, current_time, world):
-    """React with a short interruption instead of regenerating the day."""
+    """React (paper 4.3.1): do the reaction now, as a short block, and, with
+    REACT_REPLANS, regenerate the rest of the day from when it ends, so the plan
+    takes what just happened into account instead of resuming as if nothing had."""
     log.event(f"{rt.tag} reacts: {rt.reaction}")
     rt.last_react_step = step
     rt.override = rt.planner.make_reaction_chunk(
@@ -898,6 +983,15 @@ def react(rt, step, current_time, world):
     rt.chunk = rt.override
     log.debug(f"{rt.tag} reaction chunk: {rt.chunk}")
     apply_chunk(rt, world)
+
+    if REACT_REPLANS:
+        reaction = rt.reaction
+        after = step_time(current_time, rt.override.get("duration") or STEP_MINUTES)
+        if replan_rest_of_day(rt, after, f"{rt.agent['name']} reacted to what was "
+                              f"happening and decided to: {reaction}", world,
+                              "replan after reaction"):
+            log.event(f"{rt.tag} replanned the day after reacting: {reaction}")
+            absorb_board_changes(rt)          # the new plan already reflects the board
     return True
 
 
@@ -1016,6 +1110,7 @@ def main():
 
             for rt in runtimes:
                 act_phase(rt, step, current_time, world)
+                note_board_use(rt, current_time)
 
             for rt in runtimes:
                 replan_after_board(rt, current_time, world)

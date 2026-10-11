@@ -182,6 +182,7 @@ def test_planned_collaboration_waits_for_the_conversation_cooldown(
 
 def test_a_teammate_walking_in_is_considered_even_during_the_react_cooldown(
         fake_llm, isolated_data, w, monkeypatch):
+    monkeypatch.setattr(main, "REACT_COOLDOWN_STEPS", 6)   # the window this test is about
     adam, _ = _runtimes(w, room="conference_room")
     adam.last_react_step = 52                       # reacted at 11:15
     adam.prev_company = set()                       # Eve wasn't here last step
@@ -232,7 +233,7 @@ def test_a_move_only_reaction_relocates_without_a_cooldown(fake_llm, isolated_da
 @pytest.mark.parametrize("reaction,expected", [
     ("Move to office_1 to continue debugging integration issues", "office_1"),
     ("head back to my office to keep coding", "office_1"),
-    ("go to the conference room to update T-1", "conference_room"),
+    ("go to the conference room to update T-1", None),    # board work: a real reaction
     ("Move to office_2 to talk with Eve", None),          # about a teammate: a real reaction
     ("Move to office_2 to check something", None),        # already there
     ("Let's quickly check in on T-4 progress", None),     # not a move

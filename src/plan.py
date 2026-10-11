@@ -73,12 +73,13 @@ ROOM_PURPOSES = {
 # The workday. The first plan item is given to the model, as in the paper.
 DAY_START = "7:00 am"
 DAY_END = "5:00 pm"
-FIRST_PLAN_ITEM = f"clock in and start work at {DAY_START}"
+FIRST_PLAN_ITEM = f"clock in at reception from {DAY_START} to 7:05 am"
+CLOCK_IN_MINUTES = 5            # "clock in at 7:00 am" with no end time used to fill the whole first hour
 
 # The example line shown to the model in the initial-plan prompt.
 PLAN_EXAMPLES = {
-    "adam": "2. check the project board in the conference room from 8:00 am to 9:00 am",
-    "eve": "2. check the project board in the conference room from 8:00 am to 9:00 am",
+    "adam": "2. check the project board in the conference room from 7:05 am to 7:20 am",
+    "eve": "2. check the project board in the conference room from 7:05 am to 7:20 am",
 }
 
 
@@ -171,10 +172,13 @@ class Planner:
         meeting chunk is pinned to its room and marked so the teammates who
         show up talk to each other."""
         start_bound = self._parse_time(plan_start)
-        events = [(s, e, ev) for s, e, ev in self.team_schedule(world)
-                  if start_bound is None or s >= start_bound]
-        if not events:
+        scheduled = self.team_schedule(world)
+        if not scheduled:
             return chunks
+        # Meetings still ahead get added; the model's own stand-ups are dropped
+        # either way (a replan at 8:05 kept "attend the daily stand-up 8:10-8:15").
+        events = [(s, e, ev) for s, e, ev in scheduled
+                  if start_bound is None or s >= start_bound]
 
         def span(c):
             s = self._parse_time(c.get("start_time"))
@@ -486,9 +490,11 @@ class Planner:
             s = self._parse_time(c.get("start_time"))
             if c.get("board_work") and s is not None:
                 nxt = timed[i + 1] if i + 1 < len(timed) else None
+                end = s + timedelta(minutes=c.get("duration") or 0)
+                next_is_board = (nxt is not None and nxt.get("board_work")
+                                 and self._parse_time(nxt.get("start_time")) == end)
                 recent = prev_board is not None and s - prev_board[0] < gap
-                drop = (plain(c) and i != last_board
-                        and (recent or (nxt is not None and nxt.get("board_work")))) \
+                drop = (plain(c) and i != last_board and (recent or next_is_board)) \
                     or (ids(c) and recent and ids(c) <= prev_board[1] and kind(c) == prev_board[2])
                 if drop:
                     self._absorb(out, c, s)
@@ -509,20 +515,52 @@ class Planner:
             out[-1] = self._retimed(prev, ps, (prev.get("duration") or 0)
                                     + (dropped.get("duration") or 0))
 
+    _CLOCK_IN = re.compile(r"\bclock(?:ing|ed)? in\b", re.IGNORECASE)
+    _HAS_END = re.compile(r"\bto\s*\d{1,2}:\d{2}\s*[ap]m\b", re.IGNORECASE)
+    BOARD_BLOCK_MAX_MINUTES = 15   # a board visit is a few minutes, not an hour
+    LONG_BLOCK_MINUTES = 60        # longer blocks only follow a teammate when it's real collaboration
+
     def create_chunks(self, daily_plan, agent, world=None):
         chunks = []
         for activity in daily_plan:
             activity = self.drop_unknown_task_ids(activity.strip().rstrip("."), world)
+            duration = self.extract_duration(activity)
+            if self._CLOCK_IN.search(activity) and not self._HAS_END.search(activity):
+                duration = CLOCK_IN_MINUTES
             chunks.append({
                 "activity": activity,
                 "location": self.resolve_location(activity, agent),
                 "start_time": self.extract_start_time(activity),
-                "duration": self.extract_duration(activity),
-                "target_agent": self.extract_target_agent(activity, agent, world),
+                "duration": duration,
+                "target_agent": self._block_target(activity, agent, world, duration),
                 "board_work": project_board.mentions_board_explicitly(activity),
             })
 
         return chunks
+
+    def _block_target(self, activity, agent, world, duration):
+        """The teammate a plan block is about. A long block only counts when it
+        is real collaboration: "work on T-1 in the office with Eve Smith" from
+        8:10 to 11:40 had Adam following Eve for three and a half hours."""
+        target = self.extract_target_agent(activity, agent, world)
+        if target and (duration or 0) > self.LONG_BLOCK_MINUTES and not self._TOGETHER.search(activity):
+            return None
+        return target
+
+    def cap_board_blocks(self, chunks):
+        """Board visits last at most BOARD_BLOCK_MAX_MINUTES. Plans had "check the
+        project board 8:15-9:00" and "review and update frontend tasks on the
+        board 9:00-10:00"; Eve spent most of the morning at the board while her
+        task sat "in progress". The rest of a long board block is left open, and
+        the gap filler puts the agent back on their own work."""
+        out = []
+        for c in chunks:
+            start = self._parse_time(c.get("start_time"))
+            if (c.get("board_work") and not c.get("meeting") and start is not None
+                    and (c.get("duration") or 0) > self.BOARD_BLOCK_MAX_MINUTES):
+                c = self._retimed(c, start, self.BOARD_BLOCK_MAX_MINUTES)
+            out.append(c)
+        return out
 
     @staticmethod
     def drop_unknown_task_ids(activity, world):
@@ -789,9 +827,14 @@ class Planner:
             chunk["duration"] = duration
         return chunk
 
+    # Verbs of working with someone. Nouns don't count: "summarize key points from
+    # the discussion" is solo work, and so is "synchronize the data".
     _TOGETHER = re.compile(
-        r"\b(?:discuss\w*|pair\w*|sync\w*|meet\w*|talk\w*|ask\w*|together|collaborat\w*|"
-        r"walk\w* through|go over|align\w*|review\w* (?:with|together))\b", re.IGNORECASE)
+        r"\b(?:discuss(?:es|ed|ing)?|pair(?:s|ed|ing)?\s+(?:with|up|on)|pair programming"
+        r"|sync(?:s|ed|ing)?\s+(?:with|up)|meet(?:s|ing)?\s+with|talk(?:s|ed|ing)?\s+(?:with|to)"
+        r"|ask(?:s|ed|ing)?|together|collaborat(?:e|es|ed|ing)|walk(?:s|ed|ing)?\s+\w+\s+through"
+        r"|go(?:es|ing)? over\b.*\bwith|align(?:s|ed|ing)?\s+with|review\w*\b[^.]*?\b(?:with|together))\b",
+        re.IGNORECASE)
 
     def _inherited_target(self, activity, parent):
         """A finer step keeps its block's teammate only if it is still about
