@@ -81,7 +81,9 @@ REACT_ONLY_TO_EXTERNAL = True
 SKIP_UNCHANGED_CHUNKS = True
 
 # After a react (replan), don't ask the LLM about reacting again for this many
-# steps. Stops agents from replanning on nearly every step.
+# steps. Stops agents from replanning on nearly every step. A teammate walking
+# into the room still gets asked about (see decide_phase), and a reaction that
+# only moves the agent to another room doesn't start the cooldown.
 REACT_COOLDOWN_STEPS = 6
 
 # The same two agents don't start another conversation within this many
@@ -157,6 +159,7 @@ class AgentRuntime:
     minute_cache: dict = field(default_factory=dict)
 
     prev_obs: list = field(default_factory=list)
+    prev_company: set = field(default_factory=set)    # teammates in the room last step
     last_chunk: Optional[dict] = None
     last_react_step: int = -10_000
     override: Optional[dict] = None
@@ -435,6 +438,12 @@ def decide_phase(rt, step, current_time, world):
 
     steps_since_react = step - rt.last_react_step
 
+    # Who just showed up in the room (or whose room this agent just walked into).
+    company = teammates_here(rt, world)
+    arrivals = company - rt.prev_company
+    rt.prev_company = company
+    partner = planned_partner(rt, world, current_time)
+
     # Gate 1: nothing to follow -> nothing to decide.
     if rt.chunk is None:
         rt.decision, reason = "1", "no current chunk"
@@ -443,8 +452,19 @@ def decide_phase(rt, step, current_time, world):
     elif SKIP_REACT_ON_FIRST_STEP and step == 1:
         rt.decision, reason = "1", "first step baseline (LLM skipped)"
 
-    # Gate 1c: recently replanned, give the new plan time to play out.
-    elif steps_since_react < REACT_COOLDOWN_STEPS:
+    # Gate 1c: the plan says to work with a teammate who is right here: talk.
+    # (Planned collaboration used to happen only if the react LLM happened to
+    # choose "talk", so "collaborate with Eve 11-12" passed in silence.)
+    elif partner is not None:
+        activity = TIME_PREFIX.sub("", rt.chunk["activity"]).strip()
+        rt.decision = "2"
+        rt.reaction = (activity if rt.chunk.get("is_reaction")      # already "greet Eve ..."
+                       else f"talk with {partner['name']} about: {activity}")
+        reason = f"planned to work with {partner['name']}, who is here (LLM skipped)"
+
+    # Gate 1d: recently replanned, give the new plan time to play out, unless
+    # a teammate just walked in (that is worth a decision even mid-cooldown).
+    elif steps_since_react < REACT_COOLDOWN_STEPS and not arrivals:
         rt.decision, reason = "1", (
             f"react cooldown, {steps_since_react} steps since replan (LLM skipped)"
         )
@@ -463,7 +483,79 @@ def decide_phase(rt, step, current_time, world):
             rt.decision, rt.reaction = parse_decision(raw)
             reason = f"LLM said {raw.strip()!r} after {len(candidates)} obs"
 
+            room = relocation_target(rt.reaction, rt.agent, world) if rt.decision == "2" else None
+            if room is not None:
+                # "Move to office_1 to keep debugging" isn't a reaction to
+                # anything: the plan is fine, only the room was wrong. Move
+                # without replacing the plan or starting the react cooldown.
+                relocate(rt, room, current_time)
+                reason += f" -> just a room change to {room} (no react, no cooldown)"
+                rt.decision, rt.reaction = "1", ""
+
     log.debug(f"{rt.tag} decision {rt.decision}: {reason}")
+
+
+TIME_PREFIX = re.compile(r"^\d{1,2}:\d{2}\s*[ap]m:\s*", re.IGNORECASE)
+_MOVE_VERB = re.compile(
+    r"^\s*(?:let'?s\s+)?(?:move|go|head|walk|return|relocate|switch|get)\w*\b(?:\s+back)?\s+to\b",
+    re.IGNORECASE)
+
+
+def teammates_here(rt, world):
+    room = rt.agent["current_location"]
+    return {a["id"] for a in world["agents"].values()
+            if a["id"] != rt.agent["id"] and a["current_location"] == room}
+
+
+def planned_partner(rt, world, current_time):
+    """The teammate the current chunk is about, if they're in the same room and
+    the two haven't just talked. Covers planned collaboration ("collaborate with
+    Eve 11-12") and a reaction that walked over to someone ("greet Eve"), which
+    used to arrive and then say nothing. The conversation cooldown keeps it from
+    repeating, including right after a talk (the settle chunk targets the partner)."""
+    chunk = rt.chunk
+    if not chunk or not chunk.get("target_agent"):
+        return None
+    other = world["agents"].get(chunk["target_agent"])
+    if (other is None or other["id"] == rt.agent["id"]
+            or other["current_location"] != rt.agent["current_location"]):
+        return None
+    if _talked_recently_ids(rt.agent["id"], other["id"], rt.planner._parse_time(current_time)):
+        return None
+    return other
+
+
+def relocation_target(reaction, agent, world):
+    """The room a reaction only moves the agent to ("Move to office_1 to keep
+    debugging"), or None if it is a real reaction (names a teammate, names no
+    room, or names a room the agent is already in)."""
+    if not reaction or not _MOVE_VERB.search(reaction):
+        return None
+    text = reaction.lower()
+    for other in world["agents"].values():
+        if other["id"] != agent["id"] and re.search(
+                rf"\b{other['name'].split()[0].lower()}\b", text):
+            return None
+    rooms = [r for r in world["locations"]
+             if r in text or r.replace("_", " ") in text]
+    if "my office" in text or "own office" in text:
+        rooms.append(agent.get("office"))
+    rooms = [r for r in dict.fromkeys(rooms) if r]
+    if len(rooms) != 1 or rooms[0] == agent["current_location"]:
+        return None
+    return rooms[0]
+
+
+def relocate(rt, room, current_time):
+    """Keep doing the planned activity, but in `room`, until the chunk ends.
+    Pinned, so choose_location can't send the agent back."""
+    chunk = rt.chunk
+    rt.override = {**chunk, "location": room, "pinned": True, "target_agent": None,
+                   "start_time": chunk.get("start_time") or current_time,
+                   "duration": chunk.get("duration") or STEP_MINUTES}
+    rt.chunk = rt.override
+    rt.last_chunk = None                    # different room: apply it this step
+
 
 def parse_decision(raw):
     m = re.search(r"DECISION:\s*([12])", raw)
@@ -528,11 +620,15 @@ TASK_ID = re.compile(r"\bT-\d+\b", re.IGNORECASE)
 _last_talk = {}          # frozenset({id_a, id_b}) -> datetime of their last conversation
 
 
-def talked_recently(rt, other, current_time):
-    last = _last_talk.get(frozenset((rt.agent["id"], other.agent["id"])))
-    now = rt.planner._parse_time(current_time)
+def _talked_recently_ids(a_id, b_id, now):
+    last = _last_talk.get(frozenset((a_id, b_id)))
     return (last is not None and now is not None
             and now - last < timedelta(minutes=CONVERSATION_COOLDOWN_MINUTES))
+
+
+def talked_recently(rt, other, current_time):
+    return _talked_recently_ids(rt.agent["id"], other.agent["id"],
+                                rt.planner._parse_time(current_time))
 
 
 def remember_conversation(rt, other, current_time, topic):
@@ -627,7 +723,23 @@ def replan_after_conversation(rt, commitment, current_time, world):
         return False
     rt.stream.add_observations([f"{rt.agent['name']} committed to: {commitment}"])
     log.event(f"{rt.tag} replanned the day around: {commitment}")
+    absorb_board_changes(rt)
     return True
+
+
+def absorb_board_changes(rt):
+    """The plan was just rebuilt from the board as it is now (task_guidance), so
+    a pending 'workload changed' flag would only trigger a second, identical
+    replan. Keep any handoff notices as memories, then clear the flag."""
+    agent_id = rt.agent["id"]
+    if not project_board.workload_changed(agent_id):
+        return
+    notices = project_board.workload_notices(agent_id)
+    if notices:
+        rt.stream.add_observations(notices)
+        for notice in notices:
+            log.event(f"{rt.tag} notified: {notice}")
+    project_board.clear_workload_changed(agent_id)
 
 
 def replan_after_board(rt, current_time, world):

@@ -110,6 +110,9 @@ def _generate_line(speaker, listener, current_time, status, history, intent, wor
 {_board_context(speaker, listener, world)}
     {name} is talking with {other}. Be specific: name the tasks (T-1, T-2, ...)
     and the concrete next step when it helps, and don't repeat what was already said.
+    Only talk about work as it really stands in the memories and board above:
+    {name} must not claim to have built, reviewed or approved anything that isn't
+    there, and a task marked todo has not been started.
     {ask}
     """
 

@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+import clock
 import llm
 import main
 import project_board as pb
@@ -101,8 +102,10 @@ def test_taking_a_task_yourself_needs_no_note(w):
     ("blocked", "say what is blocking it"),
 ])
 def test_review_and_blocked_need_a_note(w, status, why):
+    clock.set_time("9:00 am")
     pb.create_task(w, "adam", "API", assign_to_self=True)
     pb.update_status(w, "adam", "T-1", "in_progress")
+    clock.set_time("11:30 am")                  # long enough in progress to ask for review
     adam = w["agents"]["adam"]
     _, refused = pb.apply_actions(w, adam, [
         {"action": "update_status", "task_id": "T-1", "status": status}])

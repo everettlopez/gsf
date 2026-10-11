@@ -48,6 +48,7 @@ looking at the board, or by being told in conversation.
 
 import json
 import re
+from datetime import datetime
 
 import clock
 import llm
@@ -100,6 +101,12 @@ class NoChange(BoardError):
 WIP_LIMIT = 1            # tasks one agent can have in progress at once
 MAX_BOARD_NOTES = 20     # board-level notes kept on the project
 
+# An agent can't ask for review on work that only just started (the run that
+# motivated this moved T-1 to review 50 minutes after starting it, after doing
+# nothing but planning). Enforced for agents at the board, not in update_status,
+# so scripted moves and tests can still walk a task straight through.
+MIN_MINUTES_BEFORE_REVIEW = 120
+
 # Titles that describe a meeting or a review, not something to build or ship.
 _NOT_A_DELIVERABLE = re.compile(
     r"^\s*(?:review|meet|meeting|discuss|sync|align|check[- ]in|stand-?up|coordinate"
@@ -119,6 +126,46 @@ def _normalize(text):
 
 def _clean(text, limit=200):
     return " ".join((text or "").split())[:limit].strip().rstrip(".")
+
+
+def _parse_clock(text):
+    """'7:10 am' -> a datetime on today's sim date, or None."""
+    try:
+        t = datetime.strptime((text or "").strip().upper(), "%I:%M %p").time()
+    except ValueError:
+        return None
+    return datetime.combine(clock.now().date(), t)
+
+
+def _last_event(task, suffix):
+    """The latest history entry whose event ends with `suffix` (e.g. '-> review')."""
+    for entry in reversed(task["history"]):
+        if str(entry.get("event", "")).endswith(suffix):
+            return entry
+    return None
+
+
+def started_at(task):
+    """When the task last went in progress ('7:10 am'), or None."""
+    entry = _last_event(task, "-> in_progress")
+    return entry["time"] if entry else None
+
+
+def minutes_in_progress(task):
+    """How long the task has been in progress, by the sim clock, or None."""
+    start = _parse_clock(started_at(task))
+    if task["status"] != "in_progress" or start is None:
+        return None
+    return int((clock.now() - start).total_seconds() // 60)
+
+
+def changes_requested(task):
+    """Did a teammate leave a note on the task since it went to review?"""
+    entered = _last_event(task, "-> review")
+    if entered is None:
+        return False
+    after = task["history"][task["history"].index(entered) + 1:]
+    return any(e.get("event") == "note" and e.get("agent") != task["assignee"] for e in after)
 
 
 def get_project(world):
@@ -627,8 +674,10 @@ def board_text_for_prompt(world):
         deps = f" depends on {', '.join(t['depends_on'])};" if t["depends_on"] else ""
         approved = (" approved by " + ", ".join(_agent_name(world, a) for a in t["approved_by"])
                     + ";") if t["approved_by"] else ""
+        since = (f" in progress since {started_at(t)};"
+                 if t["status"] == "in_progress" and started_at(t) else "")
         row = (f"- {t['id']} [{t['status']}] {t['title']} ({t['area']}, "
-               f"{t['priority']}, {who});{deps}{approved} done when: {t['done_when'] or 'n/a'}")
+               f"{t['priority']}, {who});{since}{deps}{approved} done when: {t['done_when'] or 'n/a'}")
         note = latest_note(t)
         if note:
             row += f"\n    latest note ({_agent_name(world, note['agent'])}): {note['note']}"
@@ -676,6 +725,32 @@ NOTE_REQUIRED = {"blocked": "say what is blocking it",
                  "review": "say what the reviewer should check"}
 
 
+def _check_review_habits(world, agent_id, task_id, status):
+    """Two habits the core rules don't cover, which the 130-step run broke:
+    - review is for finished work, so not right after starting;
+    - a task in review waits for the teammate: the assignee only pulls it back
+      out when that teammate asked for changes (a note on the task)."""
+    try:
+        task = get_task(world, task_id)
+    except BoardError:
+        return                               # update_status reports the bad id
+    if task["assignee"] != agent_id:
+        return                               # update_status reports who owns it
+
+    if status == "review" and task["status"] == "in_progress":
+        minutes = minutes_in_progress(task)
+        if minutes is not None and minutes < MIN_MINUTES_BEFORE_REVIEW:
+            raise BoardError(
+                f"{task['id']} only went in progress at {started_at(task)}; review is "
+                f"for finished work, so keep working on it")
+
+    if task["status"] == "review" and status in ("in_progress", "todo") \
+            and not changes_requested(task):
+        raise BoardError(
+            f"{task['id']} is waiting for a teammate's review; leave it in review "
+            f"unless a teammate asks for changes")
+
+
 def _required_note(action, why):
     note = _clean(action.get("note"))
     if not note:
@@ -709,6 +784,7 @@ def apply_action(world, agent, action):
         status = action.get("status")
         if status in NOTE_REQUIRED:
             _required_note(action, NOTE_REQUIRED[status])
+        _check_review_habits(world, aid, action.get("task_id"), status)
         t = update_status(world, aid, action.get("task_id"), status,
                           action.get("note", ""))
         return (f"{name} moved task {t['id']} '{t['title']}' to "
@@ -865,6 +941,8 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
     - {agent['name']} works on one task at a time: move the current one to
       review or blocked before starting the next.
     - Only change a status when it actually changed; leave it alone otherwise.
+    - Review is for finished work. A task in review stays there until a teammate
+      approves it or asks for changes in a note.
     - Prefer tasks in {agent['name']}'s own area; leave other areas for teammates.
     - Keep tasks small enough for one person to finish in a day or two.
     - Do only what the current activity calls for; doing nothing is fine.
@@ -892,6 +970,46 @@ def _commitments_block(agent, commitments):
 """
 
 
+_START_STEP = re.compile(r"\bstart (T-\d+)(?: \(move it to in progress\))?", re.IGNORECASE)
+
+
+def reconcile_activity(world, agent_id, activity):
+    """Bring a planned board step up to date with the board as it is now.
+
+    Checkpoints like "start T-1 (move it to in progress)" are written into the
+    plan when it is made. If the task was started in the meantime, the step
+    would ask the model to do something already done, and it picks the next
+    status instead (that is how T-1 went to review at 8:00 after 50 minutes).
+    If another task is still in progress, the step can't happen yet (WIP limit),
+    so it says so instead of collecting refusals."""
+    match = _START_STEP.search(activity or "")
+    if not match:
+        return activity
+    try:
+        task = get_task(world, match.group(1))
+    except BoardError:
+        return activity
+    if task["assignee"] not in (None, agent_id):
+        return activity
+
+    tid = task["id"]
+    if task["status"] == "in_progress":
+        replacement = f"report progress on {tid} (already in progress)"
+    elif task["status"] in ("review", "done"):
+        replacement = f"check on {tid} (it is {task['status']})"
+    elif task["status"] == "todo":
+        busy = [t for t in get_project(world)["tasks"]
+                if t["assignee"] == agent_id and t["status"] == "in_progress" and t["id"] != tid]
+        if not busy:
+            return activity
+        other = busy[0]["id"]
+        replacement = (f"check whether {other} is finished: if it is, move {other} to review "
+                       f"and start {tid}; if not, keep {other} in progress and leave {tid} for later")
+    else:
+        return activity
+    return activity[:match.start()] + replacement + activity[match.end():]
+
+
 def interact(agent, world, activity, planner=None, retriever=None, memory_stream=None):
     """
     One board visit: ask the LLM what the agent does, apply it, and remember it.
@@ -900,6 +1018,11 @@ def interact(agent, world, activity, planner=None, retriever=None, memory_stream
     summary = planner.generate_agent_summary(agent) if planner else agent["name"]
     retriever = retriever or getattr(planner, "memory_retriever", None)
     memory_stream = memory_stream or getattr(planner, "memory_stream", None)
+
+    current = reconcile_activity(world, agent["id"], activity)
+    if current != activity:
+        log.debug(f"{agent['name']} board step brought up to date: {activity!r} -> {current!r}")
+        activity = current
 
     promised = commitments_for(agent["id"])
     prompt = build_prompt(agent, world, activity, summary, _role_context(agent, retriever),

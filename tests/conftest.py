@@ -16,6 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+import clock  # noqa: E402
 import llm  # noqa: E402
 import memory_stream  # noqa: E402
 import world as world_module  # noqa: E402
@@ -88,6 +89,14 @@ def fake_generate(prompt, options=None, format=None):
     if "core characteristics" in prompt:
         return "A focused engineer."
     return "ok"
+
+
+@pytest.fixture(autouse=True)
+def reset_clock():
+    """The sim clock is module state; tests that move it shouldn't leak."""
+    clock.set_time("7:00 am")
+    yield
+    clock.set_time("7:00 am")
 
 
 @pytest.fixture

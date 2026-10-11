@@ -140,7 +140,11 @@ pattern for objects:
    The LLM never edits the board JSON directly.
 4. **Review.** The assignee moves their task `todo → in_progress → review`. A
    teammate then approves it at the board, and only after that can the assignee
-   move it to `done`. Moving it back out of review clears the approvals.
+   move it to `done`. Moving it back out of review clears the approvals. Agents
+   at the board can't ask for review within `MIN_MINUTES_BEFORE_REVIEW` of
+   starting (review is for finished work), and once a task is in review the
+   assignee leaves it there until a teammate approves it or asks for changes in
+   a note on the task.
 5. **Replanning.** When an agent takes on or finishes a task at the board, the rest
    of their day is replanned around their open tasks once they step away: work
    blocks name the task, and short trips back to the board are scheduled when a
@@ -160,7 +164,10 @@ pattern for objects:
    work, reviews and dependencies waiting on them, and their own tasks. When a
    replanned work block names one of their tasks, it starts with a short board
    step if the task is still todo and the last block for it ends with one, so
-   starting and finishing work always go through the board.
+   starting and finishing work always go through the board. Those board steps
+   are checked against the board when the agent gets there: "start T-1" for a
+   task already in progress becomes a progress report, and "start T-2" while
+   T-1 is still in progress asks whether T-1 is finished first.
 8. **Notes.** Handing a task to a teammate, blocking a task, and asking for
    review all require a note (what it needs, what blocks it, what to check). The
    handoff note goes with the assignment notice.
@@ -174,7 +181,13 @@ pattern for objects:
     ("Adam and Eve talked at 10:25 about …"); the same two agents don't start
     another conversation within `CONVERSATION_COOLDOWN_MINUTES` unless the
     reaction names a task; and a promise an agent already planned around doesn't
-    trigger another replan.
+    trigger another replan. A conversation also starts without the react LLM
+    when the current plan chunk is about a teammate who is in the same room
+    ("collaborate with Eve", or a reaction like "greet Eve" that walked over
+    to her). A teammate walking into the room is considered even during the
+    react cooldown, and a reaction that only changes rooms ("move to office_1
+    to keep debugging") moves the agent without replanning or starting the
+    cooldown. Solo work never lands in a teammate's private office.
 11. **No gaps.** Replans must cover the rest of the day without gaps; if one
     still leaves a gap, the agent keeps working on their in-progress task in
     their office until the next block starts.

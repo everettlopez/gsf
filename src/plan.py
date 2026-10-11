@@ -389,8 +389,17 @@ class Planner:
             )
             result = json.loads(response)
             log.debug(f"choose_location: {result['location']} ({result['reason']})")
-            if result["location"] in valid:
-                return result["location"]
+            chosen = result["location"]
+            if chosen in owners and chosen != agent.get("office") \
+                    and not self.extract_target_agent(activity, agent, world):
+                # A teammate's private office is only right when the activity is
+                # about that teammate. Otherwise the agent "works" at Eve's desk
+                # and then spends a reaction (and the cooldown) walking back.
+                log.debug(f"choose_location: {chosen} is {owners[chosen]}'s office, "
+                          f"using {suggested} instead")
+                return suggested
+            if chosen in valid:
+                return chosen
         except Exception as e:
             log.warn(f"choose_location LLM failed ({e}), using keyword fallback")
 

@@ -2,7 +2,7 @@ import json
 import re
 from pathlib import Path
 
-from lemminflect import getInflection
+from lemminflect import getInflection, getLemma
 
 import llm
 import log
@@ -201,7 +201,12 @@ def action_to_present(action):
         return action
 
     verb = words[0].lower()
-    inflection = getInflection(verb, tag="VBG")
+    if not verb.isalpha() or verb.endswith("ing"):
+        return action                         # "let's ...", already "updating ..."
+
+    # Inflect the lemma, so "updated" becomes "updating", not "updateding".
+    lemma = (getLemma(verb, upos="VERB") or (verb,))[0]
+    inflection = getInflection(lemma, tag="VBG")
     if inflection:
         words[0] = inflection[0]
 
