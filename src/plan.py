@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta
 import json
+import math
 import re
 
 import llm
 import log
+import project_board
 from llm import CTX
 from memory_retriever import MemoryRetriever
 from memory_stream import MemoryStream
@@ -12,29 +14,29 @@ TIME_FORMAT = "%I:%M %p"
 
 AGENT_PROFILES = {
     "adam": """Name: Adam Beck (age: 24)
-    
+
         Innate traits: collaborative, technical, growth-oriented
 
         Adam Beck is a backend software engineer who primarily develops software using Python and TypeScript.
 
         He enjoys building reliable and scalable software systems and values clean code.
 
-        Adam Beck is currently working on a memory-system project. He has recently been focused on memory retrieval, memory-stream architecture, testing, and implementation work.
+        Adam Beck's team has been asked to build and deploy the company website. Adam owns the backend side of it: the API, the data it needs, and getting the site deployed. Eve Smith owns the frontend.
+
+        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Adam checks the project board at the start of each workday and adds any backend work the website still needs. When Adam starts, finishes, or gets stuck on a task, he walks to the project board to update it, and he updates his tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Adam looks it over with them and approves it at the board if it is ready. When Adam hands a task to a teammate, he leaves a note on it saying what it needs.
 
         Adam Beck works closely with other engineers and enjoys collaborating on technical challenges.
 
         Adam Beck hopes to become a software architect. He wants to build software that positively impacts many people.
 
-        Adam Beck is making good progress on the memory-system project and wants to continue improving it in the coming days.
-
         On Wednesday, Adam:
-        1) clock in and start work at 7:00 am,
-        2) attended engineering meetings from 8:00 am to 9:00 am,
-        3) worked on memory-system development from 9:00 am to 12:00 pm,
+        1) clocked in and started work at 7:00 am,
+        2) attended the kickoff meeting for the company website project from 8:00 am to 9:00 am,
+        3) researched hosting and API options for the website from 9:00 am to 12:00 pm,
         4) took a lunch break in the break room from 12:00 pm to 1:00 pm,
         5) collaborated with coworkers on technical challenges from 1:00 pm to 2:00 pm,
-        6) reviewed project updates, documentation, and testing progress from 2:00 pm to 5:00 pm,
-        7) clock out and finished work at 5:00 pm.""",
+        6) reviewed documentation and set up his development environment from 2:00 pm to 5:00 pm,
+        7) clocked out and finished work at 5:00 pm.""",
     "eve": """Name: Eve Smith (age: 21)
 
         Innate traits: shy, detail-oriented, thoughtful
@@ -43,34 +45,40 @@ AGENT_PROFILES = {
 
         She enjoys building polished and accessible user interfaces and values clean code.
 
-        Eve Smith is currently working on a navigation menu redesign project. She has recently been focused on UI components, responsive layouts, accessibility, and implementation work.
+        Eve Smith's team has been asked to build and deploy the company website. Eve owns the frontend side of it: the pages, the layout, and how the site looks and feels. Adam Beck owns the backend.
+
+        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Eve checks the project board at the start of each workday and adds any frontend work the website still needs. When Eve starts, finishes, or gets stuck on a task, she walks to the project board to update it, and she updates her tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Eve looks it over with them and approves it at the board if it is ready. When Eve hands a task to a teammate, she leaves a note on it saying what it needs.
 
         Eve Smith works with designers and other engineers, and prefers collaborating one-on-one or in writing on technical challenges.
 
         Eve Smith hopes to become a lead frontend engineer. She wants to build software that feels simple and welcoming for many people to use.
 
-        Eve Smith is making good progress on the navigation menu redesign and wants to continue improving it in the coming days.
-
         On Wednesday, Eve:
-        1) clock in and start work at 7:00 am,
-        2) attended engineering meetings from 8:00 am to 9:00 am,
-        3) worked on navigation menu development from 9:00 am to 12:00 pm,
+        1) clocked in and started work at 7:00 am,
+        2) attended the kickoff meeting for the company website project from 8:00 am to 9:00 am,
+        3) sketched page layouts for the website from 9:00 am to 12:00 pm,
         4) took a lunch break in the break room from 12:00 pm to 1:00 pm,
         5) collaborated with coworkers on technical challenges from 1:00 pm to 2:00 pm,
-        6) reviewed project updates, documentation, and testing progress from 2:00 pm to 5:00 pm,
-        7) clock out and finished work at 5:00 pm.""",
+        6) reviewed documentation and set up her development environment from 2:00 pm to 5:00 pm,
+        7) clocked out and finished work at 5:00 pm.""",
 }
 
 ROOM_PURPOSES = {
     "reception": "arriving, clocking in/out, visitors",
     "break_room": "meals, coffee, breaks, casual chat",
-    "conference_room": "meetings, group discussion, collaborating, presentations",
+    "conference_room": "meetings, group discussion, collaborating, presentations, "
+                       "and the team's project board (checking, adding and updating tasks)",
 }
+
+# The workday. The first plan item is given to the model, as in the paper.
+DAY_START = "7:00 am"
+DAY_END = "5:00 pm"
+FIRST_PLAN_ITEM = f"clock in and start work at {DAY_START}"
 
 # The example line shown to the model in the initial-plan prompt.
 PLAN_EXAMPLES = {
-    "adam": "3. work on memory-system development from 10:00 am to 1:00 pm",
-    "eve": "3. work on navigation menu development from 10:00 am to 1:00 pm",
+    "adam": "2. check the project board in the conference room from 8:00 am to 9:00 am",
+    "eve": "2. check the project board in the conference room from 8:00 am to 9:00 am",
 }
 
 
@@ -107,25 +115,63 @@ class Planner:
         return done, remaining
 
     def generate_initial_plan(self, agent):
-        """Day plan in broad strokes, continuing the agent's profile (paper 4.3)."""
+        """Day plan in broad strokes, continuing the agent's profile (paper 4.3).
+
+        Like the paper's prompt, the first item of the day is written in for the
+        model ("1) wake up ..."), so the plan always starts at DAY_START instead
+        of wherever the model decides the interesting part of the day begins."""
         name = agent["name"]
         prompt = f"""
         {AGENT_PROFILES[agent["id"]]}
-
+{self.recent_project_context(agent)}
         Today is Thursday.
 
         Here is {name}'s plan today in broad strokes:
+        1. {FIRST_PLAN_ITEM}
 
-        Continue the plan as a numbered list.
+        Continue the plan as a numbered list, starting at item 2. Cover the whole
+        workday until {name} clocks out at {DAY_END}, with no gaps.
 
-        Return the plan in broad-strokes time blocks.
+        Return the plan in broad-strokes time blocks, each written as
+        "<activity> from H:MM am to H:MM pm".
 
         Example:
         {PLAN_EXAMPLES[agent["id"]]}
         """
-        return self._parse_numbered(llm.generate(prompt))
+        return self.ensure_day_start(self._parse_numbered(llm.generate(prompt)))
 
-    def regenerate_plan(self, agent, current_time, reaction, done_chunks, old_remaining, end_of_day="5:00 pm"):
+    def recent_project_context(self, agent, n=8):
+        """The paper's initial plan uses the agent's summary description,
+        including "a summary of their recent experiences". Here that is what the
+        agent remembers about the project and the board: on the first day the
+        seeded goal and habits, after that what they saw on the board and agreed
+        with teammates. Retrieval only, no extra LLM call."""
+        results = self.memory_retriever.retrieve(
+            f"the company website project, the project board, and {agent['name']}'s tasks",
+            n=n, touch=False,
+        )
+        lines = [f"        - {r['memory'].description}" for r in results
+                 if r["memory"].memory_type != "plan"]
+        if not lines:
+            return ""
+        return f"""
+        What {agent['name']} remembers about the project:
+""" + "\n".join(lines) + "\n"
+
+    def ensure_day_start(self, items):
+        """Put the first item back if the model didn't repeat it, and only if
+        nothing already covers the start of the day."""
+        if any(re.search(r"\bclock(?:ing|ed)? in\b", i, re.IGNORECASE) for i in items):
+            return items
+        day_start = self._parse_time(DAY_START)
+        starts = [self._parse_time(self.extract_start_time(i)) for i in items]
+        starts = [t for t in starts if t is not None]
+        if starts and min(starts) <= day_start:
+            return items
+        return [FIRST_PLAN_ITEM] + items
+
+    def regenerate_plan(self, agent, current_time, reaction, done_chunks, old_remaining,
+                        end_of_day="5:00 pm", guidance=""):
         name = agent["name"]
         done_text = "\n".join(f"- {c['activity']}" for c in done_chunks) or "- (nothing yet)"
         old_text = "\n".join(f"- {c['activity']}" for c in old_remaining) or "- (nothing left)"
@@ -141,18 +187,131 @@ class Planner:
         {name}'s previous plan for the rest of the day:
         {old_text}
 
-        Just now, {name} decided to react: {reaction}
-
+        What just happened: {reaction}
+        {guidance}
         Revise {name}'s plan from {current_time} until {end_of_day}.
         Return a numbered list of broad-strokes blocks, each written as
-        "<activity> from H:MM am to H:MM pm". The first block must start at {current_time}.
+        "<activity> from H:MM am to H:MM pm". The first block must start at {current_time},
+        each block must start when the previous one ends (no gaps), and the last
+        one must end at {end_of_day}. Describe what {name} will do, not the reason.
         
         Example:
-        1. work on memory-system development from {current_time} to 1:00 pm"""
+        1. work on the website's backend API from {current_time} to 1:00 pm"""
 
         response = llm.generate(prompt, options={**CTX, "num_predict": 600, "temperature": 0.3})
 
         return self._parse_numbered(response)
+
+    def task_guidance(self, agent, world):
+        """Planning instructions after the agent has seen the board: what the
+        project needs from them, and how to schedule their tasks around it."""
+        if world is None or "project" not in world:
+            return ""
+        name = agent["name"]
+        open_tasks = project_board.open_tasks_for(world, agent["id"])
+        status = "\n".join(f"        - {line}"
+                            for line in project_board.status_for_agent(world, agent["id"]))
+        example = (f"work on {open_tasks[0]['id']} '{open_tasks[0]['title']}' in the office from ..."
+                   if open_tasks else "work on T-3 'Set up the API' in the office from ...")
+        return f"""
+        The project board, as {name} last saw it:
+{status}
+
+        Plan the rest of the day around the project:
+        - Name the task in each work block, e.g. "{example}".
+        - If {name}'s area has no tasks, or nothing is waiting for {name}, add a
+          block to add or take on tasks at the project board.
+        - When {name} starts, finishes, or gets stuck on a task, add a short block
+          to update it on the project board in the conference room.
+        - If a teammate's task is waiting for review, add a block to review it
+          with them and approve it at the project board.
+        - Add a short block to update the project board before lunch and before
+          clocking out.
+        """
+
+    _TASK_ID = re.compile(r"\bT-\d+\b", re.IGNORECASE)
+    _SPAN = re.compile(r"from\s*\d{1,2}:\d{2}\s*[ap]m\s*to\s*\d{1,2}:\d{2}\s*[ap]m",
+                       re.IGNORECASE)
+
+    def _fmt(self, dt):
+        return dt.strftime("%I:%M %p").lstrip("0").lower()
+
+    def _retimed(self, chunk, start, minutes):
+        """Copy of a chunk moved to [start, start + minutes), text included, so
+        later decomposition sees the same times the chunk has."""
+        c = dict(chunk)
+        end = start + timedelta(minutes=minutes)
+        span = f"from {self._fmt(start)} to {self._fmt(end)}"
+        c["activity"] = (self._SPAN.sub(span, c["activity"], count=1)
+                         if self._SPAN.search(c["activity"]) else f"{c['activity']} {span}")
+        c["start_time"], c["duration"] = self._fmt(start), minutes
+        return c
+
+    def _board_step(self, agent, start, minutes, text):
+        return {
+            "activity": f"{text} on the project board from {self._fmt(start)} to "
+                        f"{self._fmt(start + timedelta(minutes=minutes))}",
+            "location": "conference room",
+            "start_time": self._fmt(start),
+            "duration": minutes,
+            "target_agent": None,
+            "board_work": True,
+        }
+
+    def add_task_checkpoints(self, chunks, agent, open_tasks, minutes=10):
+        """Starting and finishing work go through the board.
+
+        For each of the agent's open tasks named in a work block: if the task is
+        still todo and nothing earlier in the plan visits the board for it, the
+        block starts with a short board step to move it to in progress; and the
+        last block that names it ends with a short board step to update it
+        (in progress, review or blocked, decided at the board from what the
+        agent actually did). Blocks are split, never moved, so the day's times
+        stay as planned."""
+        own = {t["id"]: t for t in open_tasks}
+        if not own:
+            return chunks
+
+        def ids(chunk):
+            return [i.upper() for i in dict.fromkeys(self._TASK_ID.findall(chunk["activity"]))
+                    if i.upper() in own]
+
+        last = {}
+        for i, c in enumerate(chunks):
+            if not c.get("board_work"):
+                for tid in ids(c):
+                    last[tid] = i
+
+        out, visited = [], set()
+        for i, c in enumerate(chunks):
+            named = ids(c)
+            start = self._parse_time(c.get("start_time"))
+            minutes_total = c.get("duration") or 0
+            if c.get("board_work"):
+                visited.update(named)
+                out.append(c)
+                continue
+            if not named or start is None or minutes_total < 3 * minutes:
+                out.append(c)
+                continue
+
+            # One task at a time: only the first todo task named here is started.
+            to_start = [t for t in named if own[t]["status"] == "todo" and t not in visited][:1]
+            to_wrap = [t for t in named if last.get(t) == i]
+            if to_start:
+                out.append(self._board_step(agent, start, minutes,
+                                            f"start {to_start[0]} (move it to in progress)"))
+                visited.update(to_start)
+                start += timedelta(minutes=minutes)
+                minutes_total -= minutes
+            if to_wrap:
+                minutes_total -= minutes
+            out.append(self._retimed(c, start, minutes_total))
+            if to_wrap:
+                out.append(self._board_step(
+                    agent, start + timedelta(minutes=minutes_total), minutes,
+                    f"report progress on {', '.join(to_wrap)}"))
+        return out
 
     def create_chunks(self, daily_plan, agent, world=None):
         chunks = []
@@ -164,6 +323,7 @@ class Planner:
                 "start_time": self.extract_start_time(activity),
                 "duration": self.extract_duration(activity),
                 "target_agent": self.extract_target_agent(activity, agent, world),
+                "board_work": project_board.mentions_board_explicitly(activity),
             })
 
         return chunks
@@ -253,7 +413,8 @@ class Planner:
             return "reception"
         if has(r"\bbreak room\b", r"\bkitchen\b"):
             return "break room"
-        if has(r"\bconference room\b", r"\bmeeting room\b"):
+        if has(r"\bconference room\b", r"\bmeeting room\b",
+            r"\b(?:project|task) board\b", r"\bthe board\b"):
             return "conference room"
 
         # 2. Arriving / leaving
@@ -296,7 +457,7 @@ class Planner:
         # Matches:
         # "work on project from 6:00 pm to 8:00 pm"
         match = re.search(
-        r"from\s+(\d{1,2}:\d{2}\s*(?:am|pm))",
+        r"from\s*(\d{1,2}:\d{2}\s*(?:am|pm))",
         activity
         )
         if match:
@@ -317,7 +478,7 @@ class Planner:
         activity = activity.lower()
 
         match = re.search(
-            r"from\s+(\d{1,2}):(\d{2})\s*(am|pm)\s+to\s+(\d{1,2}):(\d{2})\s*(am|pm)",
+            r"from\s*(\d{1,2}):(\d{2})\s*(am|pm)\s*to\s*(\d{1,2}):(\d{2})\s*(am|pm)",
             activity
         )
 
@@ -375,6 +536,10 @@ class Planner:
             "location": self.resolve_location(activity, agent),
             "start_time": self.extract_start_time(activity),
             "target_agent": parent.get("target_agent"),
+            # A board visit stays a board visit when it is broken down, even if
+            # a step reads "check all frontend tasks for updates".
+            "board_work": bool(parent.get("board_work"))
+                          or project_board.mentions_board_explicitly(activity),
         }
         if duration is not None:
             chunk["duration"] = duration
@@ -389,17 +554,21 @@ class Planner:
                 decomposed_chunks.append(chunk)
                 continue
 
+            # Round UP: a 10:05-12:00 block (115 min) needs two hour chunks, not one,
+            # or 11:05-12:00 has nothing in it.
+            hours = math.ceil(chunk["duration"] / 60)
+
             prompt = f"""
             The following activity is one entry from a daily plan.
 
-            Create EXACTLY {chunk["duration"] // 60} hourly actions.
+            Create EXACTLY {hours} hourly actions.
 
             The first action starts at the activity's start time.
             Each following action occurs exactly one hour later.
 
             DO NOT create additional hours.
             DO NOT include the end time as another action.
-            DO NOT create more than {chunk["duration"] // 60} actions.
+            DO NOT create more than {hours} actions.
 
             Activity:
             {chunk["activity"]}
@@ -423,12 +592,42 @@ class Planner:
             Return only a numbered list.
             """
 
-            for activity in self._parse_numbered(llm.generate(prompt)):
-                decomposed_chunks.append(
-                    self._chunk_from_activity(activity, agent, chunk, duration=60)
-                )
+            hour_chunks = [
+                self._chunk_from_activity(activity, agent, chunk, duration=60)
+                for activity in self._parse_numbered(llm.generate(prompt))[:hours]
+            ]
+            self._fit_to_block(hour_chunks, chunk)
+            decomposed_chunks.extend(hour_chunks)
 
         return decomposed_chunks
+
+    def _fit_to_block(self, hour_chunks, block):
+        """Each hour chunk lasts until the next one starts or the broad block ends,
+        and never more than an hour (so a 115-minute block ends with a 55-minute
+        chunk). If the model returned too few hours, the rest is a gap that
+        main.get_chunk_lazy fills from the broad block."""
+        block_start = self._parse_time(block.get("start_time"))
+        if block_start is None:
+            return
+        block_end = block_start + timedelta(minutes=block["duration"])
+        for i, hc in enumerate(hour_chunks):
+            start = self._parse_time(hc.get("start_time"))
+            if start is None:
+                continue
+            end = block_end
+            if i + 1 < len(hour_chunks):
+                following = self._parse_time(hour_chunks[i + 1].get("start_time"))
+                if following is not None and following > start:
+                    end = min(following, block_end)
+            minutes = min(60, int((end - start).total_seconds() // 60))
+            hc["duration"] = minutes if minutes > 0 else 60
+
+    def covers(self, chunk, current_time):
+        """Is current_time inside this chunk (not just after its start)?"""
+        now, start = self._parse_time(current_time), self._parse_time(chunk.get("start_time"))
+        if now is None or start is None:
+            return False
+        return start <= now < start + timedelta(minutes=chunk.get("duration") or 0)
 
     def decompose_hour_chunks(self, hour_chunks, agent):
         """Hour chunks -> 5-15 minute actions (paper: finer-grained actions)."""
@@ -555,7 +754,9 @@ class Planner:
                 entities.append((other_agent["name"], other_agent["current_action"]))
 
         # ...THEN keep only the ones mentioned in what we're reacting to.
-        entities = [(n, s) for n, s in entities if any(n in o for o in observations)]
+        # (object keys use underscores, observations use spaces: "project board")
+        entities = [(n, s) for n, s in entities
+                    if any(n in o or n.replace("_", " ") in o for o in observations)]
 
         context_memories = []
         seen = set()
@@ -685,6 +886,7 @@ class Planner:
             "duration": minutes,
             "target_agent": self.extract_target_agent(reaction, agent, world),
             "is_reaction": True,
+            "board_work": project_board.mentions_board_explicitly(reaction),
         }
 
     def extract_outcomes(self, transcript, agent_a, agent_b, world):

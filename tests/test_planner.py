@@ -105,3 +105,33 @@ def test_agent_summary_is_cached_and_invalidated(planner, adam, monkeypatch):
     planner.invalidate_summary()
     planner.generate_agent_summary(adam)
     assert len(calls) == 2
+
+
+def test_time_parsing_tolerates_missing_spaces(planner):
+    activity = "sketch page layouts from9:00 am to12:00 pm"
+    assert planner.extract_start_time(activity) == "9:00 am"
+    assert planner.extract_duration(activity) == 180
+
+
+def test_plan_gets_its_clock_in_back_when_the_model_skips_it(planner):
+    items = ["check the project board from 8:00 am to 9:00 am"]
+    assert planner.ensure_day_start(items) == [
+        "clock in and start work at 7:00 am",
+        "check the project board from 8:00 am to 9:00 am",
+    ]
+
+
+def test_plan_that_already_starts_the_day_is_left_alone(planner):
+    covered = ["work on development from 7:00 am to 9:00 am"]
+    clocked = ["Clock in at 7:00 am", "check the project board from 8:00 am to 9:00 am"]
+    assert planner.ensure_day_start(covered) == covered
+    assert planner.ensure_day_start(clocked) == clocked
+
+
+def test_hour_decomposition_covers_blocks_that_are_not_whole_hours(planner, adam):
+    block = {"activity": "work on T-1 'Set up the API' from 10:05 am to 12:00 pm",
+             "start_time": "10:05 am", "duration": 115, "target_agent": None}
+    hours = planner.decompose_chunks([block], adam)
+    assert [(h["start_time"], h["duration"]) for h in hours] == [("10:05 am", 60), ("11:05 am", 55)]
+    assert planner.covers(hours[1], "11:50 am")
+    assert not planner.covers(hours[0], "11:50 am")

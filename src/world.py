@@ -6,6 +6,7 @@ from lemminflect import getInflection
 
 import llm
 import log
+import project_board
 
 WORLD_PATH = Path(__file__).resolve().parent.parent / "data" / "world" / "world.json"
 
@@ -72,6 +73,7 @@ def refresh_room_states(world):
         room_data["state"] = (
             "occupied by " + " and ".join(occupants) if occupants else "empty"
         )
+    project_board.sync_board_object(world)
 
 
 def _parse_json(text):
@@ -100,8 +102,18 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
     room_objects = room_data["objects"]
 
     talking_to_agent = bool(chunk and chunk.get("target_agent"))
+    activity = (chunk or {}).get("activity") or agent["current_action"]
+    board_here = project_board.BOARD_OBJECT in room_objects
 
-    if talking_to_agent or not room_objects:
+    # Only board work can pick the board; otherwise "design the homepage" in the
+    # conference room ends up "using" the board and editing tasks at random.
+    usable = {name: data for name, data in room_objects.items()
+              if name != project_board.BOARD_OBJECT}
+
+    if board_here and ((chunk or {}).get("board_work") or mentions_board(activity)):
+        # Plainly board work (even "review the board with Eve"): no LLM needed.
+        agent["interacting_with"] = project_board.BOARD_OBJECT
+    elif talking_to_agent or not usable:
         # Conversations don't involve objects, and empty rooms have none.
         agent["interacting_with"] = None
     else:
@@ -122,7 +134,7 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
     {observations_text}
 
     Available objects:
-    {json.dumps(room_objects, indent=2)}
+    {json.dumps(usable, indent=2)}
 
     Determine:
     1. Which object the agent is interacting with.
@@ -154,17 +166,33 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
         result = _parse_json(llm.generate(prompt, format="json"))
 
         choice = result.get("interacting_with")
-        agent["interacting_with"] = choice if choice in room_objects else None
+        agent["interacting_with"] = choice if choice in usable else None
 
         for change in result.get("changes") or []:
             obj = change.get("object")
-            if obj in room_objects and change.get("new_state"):
+            # (the board only changes through project_board actions)
+            if obj in usable and change.get("new_state"):
                 room_objects[obj]["state"] = change["new_state"]
+
+    if agent["interacting_with"] == project_board.BOARD_OBJECT:
+        # Using the board means reading it and (maybe) editing tasks.
+        project_board.interact(agent, world, activity, planner=planner)
 
     refresh_room_states(world)
     log.debug(f"{room}: {room_data['state']}; {agent['name']} using {agent['interacting_with']}")
 
     return agent, world
+
+
+_BOARD_WORDS = re.compile(
+    r"\b(?:project board|task board|board|tasks?|backlog)\b", re.IGNORECASE
+)
+
+
+def mentions_board(activity):
+    """Does this activity plainly involve the project board?"""
+    return bool(_BOARD_WORDS.search(activity or "")
+                or project_board.mentions_board_explicitly(activity))
 
 
 def action_to_present(action):

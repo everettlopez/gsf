@@ -66,7 +66,7 @@ Reflection (twice a day)
 pip install -r requirements.txt        # numpy, ollama, lemminflect
 ollama pull qwen3 && ollama pull nomic-embed-text
 
-python scripts/seed_memories.py        # one-time: give Adam and Eve their starting memories
+python scripts/seed_memories.py --reset   # fresh start: clear memories + board, then seed
 python src/main.py                     # run the simulation
 ```
 
@@ -106,8 +106,85 @@ Verbosity is controlled by `GA_LOG`:
 | `src/conversation.py` | Turn-based dialogue between agents |
 | `src/reflect.py` | Reflection: questions → retrieval → cited insights |
 | `src/world.py`, `perceive.py` | World state and what agents observe |
+| `src/project_board.py` | The shared project board: structured tasks and the actions agents take on them |
 | `src/llm.py` | The only module that talks to Ollama |
 | `src/log.py` | Logging levels and output layout |
+
+## Project board
+
+The team's work is tracked on a `project_board` object in the conference room. The
+data behind it is the top-level `project` record in `data/world/world.json`
+(goal, description, status, and a list of structured tasks). Each task has an id
+(`T-1`), title, description, area, priority, status
+(`todo | in_progress | blocked | review | done`), assignee, creator,
+dependencies, a "done when" line, timestamps, and a history of every change.
+
+Nothing about the board is special-cased in the agent loop. It follows the paper's
+pattern for objects:
+
+1. **Seeded identity.** The profiles in `plan.py` and the seeds in
+   `scripts/seed_memories.py` give each agent the team goal, their side of the
+   work, and the habit of checking the board each morning, so it shows up in
+   their day plan.
+2. **Perception.** An agent in the conference room reads the board as
+   observations ("The project board has no tasks on it yet.", "Task T-2 ... is
+   todo and unassigned."). Like other observations, a line is stored only when it
+   changes, and a new line can trigger a reaction.
+3. **Action.** When an agent interacts with the board, one schema-constrained LLM
+   call proposes up to 4 actions (`create_task`, `claim_task`, `assign_task`,
+   `update_status`, `edit_task`, `approve_task`, `add_note`). The prompt includes what the agent has actually
+   been doing on each of their open tasks (retrieved from memory), so status
+   changes follow real work. Plain Python validates and applies the actions (no
+   duplicate titles, no moving someone else's task, no starting work before its
+   dependencies are done) and writes each change to the agent's memory stream.
+   The LLM never edits the board JSON directly.
+4. **Review.** The assignee moves their task `todo → in_progress → review`. A
+   teammate then approves it at the board, and only after that can the assignee
+   move it to `done`. Moving it back out of review clears the approvals.
+5. **Replanning.** When an agent takes on or finishes a task at the board, the rest
+   of their day is replanned around their open tasks once they step away: work
+   blocks name the task, and short trips back to the board are scheduled when a
+   task starts, finishes or gets stuck, and before lunch and clock-out.
+6. **Follow-through.** Anything clearly about the board ("review the project
+   board", "update task statuses", "assign T-4 to Adam") is routed to the board
+   without an LLM call, and other work in the conference room can't touch the
+   board. A promise about the board made in conversation is kept for the agent's
+   next board visit and shown first in that prompt. If they made it while
+   standing at the board, they go straight back to it after the conversation.
+   Refused actions ("T-1 needs a teammate to approve it first") are remembered,
+   and an agent who is assigned a task is notified and replans around it.
+7. **Planning from the project's state (paper 4.3).** The day plan is conditioned
+   on what the agent remembers about the project (the paper's "summary of their
+   recent experiences"), and every replan after a board visit or conversation
+   includes what the board means for that agent: gaps in their area, unassigned
+   work, reviews and dependencies waiting on them, and their own tasks. When a
+   replanned work block names one of their tasks, it starts with a short board
+   step if the task is still todo and the last block for it ends with one, so
+   starting and finishing work always go through the board.
+8. **Notes.** Handing a task to a teammate, blocking a task, and asking for
+   review all require a note (what it needs, what blocks it, what to check). The
+   handoff note goes with the assignment notice.
+9. **One task at a time.** An agent can have one task in progress; to start
+   another they move the current one to review or blocked. Re-sending a status
+   a task already has is skipped quietly (not refused, not remembered). Tasks
+   are things to build or ship: titles that describe a meeting or a review are
+   refused. Notes can go on a task or on the board itself.
+10. **Conversations.** Both speakers see what the board says about them and each
+    other, so they talk about specific tasks. After a talk both remember it
+    ("Adam and Eve talked at 10:25 about …"); the same two agents don't start
+    another conversation within `CONVERSATION_COOLDOWN_MINUTES` unless the
+    reaction names a task; and a promise an agent already planned around doesn't
+    trigger another replan.
+11. **No gaps.** Replans must cover the rest of the day without gaps; if one
+    still leaves a gap, the agent keeps working on their in-progress task in
+    their office until the next block starts.
+12. **Reflection and conversation.** Board memories feed reflection, reactions and
+   conversations like any other memory. Changes on the board (a task moving to
+   review, a new note) are new observations for whoever walks up next, so they can
+   start a conversation there.
+
+`python scripts/seed_memories.py --reset` clears the board along with the memory
+streams.
 
 ## Reflection
 

@@ -56,6 +56,13 @@ def fake_generate(prompt, options=None, format=None):
         if "meeting_agreed" in props:                       # plan.extract_outcomes
             return json.dumps({"meeting_agreed": False, "location": "office_1",
                                "activity": "", "minutes": 0, "commitments": []})
+        if "actions" in props:                              # project_board.interact
+            return json.dumps({"reason": "the board is empty", "actions": [{
+                "action": "create_task", "title": "Set up the website API",
+                "description": "Create the API the website pages call.",
+                "area": "backend", "priority": "high", "depends_on": [],
+                "done_when": "The API answers a health check.", "assign_to_self": True,
+            }]})
         return json.dumps({"reason": "test", "location": "office_1"})   # choose_location
 
     if "Respond with only a single integer" in prompt:

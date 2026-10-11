@@ -1,5 +1,7 @@
 """perceive.py - turn the world state around an agent into observation strings."""
 
+import project_board
+
 
 def build_observations(agent, world):
     room = agent["current_location"]
@@ -25,7 +27,14 @@ def build_observations(agent, world):
 
     obs.append(f"The {room} is currently {room_data['state']}.")
     for name, data in room_data["objects"].items():
+        if name == project_board.BOARD_OBJECT:
+            continue                      # read off the board itself, below
         obs.append(f"The {name} in the {room} is {data['state']}.")
+
+    # Anyone in the room can read the project board (it's a real object, so
+    # an agent only knows what's on it after standing in front of it).
+    if project_board.BOARD_OBJECT in room_data["objects"]:
+        obs.extend(project_board.board_observations(world))
 
     return obs
 
