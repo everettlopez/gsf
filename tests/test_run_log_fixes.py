@@ -10,9 +10,8 @@ one moment of that run:
    included "a designer" and "a backend engineer" who don't exist.
 4. "mark T-1 as completed and move it to the done column" happened in an office.
 5. Nine plain board visits in one replan, a duplicate start, a 0-minute block.
-6. No shared stand-up: Adam had his at 12:00, Eve at 8:00, replans moved them.
-7. Three refusals for the same mistake in one visit.
-8. Every choose_location call (~14s) decided "stay in your own office".
+6. Three refusals for the same mistake in one visit.
+7. Every choose_location call (~14s) decided "stay in your own office".
 """
 
 import copy
@@ -294,8 +293,7 @@ def test_plans_know_who_the_team_is(fake_llm, isolated_data, w, monkeypatch):
     Planner(eve).generate_initial_plan(eve, w)
     assert "Eve Smith's only teammates are Adam Beck (backend); there is no one else" in prompts[0]
     assert "designers" not in prompts[0]
-    assert "daily stand-up with the whole team from 8:00 am to 8:15 am in the conference room" \
-        in prompts[0]
+    assert "fixed meetings" not in prompts[0]      # meetings come from the agents, not the world
 
 
 # --- 4. board actions are recognised as board work ------------------------------
@@ -390,83 +388,7 @@ def test_the_same_step_for_the_same_task_twice_in_a_row_is_dropped(w):
     assert [c["activity"].split(" ")[0] for c in chunks] == ["start", "work", "report"]
 
 
-# --- 6. one stand-up, for everyone, at a fixed time -----------------------------
-ADAM_INITIAL = [   # Adam's initial plan in run.log
-    "review and update the project board with any new backend tasks from 7:00 am to 8:00 am",
-    "collaborate with Eve Smith on frontend-backend integration from 8:00 am to 9:00 am",
-    "work on implementing the API endpoints for user authentication from 9:00 am to 11:00 am",
-    "attend a quick stand-up meeting with the team to sync on progress and blockers from 12:00 pm to 12:15 pm",
-    "work on setting up the database schema and models for the website from 12:15 pm to 2:15 pm",
-]
-
-
-def test_the_stand_up_is_cut_into_the_plan_at_its_real_time(w):
-    adam = w["agents"]["adam"]
-    p = Planner(adam)
-    chunks = p.apply_schedule(_plan(p, ADAM_INITIAL, adam, w), w, "7:00 am")
-    acts = [c["activity"] for c in chunks]
-    assert acts[1] == "attend the daily stand-up with the whole team from 8:00 am to 8:15 am"
-    assert chunks[1]["meeting"] and chunks[1]["pinned"] and chunks[1]["location"] == "conference_room"
-    assert acts[2] == "collaborate with Eve Smith on frontend-backend integration from 8:15 am to 9:00 am"
-    assert not any("12:00 pm" in a and "stand-up" in a for a in acts)   # his own one is gone
-
-
-def test_a_replan_after_the_stand_up_does_not_add_it_again(w):
-    adam = w["agents"]["adam"]
-    p = Planner(adam)
-    chunks = p.apply_schedule(_plan(p, ["work on the API from 9:10 am to 5:00 pm"], adam, w),
-                              w, "9:10 am")
-    assert not any(c.get("meeting") for c in chunks)
-
-
-def test_a_world_without_a_schedule_uses_the_default(w):
-    del w["schedule"]
-    adam = w["agents"]["adam"]
-    p = Planner(adam)
-    chunks = p.apply_schedule(_plan(p, ["work on the API from 7:00 am to 9:00 am"], adam, w),
-                              w, "7:00 am")
-    assert [c["activity"] for c in chunks if c.get("meeting")] == [
-        "attend the daily stand-up with the whole team from 8:00 am to 8:15 am"]
-
-
-def _meeting(start="8:00 am"):
-    return {"activity": f"attend the daily stand-up with the whole team from {start} to 8:15 am",
-            "location": "conference_room", "start_time": start, "duration": 15,
-            "target_agent": None, "board_work": False, "pinned": True, "meeting": True}
-
-
-def test_at_the_stand_up_teammates_talk_even_right_after_another_chat(
-        fake_llm, isolated_data, w, monkeypatch):
-    adam, eve = main.make_runtime("adam", w), main.make_runtime("eve", w)
-    for rt in (adam, eve):
-        rt.agent["current_location"] = "conference_room"
-    main.remember_conversation(adam, eve, "7:10 am", "T-1")      # 55 minutes earlier
-    monkeypatch.setattr(main, "get_chunk_lazy", lambda rt, t, world=None: _meeting())
-
-    main.decide_phase(adam, 14, "8:05 am", w)
-    assert adam.decision == "2"
-    assert adam.reaction.startswith("talk with Eve Smith at the daily stand-up with the whole team")
-
-    talked = []
-    monkeypatch.setattr(main, "run_conversation",
-                        lambda a, b, t, r, world=None: talked.append(r) or [])
-    eve.decision = "1"
-    main.resolve_conversations([adam, eve], 14, "8:05 am", w)
-    assert talked                                                # not skipped as "too soon"
-
-
-def test_no_second_talk_in_the_same_stand_up(fake_llm, isolated_data, w, monkeypatch):
-    adam, eve = main.make_runtime("adam", w), main.make_runtime("eve", w)
-    for rt in (adam, eve):
-        rt.agent["current_location"] = "conference_room"
-    main.remember_conversation(adam, eve, "8:05 am", "stand-up")
-    monkeypatch.setattr(main, "get_chunk_lazy", lambda rt, t, world=None: _meeting())
-    adam.last_react_step = 14
-    main.decide_phase(adam, 15, "8:10 am", w)
-    assert adam.decision == "1"
-
-
-# --- 7. one refusal per mistake --------------------------------------------------
+# --- 6. one refusal per mistake --------------------------------------------------
 def test_three_approvals_of_tasks_not_in_review_are_one_refusal(w):
     _run_log_board(w)
     done, refused = pb.apply_actions(w, w["agents"]["adam"], [
@@ -483,7 +405,7 @@ def test_different_mistakes_stay_separate(w):
                        "update_status: T-3 is waiting on T-1"]
 
 
-# --- 8. no LLM call to decide "stay in your office" ------------------------------
+# --- 7. no LLM call to decide "stay in your office" ------------------------------
 @pytest.mark.parametrize("activity,where,expected", [
     ("Outline database models", "office_1", "office_1"),           # solo work, own office
     ("Plan the API structure", "conference_room", "office_1"),      # solo work, go back
@@ -532,11 +454,9 @@ def test_reset_clears_board_notes_and_puts_everyone_back_at_reception(isolated_d
     data = world_module.load_world()
     data["agents"]["adam"]["current_location"] = "office_1"
     data["project"]["notes"] = [{"time": "9:10 am", "agent": "adam", "note": "T-1 is complete"}]
-    del data["schedule"]
     world_module.save_world(data)
 
     seed.clear_board()
     after = world_module.load_world()
     assert after["project"]["notes"] == [] and after["project"]["tasks"] == []
     assert {a["current_location"] for a in after["agents"].values()} == {"reception"}
-    assert after["schedule"][0]["time"] == "8:00 am"

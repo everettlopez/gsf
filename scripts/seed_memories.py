@@ -108,9 +108,6 @@ def clear_board():
     project = project_board.get_project(w)
     project["tasks"] = []
     project["notes"] = []
-    w.setdefault("schedule", [{"time": "8:00 am", "minutes": 15,
-                               "activity": "daily stand-up with the whole team",
-                               "location": "conference_room"}])
     for agent in w["agents"].values():
         agent.update(current_location="reception", current_action="idle",
                      interacting_with=None)

@@ -134,97 +134,6 @@ class Planner:
                 remaining.append(c)
         return done, remaining
 
-    # Used when a world file has no "schedule" (older copies of world.json).
-    DEFAULT_SCHEDULE = [{"time": "8:00 am", "minutes": 15,
-                         "activity": "daily stand-up with the whole team",
-                         "location": "conference_room"}]
-    _STANDUP = re.compile(r"\bstand[- ]?ups?\b|\bteam sync\b|\bsync meeting\b|\bdaily scrum\b",
-                          re.IGNORECASE)
-
-    def team_schedule(self, world):
-        """The team's fixed meetings as (start, end, event) with parsed times."""
-        if not world:
-            return []
-        out = []
-        for event in world.get("schedule", self.DEFAULT_SCHEDULE):
-            start = self._parse_time(event.get("time"))
-            if start is None or event.get("location") not in world["locations"]:
-                continue
-            out.append((start, start + timedelta(minutes=event.get("minutes") or 15), event))
-        return out
-
-    def schedule_line(self, world):
-        events = self.team_schedule(world)
-        if not events:
-            return ""
-        items = "; ".join(f"{e['activity']} from {self._fmt(s)} to {self._fmt(t)} in the "
-                          f"{e['location'].replace('_', ' ')}" for s, t, e in events)
-        return (f"\n        The team's fixed meetings every day: {items}. Keep them at "
-                f"exactly those times and don't plan other team meetings.\n")
-
-    def apply_schedule(self, chunks, world, plan_start):
-        """Put the team's fixed meetings into a plan at their real times.
-
-        Each agent used to invent its own stand-up (Adam at 12:00, Eve at 8:00)
-        and replans moved or dropped it, so they never met. Now the meeting is
-        cut into the plan wherever it overlaps, the model's own stand-ups at
-        other times are dropped (the gap filler covers the hole), and the
-        meeting chunk is pinned to its room and marked so the teammates who
-        show up talk to each other."""
-        start_bound = self._parse_time(plan_start)
-        scheduled = self.team_schedule(world)
-        if not scheduled:
-            return chunks
-        # Meetings still ahead get added; the model's own stand-ups are dropped
-        # either way (a replan at 8:05 kept "attend the daily stand-up 8:10-8:15").
-        events = [(s, e, ev) for s, e, ev in scheduled
-                  if start_bound is None or s >= start_bound]
-
-        def span(c):
-            s = self._parse_time(c.get("start_time"))
-            return (s, s + timedelta(minutes=c.get("duration") or 0)) if s else (None, None)
-
-        out = []
-        for c in chunks:
-            cs, ce = span(c)
-            if cs is None:
-                out.append(c)
-                continue
-            if self._STANDUP.search(c["activity"]) and not c.get("meeting"):
-                continue                     # the real one is added below
-            pieces = [(cs, ce)]
-            for es, ee, _ in events:
-                cut = []
-                for ps, pe in pieces:
-                    if pe <= es or ps >= ee:
-                        cut.append((ps, pe))
-                        continue
-                    if ps < es:
-                        cut.append((ps, es))
-                    if pe > ee:
-                        cut.append((ee, pe))
-                pieces = cut
-            for ps, pe in pieces:
-                minutes = int((pe - ps).total_seconds() // 60)
-                if minutes > 0:
-                    out.append(c if (ps, pe) == (cs, ce) else self._retimed(c, ps, minutes))
-        for es, ee, ev in events:
-            what = ev["activity"]
-            if not re.match(r"(?i)\s*(?:attend|join|go to|hold|run)\b", what):
-                what = f"attend the {what}"           # a verb, for "attending the daily stand-up"
-            out.append({
-                "activity": f"{what} from {self._fmt(es)} to {self._fmt(ee)}",
-                "location": ev["location"],
-                "start_time": self._fmt(es),
-                "duration": int((ee - es).total_seconds() // 60),
-                "target_agent": None,
-                "board_work": False,
-                "pinned": True,
-                "meeting": True,
-            })
-        out.sort(key=lambda c: self._parse_time(c.get("start_time")) or datetime.min)
-        return out
-
     @staticmethod
     def teammates_line(agent, world):
         """Who actually works here. Plans used to include "collaborate with a
@@ -249,7 +158,7 @@ class Planner:
         name = agent["name"]
         prompt = f"""
         {AGENT_PROFILES[agent["id"]]}
-{self.recent_project_context(agent)}{self.teammates_line(agent, world)}{self.schedule_line(world)}
+{self.recent_project_context(agent)}{self.teammates_line(agent, world)}
         Today is Thursday.
 
         Here is {name}'s plan today in broad strokes:
@@ -314,7 +223,7 @@ class Planner:
         {old_text}
 
         What just happened: {reaction}
-        {guidance}{self.teammates_line(agent, world)}{self.schedule_line(world)}
+        {guidance}{self.teammates_line(agent, world)}
         Revise {name}'s plan from {current_time} until {end_of_day}.
         Return a numbered list of broad-strokes blocks, each written as
         "<activity> from H:MM am to H:MM pm". The first block must start at {current_time},
@@ -475,7 +384,7 @@ class Planner:
             return frozenset(i.upper() for i in self._TASK_ID.findall(c["activity"]))
 
         def plain(c):
-            return (c.get("board_work") and not c.get("meeting") and not ids(c)
+            return (c.get("board_work") and not ids(c)
                     and not self._PURPOSEFUL.search(c["activity"]))
 
         def kind(c):
@@ -507,7 +416,7 @@ class Planner:
     def _absorb(self, out, dropped, start):
         """Give a dropped block's minutes to the work block right before it."""
         prev = out[-1] if out else None
-        if prev is None or prev.get("board_work") or prev.get("meeting") or prev.get("pinned") \
+        if prev is None or prev.get("board_work") or prev.get("pinned") \
                 or self._BREAK.search(prev["activity"]):
             return
         ps = self._parse_time(prev.get("start_time"))
@@ -556,7 +465,7 @@ class Planner:
         out = []
         for c in chunks:
             start = self._parse_time(c.get("start_time"))
-            if (c.get("board_work") and not c.get("meeting") and start is not None
+            if (c.get("board_work") and start is not None
                     and (c.get("duration") or 0) > self.BOARD_BLOCK_MAX_MINUTES):
                 c = self._retimed(c, start, self.BOARD_BLOCK_MAX_MINUTES)
             out.append(c)

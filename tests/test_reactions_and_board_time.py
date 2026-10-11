@@ -11,7 +11,7 @@ Fixes for what the second debug run.log (17:06, 30 steps) showed:
 4. Adam followed Eve: "work on T-1 in the office with Eve Smith" for 3.5 hours,
    and "the discussion" counted as collaborating.
 5. A board reply ran out of tokens in its reason and the whole visit was lost.
-6. A task titled "T-1: Set up the API ..." and a leftover stand-up at 8:10.
+6. A task titled "T-1: Set up the API ...".
 And, closer to the paper: a reaction now regenerates the rest of the day.
 """
 
@@ -297,18 +297,7 @@ def test_a_reply_cut_off_in_its_reason_still_applies_its_actions(fake_llm, isola
                     "to the project board and took it on."]
 
 
-# --- 6. titles and leftovers --------------------------------------------------------
+# --- 6. titles --------------------------------------------------------
 def test_task_titles_lose_a_copied_task_id(w):
     t = pb.create_task(w, "adam", "T-1: Set up the API endpoints for user authentication")
     assert t["title"] == "Set up the API endpoints for user authentication"
-
-
-def test_a_replan_during_the_stand_up_drops_the_models_own_stand_up(w):
-    eve = w["agents"]["eve"]
-    p = Planner(eve)
-    chunks = p.apply_schedule(_plan(p, [
-        "visit the project board to update tasks from 8:05 am to 8:10 am",
-        "attend the daily stand-up with the whole team from 8:10 am to 8:15 am",
-        "work on T-2 'Homepage' from 8:15 am to 9:00 am",
-    ], eve, w), w, "8:05 am")
-    assert not any("stand-up" in c["activity"] for c in chunks)

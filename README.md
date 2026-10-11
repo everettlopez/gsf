@@ -230,12 +230,7 @@ pattern for objects:
     day starts with a 5-minute clock-in instead of an hour of filler. Task
     titles lose a copied "T-1:" prefix, and a board reply that runs out of
     tokens in its reason still keeps its actions.
-14. **Team schedule.** `world.json` has the team's fixed meetings (`schedule`,
-    by default a daily stand-up at 8:00 am in the conference room). Every plan
-    and replan gets them at their real times, an agent's own stand-ups at other
-    times are dropped, and the teammates who show up talk to each other, even
-    if they talked shortly before.
-15. **Reactions (paper 4.3.1).** When an agent reacts, it carries out the
+14. **Reactions (paper 4.3.1).** When an agent reacts, it carries out the
     reaction as a short block and then regenerates the rest of its day from
     when that block ends (`REACT_REPLANS`; False brings back the old 10-minute
     detour). `REACT_COOLDOWN_STEPS` is 2, the reaction's own 10 minutes.
@@ -243,7 +238,7 @@ pattern for objects:
     starting the cooldown: the reaction the agent is already carrying out, and
     going to update the board while at it or within
     `BOARD_REACTION_GAP_MINUTES` of using it.
-16. **Reflection and conversation.** Board memories feed reflection, reactions and
+15. **Reflection and conversation.** Board memories feed reflection, reactions and
    conversations like any other memory. Changes on the board (a task moving to
    review, a new note) are new observations for whoever walks up next, so they can
    start a conversation there.

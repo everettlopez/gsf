@@ -221,8 +221,8 @@ def expand_hours(rt, broad):
     p = rt.planner
     bkey = (broad["start_time"], broad["activity"])
 
-    if bkey not in rt.hour_cache and (broad.get("board_work") or broad.get("meeting")):
-        # One board visit (or meeting) is one step: broken into 5-minute pieces,
+    if bkey not in rt.hour_cache and broad.get("board_work"):
+        # One board visit is one step: broken into 5-minute pieces,
         # every piece was its own board LLM call (20 calls, 8 changes, in the run).
         rt.hour_cache[bkey] = [broad]
 
@@ -243,7 +243,7 @@ def expand_minutes(rt, hour):
     hkey = (hour["start_time"], hour["activity"])
 
     if hkey not in rt.minute_cache and ((hour.get("duration") or 60) <= SHORT_CHUNK_MINUTES
-                                        or hour.get("board_work") or hour.get("meeting")):
+                                        or hour.get("board_work")):
         rt.minute_cache[hkey] = [hour]          # already short, or one board visit: keep whole
 
     if hkey not in rt.minute_cache:
@@ -271,7 +271,7 @@ def initial_planning(rt, world):
 
     p = rt.planner
     rt.broad_chunks = p.thin_board_visits(p.cap_board_blocks(
-        p.apply_schedule(p.create_chunks(daily_plan, rt.agent, world), world, START_TIME)))
+        p.create_chunks(daily_plan, rt.agent, world)))
     rt.hour_cache, rt.minute_cache = {}, {}
 
     if not rt.broad_chunks:
@@ -485,10 +485,6 @@ def decide_phase(rt, step, current_time, world):
         rt.decision = "2"
         if rt.chunk.get("is_reaction"):                              # already "greet Eve ..."
             rt.reaction = activity
-        elif rt.chunk.get("meeting"):
-            activity = re.sub(r"(?i)^(?:attend|join)\s+(?:the\s+)?", "", activity)
-            rt.reaction = (f"talk with {partner['name']} at the {activity}: what each is "
-                           f"working on, what is next, and anything blocking them")
         else:
             rt.reaction = f"talk with {partner['name']} about: {activity}"
         reason = f"planned to work with {partner['name']}, who is here (LLM skipped)"
@@ -582,8 +578,6 @@ def planned_partner(rt, world, current_time):
     used to arrive and then say nothing. The conversation cooldown keeps it from
     repeating, including right after a talk (the settle chunk targets the partner)."""
     chunk = rt.chunk
-    if chunk and chunk.get("meeting"):
-        return meeting_partner(rt, world, current_time)
     if not chunk or not chunk.get("target_agent"):
         return None
     other = world["agents"].get(chunk["target_agent"])
@@ -593,22 +587,6 @@ def planned_partner(rt, world, current_time):
     if _talked_recently_ids(rt.agent["id"], other["id"], rt.planner._parse_time(current_time)):
         return None
     return other
-
-
-def meeting_partner(rt, world, current_time):
-    """At a team meeting, the teammate here to talk with: anyone in the room who
-    hasn't already talked with this agent since the meeting started. The usual
-    conversation cooldown doesn't apply (a chat at 7:05 shouldn't cancel the
-    8:00 stand-up)."""
-    p = rt.planner
-    started = p._parse_time(rt.chunk.get("start_time"))
-    for other in world["agents"].values():
-        if other["id"] == rt.agent["id"] or other["current_location"] != rt.agent["current_location"]:
-            continue
-        last = _last_talk.get(frozenset((rt.agent["id"], other["id"])))
-        if last is None or started is None or last < started:
-            return other
-    return None
 
 
 _SAME_WORK = re.compile(r"\b(?:continu\w*|keep\w*|resum\w*|carry on|as planned|get back to|finish\w*)\b",
@@ -693,9 +671,7 @@ def resolve_conversations(runtimes, step, current_time, world):
                 or other.agent["current_location"] != rt.agent["current_location"]):
             continue                      # not a conversation; normal react() runs
 
-        at_meeting = bool((rt.chunk or {}).get("meeting"))
-        if (talked_recently(rt, other, current_time) and not at_meeting
-                and not TASK_ID.search(rt.reaction)):
+        if talked_recently(rt, other, current_time) and not TASK_ID.search(rt.reaction):
             # They just talked; nothing specific is new. Keep working instead.
             log.debug(f"{rt.tag} skips talking to {other.tag} again so soon: {rt.reaction}")
             rt.decision, rt.reaction = "1", ""
@@ -797,7 +773,7 @@ def replan_rest_of_day(rt, start, reason, world, label, extra_guidance=""):
         log.warn(f"{rt.tag}: replan unusable, keeping old plan")
         return False
 
-    new_chunks = rt.planner.cap_board_blocks(rt.planner.apply_schedule(new_chunks, world, start))
+    new_chunks = rt.planner.cap_board_blocks(new_chunks)
     new_chunks = rt.planner.add_task_checkpoints(
         new_chunks, rt.agent, project_board.open_tasks_for(world, rt.agent["id"])
     )
