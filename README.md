@@ -140,7 +140,8 @@ pattern for objects:
    The LLM never edits the board JSON directly.
 4. **Review.** The assignee moves their task `todo → in_progress → review`. A
    teammate then approves it at the board, and only after that can the assignee
-   move it to `done`. Moving it back out of review clears the approvals. Agents
+   move it to `done`. Moving it back out of review clears the approvals. Only a
+   task that was started (in progress or blocked) can go to review. Agents
    at the board can't ask for review within `MIN_MINUTES_BEFORE_REVIEW` of
    starting (review is for finished work), and once a task is in review the
    assignee leaves it there until a teammate approves it or asks for changes in
@@ -153,7 +154,9 @@ pattern for objects:
    board", "update task statuses", "assign T-4 to Adam") is routed to the board
    without an LLM call, and other work in the conference room can't touch the
    board. A promise about the board made in conversation is kept for the agent's
-   next board visit and shown first in that prompt. If they made it while
+   next board visit and shown first in that prompt; when it names one of their
+   tasks, the prompt says to start that task (and how to set aside the one in
+   progress). If they made it while
    standing at the board, they go straight back to it after the conversation.
    Refused actions ("T-1 needs a teammate to approve it first") are remembered,
    and an agent who is assigned a task is notified and replans around it.
@@ -172,7 +175,8 @@ pattern for objects:
    review all require a note (what it needs, what blocks it, what to check). The
    handoff note goes with the assignment notice.
 9. **One task at a time.** An agent can have one task in progress; to start
-   another they move the current one to review or blocked. Re-sending a status
+   another they move the current one to review or blocked. One visit starts at
+   most one task, so a WIP refusal is reported once. Re-sending a status
    a task already has is skipped quietly (not refused, not remembered). Tasks
    are things to build or ship: titles that describe a meeting or a review are
    refused. Notes can go on a task or on the board itself.

@@ -418,6 +418,11 @@ def update_status(world, agent_id, task_id, status, note=""):
         if not task["assignee"]:
             task["assignee"] = agent_id              # starting work claims it
             mark_workload_changed(agent_id)
+    if status == "review" and task["status"] not in ("in_progress", "blocked"):
+        # Review is for work that was actually done. Without this, a todo task
+        # went straight to review while another task sat "in progress" unworked.
+        raise BoardError(f"{task['id']} hasn't been started; move it to in progress "
+                         f"before asking for review")
     if status == "done":
         if task["status"] != "review":
             raise BoardError(f"{task['id']} has to go to review before it is done")
@@ -829,15 +834,26 @@ def apply_actions(world, agent, actions, limit=MAX_ACTIONS_PER_VISIT):
     """Apply what the LLM proposed. Bad actions are skipped, not fatal.
     Returns (memory lines for what happened, refusals)."""
     done, refused = [], []
+    start_settled = False          # one attempt to start work per visit
     for action in (actions or [])[:limit]:
         if not isinstance(action, dict):
             continue
+        starting = (action.get("action") == "update_status"
+                    and action.get("status") == "in_progress")
+        if starting and start_settled:
+            # Already started a task (or hit the WIP limit) this visit: further
+            # starts can only be refused the same way, three times over.
+            log.debug(f"{agent['name']}: skipped starting {action.get('task_id')} "
+                      f"(one start per visit)")
+            continue
         try:
             done.append(apply_action(world, agent, action))
+            start_settled = start_settled or starting
         except NoChange as e:
             log.debug(f"{agent['name']}: {action.get('action')} skipped ({e})")
         except BoardError as e:
             refused.append(f"{action.get('action')}: {e}")
+            start_settled = start_settled or (starting and "already working on" in str(e))
         except (TypeError, AttributeError, ValueError) as e:
             # Malformed fields from the model (a number where a string belongs, ...)
             refused.append(f"{action.get('action')}: malformed action ({e})")
@@ -907,7 +923,7 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
 
     What {agent['name']} has been doing lately:
     {progress or '- (nothing recorded yet)'}
-{_commitments_block(agent, commitments)}
+{_commitments_block(agent, commitments, world)}
     What does {agent['name']} do at the board right now? Choose 0 to {MAX_ACTIONS_PER_VISIT} actions:
     - update_status: keep {agent['name']}'s own tasks current, based on what
       {agent['name']} has actually been doing: in_progress once work has started,
@@ -960,14 +976,54 @@ def _refusal_memory(name, refusal):
     return f"{name} tried to {what} on the project board but couldn't: {reason}."
 
 
-def _commitments_block(agent, commitments):
+_TASK_REF = re.compile(r"\bT-\d+\b", re.IGNORECASE)
+
+
+def promised_task_steps(world, agent, commitments):
+    """What a promise means for the board, when it names one of the agent's own
+    tasks. "I'll check the accessibility for T-5" never says "start T-5", so the
+    model used to start the first task on the list (T-2) instead, and then work
+    on T-5 all morning while the board said T-2."""
+    if world is None:
+        return []
+    name, aid = agent["name"], agent["id"]
+    tasks = {t["id"]: t for t in get_project(world)["tasks"]}
+    busy = [t["id"] for t in tasks.values()
+            if t["assignee"] == aid and t["status"] == "in_progress"]
+    steps, seen = [], set()
+    for text in commitments:
+        for ref in _TASK_REF.findall(text):
+            task = tasks.get(ref.upper())
+            if task is None or task["id"] in seen or task["assignee"] not in (None, aid):
+                continue
+            seen.add(task["id"])
+            tid = task["id"]
+            if task["status"] != "todo":
+                continue                      # already started: nothing to switch
+            others = [b for b in busy if b != tid]
+            if others:
+                cur = others[0]
+                steps.append(
+                    f"The promise is about {tid}, so {tid} is the task to work on. "
+                    f"{cur} is in progress: move {cur} to review if it is finished, "
+                    f"or back to todo if {name} hasn't really worked on it yet, "
+                    f"then move {tid} to in progress.")
+            else:
+                steps.append(f"The promise is about {tid}: move {tid} to in progress "
+                             f"(not another task).")
+    return steps
+
+
+def _commitments_block(agent, commitments, world=None):
     if not commitments:
         return ""
     lines = "\n".join(f"    - {c}" for c in commitments)
+    steps = "\n".join(f"    - {s}" for s in promised_task_steps(world, agent, commitments))
+    steps = f"\n    What that means on the board:\n{steps}\n" if steps else ""
     return f"""
     {agent['name']} promised teammates to do this on the board:
 {lines}
-"""
+{steps}"""
 
 
 _START_STEP = re.compile(r"\bstart (T-\d+)(?: \(move it to in progress\))?", re.IGNORECASE)

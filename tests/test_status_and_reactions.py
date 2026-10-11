@@ -293,3 +293,98 @@ def test_a_conversation_replan_absorbs_the_pending_board_replan(
 ])
 def test_action_to_present(action, expected):
     assert action_to_present(action) == expected
+
+
+# --- testSim_Plan6 -------------------------------------------------------------
+# 8. T-5 went from todo straight to review at 9:20 while T-2 sat "in progress".
+def _eve_with_frontend_tasks(w):
+    for title in ("Homepage UI", "About page UI", "Contact form UI", "Accessibility pass"):
+        pb.create_task(w, "eve", title, area="frontend", assign_to_self=True)
+
+
+def test_a_task_that_was_never_started_cannot_go_to_review(w):
+    clock.set_time("7:10 am")
+    _eve_with_frontend_tasks(w)
+    pb.update_status(w, "eve", "T-1", "in_progress")
+    clock.set_time("9:20 am")
+    with pytest.raises(pb.BoardError, match="T-4 hasn't been started; move it to in progress"):
+        pb.update_status(w, "eve", "T-4", "review", note="check contrast")
+    assert pb.get_task(w, "T-4")["status"] == "todo"
+
+
+def test_a_blocked_task_can_still_go_to_review(w):
+    _eve_with_frontend_tasks(w)
+    pb.update_status(w, "eve", "T-1", "in_progress")
+    pb.update_status(w, "eve", "T-1", "blocked", note="waiting on the API")
+    pb.update_status(w, "eve", "T-1", "review", note="unblocked and finished")
+    assert pb.get_task(w, "T-1")["status"] == "review"
+
+
+# 9. Eve promised T-5 (here T-4) but started the first task on the list, then
+#    hit the WIP limit three times trying to start the rest.
+def test_a_promise_about_a_task_says_to_start_that_task(w):
+    _eve_with_frontend_tasks(w)
+    eve = w["agents"]["eve"]
+    promise = ["I'll check the accessibility for T-4 and make sure the UI components are aligned"]
+    assert pb.promised_task_steps(w, eve, promise) == [
+        "The promise is about T-4: move T-4 to in progress (not another task)."]
+
+    prompt = " ".join(pb.build_prompt(eve, w, "update the project board", "summary", "",
+                                      commitments=promise).split())
+    assert "What that means on the board: - The promise is about T-4" in prompt
+
+
+def test_a_promise_about_a_task_while_another_is_in_progress_explains_the_switch(w):
+    _eve_with_frontend_tasks(w)
+    pb.update_status(w, "eve", "T-1", "in_progress")
+    steps = pb.promised_task_steps(w, w["agents"]["eve"], ["I'll do the accessibility pass, T-4"])
+    assert steps == [
+        "The promise is about T-4, so T-4 is the task to work on. T-1 is in progress: "
+        "move T-1 to review if it is finished, or back to todo if Eve Smith hasn't really "
+        "worked on it yet, then move T-4 to in progress."]
+    # ...and the switch it describes is allowed on the board.
+    done, refused = pb.apply_actions(w, w["agents"]["eve"], [
+        {"action": "update_status", "task_id": "T-1", "status": "todo"},
+        {"action": "update_status", "task_id": "T-4", "status": "in_progress"}])
+    assert refused == [] and len(done) == 2
+
+
+def test_promises_without_a_task_or_about_started_tasks_add_nothing(w):
+    _eve_with_frontend_tasks(w)
+    pb.update_status(w, "eve", "T-4", "in_progress")
+    eve = w["agents"]["eve"]
+    assert pb.promised_task_steps(w, eve, ["I'll review the designs with Adam"]) == []
+    assert pb.promised_task_steps(w, eve, ["I'll keep going on T-4"]) == []
+    assert pb.promised_task_steps(w, eve, ["I'll review Adam's T-9"]) == []   # no such task
+
+
+def test_only_one_start_per_visit(w):
+    _eve_with_frontend_tasks(w)
+    eve = w["agents"]["eve"]
+    done, refused = pb.apply_actions(w, eve, [
+        {"action": "update_status", "task_id": t, "status": "in_progress"}
+        for t in ("T-1", "T-2", "T-3", "T-4")])
+    assert len(done) == 1 and refused == []          # was: 1 done, 3 WIP refusals
+    assert [t["status"] for t in pb.get_project(w)["tasks"]] == [
+        "in_progress", "todo", "todo", "todo"]
+
+
+def test_a_wip_refusal_is_reported_once(w):
+    _eve_with_frontend_tasks(w)
+    pb.update_status(w, "eve", "T-1", "in_progress")
+    _, refused = pb.apply_actions(w, w["agents"]["eve"], [
+        {"action": "update_status", "task_id": t, "status": "in_progress"}
+        for t in ("T-2", "T-3", "T-4")])
+    assert refused == ["update_status: Eve Smith is already working on T-1; "
+                       "move it to review or blocked first"]
+
+
+def test_finishing_one_task_then_starting_the_next_still_works(w):
+    clock.set_time("7:00 am")
+    _eve_with_frontend_tasks(w)
+    pb.update_status(w, "eve", "T-1", "in_progress")
+    clock.set_time("10:00 am")
+    done, refused = pb.apply_actions(w, w["agents"]["eve"], [
+        {"action": "update_status", "task_id": "T-1", "status": "review", "note": "check nav"},
+        {"action": "update_status", "task_id": "T-2", "status": "in_progress"}])
+    assert refused == [] and len(done) == 2
