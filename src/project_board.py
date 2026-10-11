@@ -68,7 +68,10 @@ _BOARD = re.compile(
     r"\b(?:project board|task board|the board|board)\b"
     r"|\btasks? (?:status(?:es)?|assignments?)\b"            # "update task statuses"
     r"|\bupdat\w* (?:the )?(?:status of )?(?:tasks?\b|T-\d+)"  # "update T-1"
-    r"|\b(?:assign|claim|approv)\w*\b.*?\b(?:tasks?\b|T-\d+)",  # "assign T-4 to Adam"
+    r"|\b(?:assign|claim|approv)\w*\b.*?\b(?:tasks?\b|T-\d+)"   # "assign T-4 to Adam"
+    r"|\b(?:mark|move|set|flag)\w*\s+(?:task\s+)?T-\d+"     # "mark T-1 as completed"
+    r"|\b(?:done|review|in[- ]progress|todo|blocked)\s+column\b"  # "move it to the done column"
+    r"|\bstart\s+T-\d+\b",                                 # "start T-3" (a status change)
     re.IGNORECASE,
 )
 # A commitment that can only be kept at the board.
@@ -215,6 +218,11 @@ def _log_event(task, agent_id, event, note=None):
         entry["note"] = note
     task["history"].append(entry)
     task["updated_at"] = entry["time"]
+
+
+def task_waits(world, task):
+    """Is this task held up by dependencies that aren't done?"""
+    return bool(_unmet_dependencies(world, task))
 
 
 def _unmet_dependencies(world, task):
@@ -364,7 +372,8 @@ def create_task(world, agent_id, title, description="", area="general",
     area = area if area in AREAS else "general"
     priority = priority if priority in PRIORITIES else "medium"
     known = {t["id"] for t in project["tasks"]}
-    deps = [d.strip().upper() for d in depends_on or () if d and d.strip().upper() in known]
+    deps = list(dict.fromkeys(d.strip().upper() for d in depends_on or ()
+                              if d and d.strip().upper() in known))
 
     task = new_task(_next_id(project), agent_id, title, _clean(description, 300),
                     area, priority, deps, _clean(done_when, 200))
@@ -579,6 +588,62 @@ def describe_task(world, task):
     return line
 
 
+TASK_REF = re.compile(r"\bT-\d+\b", re.IGNORECASE)
+
+
+def task_ids_in(text):
+    """Task ids mentioned in a piece of text, in order, without repeats."""
+    return list(dict.fromkeys(m.upper() for m in TASK_REF.findall(text or "")))
+
+
+def task_fact(world, task):
+    """One plain sentence about where a task really stands, spelled out so a
+    model can't read "in progress" as "basically done". Used where agents talk
+    or write about tasks (conversations, notes, plans)."""
+    who = _agent_name(world, task["assignee"]) if task["assignee"] else "nobody"
+    status = task["status"]
+    if status == "todo":
+        state = "todo: not started"
+    elif status == "in_progress":
+        since = started_at(task)
+        state = (f"in progress{' since ' + since if since else ''}: "
+                 f"not in review, not approved, not done")
+    elif status == "review":
+        state = ("in review, approved by " + " and ".join(
+            _agent_name(world, a) for a in task["approved_by"])
+            + ": the assignee can now move it to done") if task["approved_by"] \
+            else "in review, not approved yet: waiting for a teammate to approve it"
+    elif status == "blocked":
+        state = "blocked"
+    else:
+        state = "done"
+    line = f"{task['id']} '{task['title']}' ({who}'s) is {state}."
+    blockers = _unmet_dependencies(world, task) if status != "done" else []
+    if blockers:
+        line += (f" It can't start until {', '.join(blockers)} "
+                 f"{'is' if len(blockers) == 1 else 'are'} done.")
+    return line
+
+
+def task_facts(world, task_ids):
+    """task_fact for each existing id, plus the tasks they wait on."""
+    tasks = {t["id"]: t for t in get_project(world)["tasks"]}
+    ordered = []
+    for tid in task_ids:
+        task = tasks.get(tid.upper())
+        if task is None:
+            continue
+        ordered.append(task["id"])
+        ordered.extend(d for d in task["depends_on"] if d in tasks)
+    return [task_fact(world, tasks[t]) for t in dict.fromkeys(ordered)]
+
+
+def unknown_task_ids(world, text):
+    """Ids mentioned in `text` that aren't on the board (e.g. a plan's 'T-5')."""
+    known = {t["id"] for t in get_project(world)["tasks"]}
+    return [t for t in task_ids_in(text) if t not in known]
+
+
 def board_observations(world):
     """What anyone standing at the board can read off it."""
     project = get_project(world)
@@ -663,6 +728,33 @@ def status_for_agent(world, agent_id):
             f"{t['id']} '{t['title']}' ({t['status'].replace('_', ' ')})" for t in mine) + ".")
     else:
         lines.append(f"{name} has no open tasks.")
+    lines.extend(waiting_lines(world, agent_id))
+    return lines
+
+
+def waiting_lines(world, agent_id):
+    """The agent's own todo tasks that can't start because they wait on
+    unfinished work. When that is all of them, say so plainly and point at the
+    way out: in the run behind this, every frontend task waited on Adam's whole
+    backend API, so Eve could not start anything all morning."""
+    name = _agent_name(world, agent_id)
+    mine = open_tasks_for(world, agent_id)
+    todo = [t for t in mine if t["status"] == "todo"]
+    waiting = [(t, _unmet_dependencies(world, t)) for t in todo]
+    waiting = [(t, deps) for t, deps in waiting if deps]
+    if not waiting:
+        return []
+    lines = [f"{name}'s {t['id']} waits on {', '.join(deps)}, which "
+             f"{'is' if len(deps) == 1 else 'are'} not done yet, so it can't start."
+             for t, deps in waiting]
+    active = [t for t in mine if t["status"] in ("in_progress", "review")]
+    if len(waiting) == len(todo) and not active:
+        blockers = sorted({d for _, deps in waiting for d in deps})
+        lines.append(
+            f"None of {name}'s tasks can start until {', '.join(blockers)} "
+            f"{'is' if len(blockers) == 1 else 'are'} done. If one of them doesn't really "
+            f"need {', '.join(blockers)} (a page can be built against mock data), {name} "
+            f"can drop that dependency with edit_task and start it.")
     return lines
 
 
@@ -728,6 +820,38 @@ def action_schema(world):
 
 NOTE_REQUIRED = {"blocked": "say what is blocking it",
                  "review": "say what the reviewer should check"}
+
+
+_CLAIM_WORDS = r"(complete|completed|done|finished|approved|merged|deployed|in review)"
+
+
+def check_note_claims(world, note):
+    """Refuse a note that says a task is done or approved when the board says
+    otherwise. Notes are what teammates read at the board, so a note saying
+    "T-2 can proceed since T-1 is complete" (while T-1 was in progress) spread
+    a false belief to everyone who walked up. Everything else in a note is
+    free text."""
+    tasks = {t["id"]: t for t in get_project(world)["tasks"]}
+    for tid in task_ids_in(note):
+        task = tasks.get(tid)
+        if task is None:
+            continue
+        claim = re.search(
+            rf"\b{tid}\b(?:\s*'[^']*')?\s*(?:is|has been|was|'s|got|being)?\s*"
+            rf"(?:now\s+|already\s+|fully\s+)?{_CLAIM_WORDS}\b", note, re.IGNORECASE)
+        if not claim:
+            continue
+        word = claim.group(1).lower()
+        status = task["status"]
+        if word == "approved":
+            wrong = not task["approved_by"] and status != "done"
+        elif word == "in review":
+            wrong = status not in ("review", "done")
+        else:
+            wrong = status != "done"
+        if wrong:
+            raise BoardError(f"the note says {tid} is {word}, but the board shows {tid} "
+                             f"is {status.replace('_', ' ')}; notes have to match the board")
 
 
 def _check_review_habits(world, agent_id, task_id, status):
@@ -800,6 +924,7 @@ def apply_action(world, agent, action):
         to_self = to in (aid, name.lower(), name.split()[0].lower())
         note = "" if to_self else _required_note(
             action, "tell the teammate what the task needs and why it is theirs")
+        check_note_claims(world, note)
         t = assign_task(world, aid, action.get("task_id"), action.get("assignee"), note)
         line = (f"{name} assigned task {t['id']} '{t['title']}' to "
                 f"{_agent_name(world, t['assignee'])} on the project board")
@@ -818,6 +943,9 @@ def apply_action(world, agent, action):
         t = approve_task(world, aid, action.get("task_id"), action.get("note", ""))
         return (f"{name} approved {_agent_name(world, t['assignee'])}'s task {t['id']} "
                 f"'{t['title']}' on the project board.")
+
+    if kind == "add_note":
+        check_note_claims(world, action.get("note") or "")
 
     if kind == "add_note" and not action.get("task_id"):
         n = add_board_note(world, aid, action.get("note"))
@@ -857,7 +985,29 @@ def apply_actions(world, agent, actions, limit=MAX_ACTIONS_PER_VISIT):
         except (TypeError, AttributeError, ValueError) as e:
             # Malformed fields from the model (a number where a string belongs, ...)
             refused.append(f"{action.get('action')}: malformed action ({e})")
-    return done, refused
+    return done, merge_refusals(refused)
+
+
+def merge_refusals(refused):
+    """One refusal per kind of mistake per visit. Adam tried to approve T-2,
+    T-3 and T-4 (none in review) and got three refusals and three memories of
+    the same lesson; now it is one: "approve_task: T-2 is not in review (same
+    for T-3, T-4)". Refusals that differ in more than the task id stay apart."""
+    merged, order = {}, []
+    for line in refused:
+        key = TASK_REF.sub("T-#", line)
+        if key not in merged:
+            merged[key] = (line, [])
+            order.append(key)
+            continue
+        first, more = merged[key]
+        ids = [i for i in task_ids_in(line) if i not in task_ids_in(first)]
+        more.extend(ids)
+    out = []
+    for key in order:
+        first, more = merged[key]
+        out.append(f"{first} (same for {', '.join(dict.fromkeys(more))})" if more else first)
+    return out
 
 
 def _role_context(agent, retriever, limit=6):
@@ -923,6 +1073,8 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
 
     What {agent['name']} has been doing lately:
     {progress or '- (nothing recorded yet)'}
+    (If a memory or a conversation says a task is approved, done or unblocked and
+    the board above says otherwise, the board is right.)
 {_commitments_block(agent, commitments, world)}
     What does {agent['name']} do at the board right now? Choose 0 to {MAX_ACTIONS_PER_VISIT} actions:
     - update_status: keep {agent['name']}'s own tasks current, based on what
@@ -931,15 +1083,17 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
       when the work is finished (note: what the reviewer should check), and done
       only after a teammate has approved it.
     - create_task: add work the goal needs that is not on the board yet. Give a short
-      title, a one-sentence description, an area, a priority, depends_on (ids of
-      tasks that must finish first), and done_when (how the team knows it is done).
-      Set assign_to_self to true only if it fits {agent['name']}'s role.
+      title, a one-sentence description, an area, a priority, depends_on, and
+      done_when (how the team knows it is done). depends_on lists only tasks whose
+      result this one truly can't start without; leave it empty when the work can
+      begin on its own (a page layout can be built against mock data before the
+      API exists). Set assign_to_self to true only if it fits {agent['name']}'s role.
     - claim_task: take an unassigned task that fits {agent['name']}'s role.
     - assign_task: give an unassigned task (or one of {agent['name']}'s own) to the
       teammate who should do it. Set task_id, assignee, and a note telling them
       what the task needs and why it is theirs.
     - edit_task: change an unassigned or own task's depends_on, priority,
-      description or done_when.
+      description or done_when (e.g. drop a dependency the task doesn't really need).
     - approve_task: sign off on a teammate's task that is in review, once
       {agent['name']} has looked it over or talked it through with them.
     - add_note: leave a note a teammate can act on: a question, a decision, a
@@ -976,30 +1130,43 @@ def _refusal_memory(name, refusal):
     return f"{name} tried to {what} on the project board but couldn't: {reason}."
 
 
-_TASK_REF = re.compile(r"\bT-\d+\b", re.IGNORECASE)
-
-
 def promised_task_steps(world, agent, commitments):
-    """What a promise means for the board, when it names one of the agent's own
-    tasks. "I'll check the accessibility for T-5" never says "start T-5", so the
-    model used to start the first task on the list (T-2) instead, and then work
-    on T-5 all morning while the board said T-2."""
+    """What a promise means for the board, when it names the agent's own tasks.
+
+    "I'll check the accessibility for T-5" never says "start T-5", so the model
+    used to start the first task on the list instead. Only one task can be in
+    progress, and a task that waits on unfinished work can't start at all, so:
+    the first task that can start gets "start it" (setting aside the one in
+    progress if needed), tasks that are waiting say so and how to unblock them,
+    and any other promised task waits its turn."""
     if world is None:
         return []
     name, aid = agent["name"], agent["id"]
     tasks = {t["id"]: t for t in get_project(world)["tasks"]}
     busy = [t["id"] for t in tasks.values()
             if t["assignee"] == aid and t["status"] == "in_progress"]
-    steps, seen = [], set()
+    steps, seen, start_given = [], set(), False
     for text in commitments:
-        for ref in _TASK_REF.findall(text):
-            task = tasks.get(ref.upper())
-            if task is None or task["id"] in seen or task["assignee"] not in (None, aid):
+        for tid in task_ids_in(text):
+            task = tasks.get(tid)
+            if task is None or tid in seen or task["assignee"] not in (None, aid):
                 continue
-            seen.add(task["id"])
-            tid = task["id"]
+            seen.add(tid)
             if task["status"] != "todo":
                 continue                      # already started: nothing to switch
+            blockers = _unmet_dependencies(world, task)
+            if blockers:
+                deps = ", ".join(blockers)
+                steps.append(
+                    f"{tid} waits on {deps}, which {'is' if len(blockers) == 1 else 'are'} "
+                    f"not done, so {tid} can't start yet. If {tid} doesn't really need "
+                    f"{deps}, drop that dependency with edit_task and then start {tid}; "
+                    f"otherwise leave {tid} in todo.")
+                continue
+            if start_given:
+                steps.append(f"{tid} comes after that: one task at a time, so leave it in todo for now.")
+                continue
+            start_given = True
             others = [b for b in busy if b != tid]
             if others:
                 cur = others[0]
@@ -1049,6 +1216,13 @@ def reconcile_activity(world, agent_id, activity):
         return activity
 
     tid = task["id"]
+    blockers = _unmet_dependencies(world, task) if task["status"] == "todo" else []
+    if blockers:
+        deps = ", ".join(blockers)
+        replacement = (f"check on {tid}: it waits on {deps}, which isn't done, so it can't "
+                       f"start yet (drop the dependency with edit_task only if {tid} "
+                       f"doesn't really need {deps})")
+        return activity[:match.start()] + replacement + activity[match.end():]
     if task["status"] == "in_progress":
         replacement = f"report progress on {tid} (already in progress)"
     elif task["status"] in ("review", "done"):

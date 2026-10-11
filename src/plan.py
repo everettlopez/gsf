@@ -25,7 +25,7 @@ AGENT_PROFILES = {
 
         The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Adam checks the project board at the start of each workday and adds any backend work the website still needs. When Adam starts, finishes, or gets stuck on a task, he walks to the project board to update it, and he updates his tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Adam looks it over with them and approves it at the board if it is ready. When Adam hands a task to a teammate, he leaves a note on it saying what it needs.
 
-        Adam Beck works closely with other engineers and enjoys collaborating on technical challenges.
+        Adam Beck works closely with Eve Smith and enjoys collaborating on technical challenges.
 
         Adam Beck hopes to become a software architect. He wants to build software that positively impacts many people.
 
@@ -49,7 +49,7 @@ AGENT_PROFILES = {
 
         The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Eve checks the project board at the start of each workday and adds any frontend work the website still needs. When Eve starts, finishes, or gets stuck on a task, she walks to the project board to update it, and she updates her tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Eve looks it over with them and approves it at the board if it is ready. When Eve hands a task to a teammate, she leaves a note on it saying what it needs.
 
-        Eve Smith works with designers and other engineers, and prefers collaborating one-on-one or in writing on technical challenges.
+        Eve Smith works closely with Adam Beck, and prefers collaborating one-on-one or in writing on technical challenges.
 
         Eve Smith hopes to become a lead frontend engineer. She wants to build software that feels simple and welcoming for many people to use.
 
@@ -80,6 +80,25 @@ PLAN_EXAMPLES = {
     "adam": "2. check the project board in the conference room from 8:00 am to 9:00 am",
     "eve": "2. check the project board in the conference room from 8:00 am to 9:00 am",
 }
+
+
+_PAST_CLAIM = re.compile(
+    r"^\s*(?:i'?ve|i have|i had|i already|already|i\s+(?:approved|marked|moved|finished|"
+    r"completed|reviewed|did|made|merged|deployed|started))\b", re.IGNORECASE)
+_THEN_WILL = re.compile(r"\b(?:and|so|then)\s+(?:i\s*)?(?:will|'ll)\s+(.+)$", re.IGNORECASE)
+
+
+def future_part(commitment):
+    """What a commitment says the person will do, without claims about what
+    they already did. "I've approved T-1 and will provide input as needed" ->
+    "I will provide input as needed"; "I've approved T-1" -> "" (not a
+    commitment). In the run behind this, a claimed approval that never happened
+    became a promise, a replan and a trip to the board to act on it."""
+    text = (commitment or "").strip()
+    if not _PAST_CLAIM.search(text):
+        return text
+    then = _THEN_WILL.search(text)
+    return f"I will {then.group(1).strip()}" if then else ""
 
 
 class Planner:
@@ -114,7 +133,110 @@ class Planner:
                 remaining.append(c)
         return done, remaining
 
-    def generate_initial_plan(self, agent):
+    # Used when a world file has no "schedule" (older copies of world.json).
+    DEFAULT_SCHEDULE = [{"time": "8:00 am", "minutes": 15,
+                         "activity": "daily stand-up with the whole team",
+                         "location": "conference_room"}]
+    _STANDUP = re.compile(r"\bstand[- ]?ups?\b|\bteam sync\b|\bsync meeting\b|\bdaily scrum\b",
+                          re.IGNORECASE)
+
+    def team_schedule(self, world):
+        """The team's fixed meetings as (start, end, event) with parsed times."""
+        if not world:
+            return []
+        out = []
+        for event in world.get("schedule", self.DEFAULT_SCHEDULE):
+            start = self._parse_time(event.get("time"))
+            if start is None or event.get("location") not in world["locations"]:
+                continue
+            out.append((start, start + timedelta(minutes=event.get("minutes") or 15), event))
+        return out
+
+    def schedule_line(self, world):
+        events = self.team_schedule(world)
+        if not events:
+            return ""
+        items = "; ".join(f"{e['activity']} from {self._fmt(s)} to {self._fmt(t)} in the "
+                          f"{e['location'].replace('_', ' ')}" for s, t, e in events)
+        return (f"\n        The team's fixed meetings every day: {items}. Keep them at "
+                f"exactly those times and don't plan other team meetings.\n")
+
+    def apply_schedule(self, chunks, world, plan_start):
+        """Put the team's fixed meetings into a plan at their real times.
+
+        Each agent used to invent its own stand-up (Adam at 12:00, Eve at 8:00)
+        and replans moved or dropped it, so they never met. Now the meeting is
+        cut into the plan wherever it overlaps, the model's own stand-ups at
+        other times are dropped (the gap filler covers the hole), and the
+        meeting chunk is pinned to its room and marked so the teammates who
+        show up talk to each other."""
+        start_bound = self._parse_time(plan_start)
+        events = [(s, e, ev) for s, e, ev in self.team_schedule(world)
+                  if start_bound is None or s >= start_bound]
+        if not events:
+            return chunks
+
+        def span(c):
+            s = self._parse_time(c.get("start_time"))
+            return (s, s + timedelta(minutes=c.get("duration") or 0)) if s else (None, None)
+
+        out = []
+        for c in chunks:
+            cs, ce = span(c)
+            if cs is None:
+                out.append(c)
+                continue
+            if self._STANDUP.search(c["activity"]) and not c.get("meeting"):
+                continue                     # the real one is added below
+            pieces = [(cs, ce)]
+            for es, ee, _ in events:
+                cut = []
+                for ps, pe in pieces:
+                    if pe <= es or ps >= ee:
+                        cut.append((ps, pe))
+                        continue
+                    if ps < es:
+                        cut.append((ps, es))
+                    if pe > ee:
+                        cut.append((ee, pe))
+                pieces = cut
+            for ps, pe in pieces:
+                minutes = int((pe - ps).total_seconds() // 60)
+                if minutes > 0:
+                    out.append(c if (ps, pe) == (cs, ce) else self._retimed(c, ps, minutes))
+        for es, ee, ev in events:
+            what = ev["activity"]
+            if not re.match(r"(?i)\s*(?:attend|join|go to|hold|run)\b", what):
+                what = f"attend the {what}"           # a verb, for "attending the daily stand-up"
+            out.append({
+                "activity": f"{what} from {self._fmt(es)} to {self._fmt(ee)}",
+                "location": ev["location"],
+                "start_time": self._fmt(es),
+                "duration": int((ee - es).total_seconds() // 60),
+                "target_agent": None,
+                "board_work": False,
+                "pinned": True,
+                "meeting": True,
+            })
+        out.sort(key=lambda c: self._parse_time(c.get("start_time")) or datetime.min)
+        return out
+
+    @staticmethod
+    def teammates_line(agent, world):
+        """Who actually works here. Plans used to include "collaborate with a
+        designer" or "a backend engineer": people who don't exist, so the
+        block could never become a visit or a conversation."""
+        if not world:
+            return ""
+        others = [a for a in world["agents"].values() if a["id"] != agent["id"]]
+        if not others:
+            return ""
+        team = ", ".join(f"{a['name']} ({a.get('area') or 'teammate'})" for a in others)
+        return (f"\n        {agent['name']}'s only teammates are {team}; there is no one "
+                f"else at the company, so name them in any block that involves "
+                f"working with someone.\n")
+
+    def generate_initial_plan(self, agent, world=None):
         """Day plan in broad strokes, continuing the agent's profile (paper 4.3).
 
         Like the paper's prompt, the first item of the day is written in for the
@@ -123,7 +245,7 @@ class Planner:
         name = agent["name"]
         prompt = f"""
         {AGENT_PROFILES[agent["id"]]}
-{self.recent_project_context(agent)}
+{self.recent_project_context(agent)}{self.teammates_line(agent, world)}{self.schedule_line(world)}
         Today is Thursday.
 
         Here is {name}'s plan today in broad strokes:
@@ -171,7 +293,7 @@ class Planner:
         return [FIRST_PLAN_ITEM] + items
 
     def regenerate_plan(self, agent, current_time, reaction, done_chunks, old_remaining,
-                        end_of_day="5:00 pm", guidance=""):
+                        end_of_day="5:00 pm", guidance="", world=None):
         name = agent["name"]
         done_text = "\n".join(f"- {c['activity']}" for c in done_chunks) or "- (nothing yet)"
         old_text = "\n".join(f"- {c['activity']}" for c in old_remaining) or "- (nothing left)"
@@ -188,7 +310,7 @@ class Planner:
         {old_text}
 
         What just happened: {reaction}
-        {guidance}
+        {guidance}{self.teammates_line(agent, world)}{self.schedule_line(world)}
         Revise {name}'s plan from {current_time} until {end_of_day}.
         Return a numbered list of broad-strokes blocks, each written as
         "<activity> from H:MM am to H:MM pm". The first block must start at {current_time},
@@ -211,25 +333,33 @@ class Planner:
         open_tasks = project_board.open_tasks_for(world, agent["id"])
         status = "\n".join(f"        - {line}"
                             for line in project_board.status_for_agent(world, agent["id"]))
-        example = (f"work on {open_tasks[0]['id']} '{open_tasks[0]['title']}' in the office from ..."
-                   if open_tasks else "work on T-3 'Set up the API' in the office from ...")
+        startable = [t for t in open_tasks
+                     if t["status"] != "todo" or not project_board.task_waits(world, t)]
+        pick = startable[0] if startable else None
+        example = (f"work on {pick['id']} '{pick['title']}' in the office from ..." if pick
+                   else "work on the website's navigation bar in the office from ...")
+        known = [t["id"] for t in project_board.get_project(world)["tasks"]]
+        ids = (f"The only tasks on the board are {', '.join(known)}; never name any other "
+               f"task id (new work has to be added at the board first)."
+               if known else "There are no tasks on the board yet, so don't name any task ids.")
         return f"""
         The project board, as {name} last saw it:
 {status}
 
         Plan the rest of the day around the project:
-        - Name the task in each work block, e.g. "{example}".
+        - Name the task in each work block, e.g. "{example}". {ids}
+        - Don't plan work on a task that can't start yet because it waits on
+          another; plan other work instead.
         - If {name}'s area has no tasks, or nothing is waiting for {name}, add a
           block to add or take on tasks at the project board.
-        - When {name} starts, finishes, or gets stuck on a task, add a short block
-          to update it on the project board in the conference room.
         - If a teammate's task is waiting for review, add a block to review it
           with them and approve it at the project board.
-        - Add a short block to update the project board before lunch and before
-          clocking out.
+        - Starting and finishing tasks at the board is scheduled automatically, so
+          the only other board visit to add is one short one before clocking out.
         """
 
     _TASK_ID = re.compile(r"\bT-\d+\b", re.IGNORECASE)
+    _TIME_PREFIX = re.compile(r"^\d{1,2}:\d{2}\s*[ap]m:\s*", re.IGNORECASE)
     _SPAN = re.compile(r"from\s*\d{1,2}:\d{2}\s*[ap]m\s*to\s*\d{1,2}:\d{2}\s*[ap]m",
                        re.IGNORECASE)
 
@@ -313,10 +443,76 @@ class Planner:
                     f"report progress on {', '.join(to_wrap)}"))
         return out
 
+    BOARD_VISIT_GAP_MINUTES = 90   # a plain "update the board" visit this soon after another is dropped
+
+    _PURPOSEFUL = re.compile(r"approv|review|assign|claim|hand\w* (?:off|over)|add\w* (?:new |any )?tasks?",
+                             re.IGNORECASE)
+    _BREAK = re.compile(r"\b(?:break|lunch|coffee|snack|rest)\b", re.IGNORECASE)
+
+    def thin_board_visits(self, chunks):
+        """Fewer, more useful trips to the board.
+
+        A replan in the run behind this had nine "update the project board"
+        visits on top of the automatic start/progress steps, cutting work on a
+        task into 10-minute pieces (each visit is also an LLM call). So:
+        - a plain visit ("update the project board", no task and nothing to
+          approve, assign or add) is dropped when another board visit ended less
+          than BOARD_VISIT_GAP_MINUTES before it or the next block is board work,
+          unless it is the last board visit of the day (before clocking out);
+        - a visit for the same task(s) as the board visit just before it, within
+          that gap ("report progress on T-3" twice in a row), is dropped;
+        - zero-length blocks are dropped.
+        A dropped visit's time goes to the work block right before it (not to a
+        break); otherwise the gap filler covers it."""
+        timed = [c for c in chunks
+                 if self._parse_time(c.get("start_time")) is None or (c.get("duration") or 0) > 0]
+
+        def ids(c):
+            return frozenset(i.upper() for i in self._TASK_ID.findall(c["activity"]))
+
+        def plain(c):
+            return (c.get("board_work") and not c.get("meeting") and not ids(c)
+                    and not self._PURPOSEFUL.search(c["activity"]))
+
+        def kind(c):
+            """start / report / ... : a repeat is the same kind of step for the same task."""
+            text = self._TIME_PREFIX.sub("", c["activity"]).strip().lower()
+            return (text.split() or [""])[0]
+
+        last_board = max((i for i, c in enumerate(timed) if c.get("board_work")), default=None)
+        gap = timedelta(minutes=self.BOARD_VISIT_GAP_MINUTES)
+        out, prev_board = [], None          # (end, ids, kind) of the last kept board visit
+        for i, c in enumerate(timed):
+            s = self._parse_time(c.get("start_time"))
+            if c.get("board_work") and s is not None:
+                nxt = timed[i + 1] if i + 1 < len(timed) else None
+                recent = prev_board is not None and s - prev_board[0] < gap
+                drop = (plain(c) and i != last_board
+                        and (recent or (nxt is not None and nxt.get("board_work")))) \
+                    or (ids(c) and recent and ids(c) <= prev_board[1] and kind(c) == prev_board[2])
+                if drop:
+                    self._absorb(out, c, s)
+                    log.debug(f"dropped a board visit that repeats a recent one: {c['activity']}")
+                    continue
+                prev_board = (s + timedelta(minutes=c.get("duration") or 0), ids(c), kind(c))
+            out.append(c)
+        return out
+
+    def _absorb(self, out, dropped, start):
+        """Give a dropped block's minutes to the work block right before it."""
+        prev = out[-1] if out else None
+        if prev is None or prev.get("board_work") or prev.get("meeting") or prev.get("pinned") \
+                or self._BREAK.search(prev["activity"]):
+            return
+        ps = self._parse_time(prev.get("start_time"))
+        if ps is not None and ps + timedelta(minutes=prev.get("duration") or 0) == start:
+            out[-1] = self._retimed(prev, ps, (prev.get("duration") or 0)
+                                    + (dropped.get("duration") or 0))
+
     def create_chunks(self, daily_plan, agent, world=None):
         chunks = []
         for activity in daily_plan:
-            activity = activity.strip().rstrip(".")
+            activity = self.drop_unknown_task_ids(activity.strip().rstrip("."), world)
             chunks.append({
                 "activity": activity,
                 "location": self.resolve_location(activity, agent),
@@ -328,8 +524,46 @@ class Planner:
 
         return chunks
 
+    @staticmethod
+    def drop_unknown_task_ids(activity, world):
+        """Remove task ids that aren't on the board ("work on T-5 'Implement
+        auth'" -> "work on 'Implement auth'"). A replan in the run behind this
+        made up T-5, T-6 and T-7; an agent working on a task that doesn't exist
+        can never update it, and later prompts would treat it as real."""
+        if not world or "project" not in world:
+            return activity
+        unknown = project_board.unknown_task_ids(world, activity)
+        for tid in unknown:
+            t = re.escape(tid)
+            for pattern in (rf"(?:\s*,\s*|\s+and\s+){t}\b",     # "T-1, T-6" / "T-1 and T-6"
+                            rf"\b{t}(?:\s*,\s*|\s+and\s+)",     # "T-6, T-1" / "T-6 and T-1"
+                            rf"\b{t}\b\s*"):                      # "work on T-6 'X'"
+                activity = re.sub(pattern, "", activity, flags=re.IGNORECASE)
+        if unknown:
+            activity = re.sub(r"\s{2,}", " ", activity).strip()
+            log.debug(f"plan named tasks that aren't on the board ({', '.join(unknown)}): {activity}")
+        return activity
+
     def resolve_location(self, activity, agent, world=None, default=None):
         return self.resolve_location_keywords(activity, agent, default=default)
+
+    def obvious_location(self, activity, agent, world):
+        """The room for an activity when no judgment is needed, else None.
+
+        In the run behind this every choose_location call (about 14s each)
+        concluded "solo work, stay in your own office". So: if the activity
+        doesn't involve a teammate and the keyword map says it is solo work
+        (the agent's own office) or names the room the agent is already in,
+        that is the answer, without an LLM call."""
+        if self.extract_target_agent(activity, agent, world):
+            return None
+        valid = world["locations"]
+        suggested = self.resolve_location_keywords(activity, agent).lower().replace(" ", "_")
+        if suggested not in valid:
+            return None
+        if suggested == agent.get("office") or suggested == agent["current_location"]:
+            return suggested
+        return None
 
     def choose_location(self, activity, agent, world, observations=None, recent_dialogue=None):
         valid = list(world["locations"].keys())
@@ -369,7 +603,8 @@ class Planner:
           means leaving the current room.
         - Activities about meetings, group work, or collaborating belong in the
           conference room. Solo focused work belongs in {agent['name']}'s own office.
-        - Do not stay in the current room just because it is the current room.
+        - Leave the current room when the activity belongs somewhere else; staying
+          is right when the current room already fits the activity.
         - Follow the plan's suggestion unless the observations clearly show a reason not to.
         """
 
@@ -544,7 +779,7 @@ class Planner:
             "activity": activity,
             "location": self.resolve_location(activity, agent),
             "start_time": self.extract_start_time(activity),
-            "target_agent": parent.get("target_agent"),
+            "target_agent": self._inherited_target(activity, parent),
             # A board visit stays a board visit when it is broken down, even if
             # a step reads "check all frontend tasks for updates".
             "board_work": bool(parent.get("board_work"))
@@ -553,6 +788,23 @@ class Planner:
         if duration is not None:
             chunk["duration"] = duration
         return chunk
+
+    _TOGETHER = re.compile(
+        r"\b(?:discuss\w*|pair\w*|sync\w*|meet\w*|talk\w*|ask\w*|together|collaborat\w*|"
+        r"walk\w* through|go over|align\w*|review\w* (?:with|together))\b", re.IGNORECASE)
+
+    def _inherited_target(self, activity, parent):
+        """A finer step keeps its block's teammate only if it is still about
+        working with them. "Collaborate with Eve" broke down into steps like
+        "set up the development environment", and every one of them chased Eve
+        from room to room (Plan7: Adam followed her for an hour, unable to talk
+        because they just had)."""
+        target = parent.get("target_agent")
+        if not target:
+            return None
+        # Agent ids are first names ("eve"), as extract_target_agent assumes too.
+        named = re.search(rf"\b{re.escape(target)}\b", activity, re.IGNORECASE)
+        return target if named or self._TOGETHER.search(activity) else None
 
     def decompose_chunks(self, chunks, agent):
         """Broad blocks -> one chunk per hour (paper: hour-long chunks)."""
@@ -802,8 +1054,10 @@ class Planner:
 
         Summary of relevant context from {agent["name"]}'s memory:
         {context}
-
+{self._board_rules(agent, world, observations_text)}
         Should {agent["name"]} react to the observation, and if so, what would be an appropriate reaction?
+        A reaction is something {agent["name"]} does (go somewhere, talk to someone, work on
+        something), written as an action, not a line of dialogue.
 
         Answer in exactly this format:
         DECISION: 1 (continue the current plan) or 2 (react)
@@ -813,6 +1067,22 @@ class Planner:
         return llm.generate(
             prompt, options={**CTX, "num_predict": 80, "temperature": 0}
         )
+
+    def _board_rules(self, agent, world, mentioned=""):
+        """How the board works, and where the agent's own tasks really stand, so
+        a reaction can't be "approve my own T-1 to unblock Eve" (it was)."""
+        if not world or "project" not in world:
+            return ""
+        own = [t["id"] for t in project_board.open_tasks_for(world, agent["id"])]
+        facts = project_board.task_facts(world, project_board.task_ids_in(mentioned) + own)
+        facts = "".join(f"\n        - {f}" for f in facts)
+        return f"""
+        How the project board works: tasks only change at the board in the
+        conference room. The assignee moves their task todo -> in progress ->
+        review; a teammate (never the assignee) approves it while it is in
+        review; then the assignee moves it to done. A task that waits on another
+        can't start until that one is done.{facts}
+"""
 
     def invalidate_summary(self):
         """Forget cached agent summaries (call after reflection adds new insights)."""
@@ -919,8 +1189,9 @@ class Planner:
         If not, set meeting_agreed to false.
         2. For each person, what did they commit to doing (a task, preparation, or
         a meeting at a certain time)? Write one short sentence from their point
-        of view, including any time or place. Small talk is not a commitment.
-        Omit a person who committed to nothing.
+        of view, including any time or place. Small talk is not a commitment, and
+        neither is something they say they already did ("I've approved T-1"):
+        only what they will do next. Omit a person who committed to nothing.
         """
         schema = {
             "type": "object",
@@ -955,7 +1226,7 @@ class Planner:
                     "minutes": max(10, min(data["minutes"] or 30, 60)),
                 }
             for c in data["commitments"]:
-                text = c["commitment"].strip().rstrip(".")
+                text = future_part(c["commitment"].strip().rstrip("."))
                 if text:
                     out["commitments"][c["person"]] = text
         except Exception as e:

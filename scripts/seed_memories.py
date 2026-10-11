@@ -101,14 +101,23 @@ def seed(agent_id, memories, reset=False):
 
 
 def clear_board():
-    """Start the project over: no tasks on the board."""
+    """Start the project over: no tasks or notes on the board, and everyone back
+    at reception at the start of the day. (Board-level notes and agent positions
+    used to survive a reset, so a run could start with the last run's notes.)"""
     w = world.load_world()
     project = project_board.get_project(w)
     project["tasks"] = []
+    project["notes"] = []
+    w.setdefault("schedule", [{"time": "8:00 am", "minutes": 15,
+                               "activity": "daily stand-up with the whole team",
+                               "location": "conference_room"}])
+    for agent in w["agents"].values():
+        agent.update(current_location="reception", current_action="idle",
+                     interacting_with=None)
     project_board.refresh_project_status(w)
-    project_board.sync_board_object(w)
+    world.refresh_room_states(w)
     world.save_world(w)
-    print("cleared the project board")
+    print("cleared the project board and reset the office for a new day")
 
 
 if __name__ == "__main__":

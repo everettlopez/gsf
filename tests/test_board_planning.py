@@ -41,7 +41,7 @@ def test_replans_around_tasks_after_leaving_the_board(
 
     [prompt] = prompts
     assert "T-1 'Set up the API' (todo)" in prompt
-    assert "update it on the project board" in prompt
+    assert "Starting and finishing tasks at the board is scheduled automatically" in " ".join(prompt.split())
     assert "before lunch and before" in prompt
     assert any("T-1 on the project board" in c["activity"] for c in rt.broad_chunks)
     assert not pb.workload_changed("adam")

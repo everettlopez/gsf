@@ -55,10 +55,11 @@ def _clean(raw, speaker_name):
     return line
 
 
-def _board_context(speaker, listener, world):
+def _board_context(speaker, listener, world, mentioned=""):
     """What the speaker knows from the project board that bears on this talk:
-    their own situation and the listener's open tasks. Lets them talk about
-    T-numbers instead of 'the integration issues'."""
+    their own situation, the listener's open tasks, and exactly where every
+    task in play stands. Lets them talk about T-numbers instead of 'the
+    integration issues', without turning "in progress" into "done"."""
     if not world or "project" not in world:
         return ""
     lines = project_board.status_for_agent(world, speaker.agent["id"])
@@ -68,9 +69,24 @@ def _board_context(speaker, listener, world):
         lines.append(f"{other}'s open tasks: " + ", ".join(
             f"{t['id']} '{t['title']}' ({t['status'].replace('_', ' ')})" for t in theirs) + ".")
     body = "\n".join(f"    - {line}" for line in lines)
+
+    ids = project_board.task_ids_in(mentioned) + [
+        t["id"] for t in project_board.open_tasks_for(world, speaker.agent["id"]) + theirs]
+    facts = "\n".join(f"    - {f}" for f in project_board.task_facts(world, ids))
+    facts = f"""
+    Where those tasks really stand on the board right now:
+{facts}
+""" if facts else ""
     return f"""
     What {speaker.agent['name']} knows from the project board:
 {body}
+{facts}
+    Talking doesn't change the board. Nobody can start, approve, finish or move
+    a task in a conversation: that only happens at the project board, a task is
+    approved by a teammate only once it is in review, and a task that waits on
+    another can't start until that one is done. So {speaker.agent['name']} only
+    says a task is approved, done or unblocked if the board above says so, and
+    talks about plans as plans ("I'll move T-1 to review once it works").
 """
 
 
@@ -107,12 +123,13 @@ def _generate_line(speaker, listener, current_time, status, history, intent, wor
 
     Summary of relevant context from {name}'s memory:
     {context}
-{_board_context(speaker, listener, world)}
+{_board_context(speaker, listener, world, intent + " " + " ".join(t for _, t in history))}
     {name} is talking with {other}. Be specific: name the tasks (T-1, T-2, ...)
     and the concrete next step when it helps, and don't repeat what was already said.
-    Only talk about work as it really stands in the memories and board above:
-    {name} must not claim to have built, reviewed or approved anything that isn't
-    there, and a task marked todo has not been started.
+    Only talk about work as it really stands: {name} must not claim to have
+    built, reviewed or approved anything that isn't there, and a task marked todo
+    has not been started. If a memory (even something {name} said earlier)
+    disagrees with the board, the board is right.
     {ask}
     """
 

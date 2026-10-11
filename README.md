@@ -173,13 +173,17 @@ pattern for objects:
    T-1 is still in progress asks whether T-1 is finished first.
 8. **Notes.** Handing a task to a teammate, blocking a task, and asking for
    review all require a note (what it needs, what blocks it, what to check). The
-   handoff note goes with the assignment notice.
+   handoff note goes with the assignment notice. A note can't contradict the
+   board: "T-2 can start since T-1 is complete" is refused while T-1 is in
+   progress (the same goes for "approved" and "in review").
 9. **One task at a time.** An agent can have one task in progress; to start
    another they move the current one to review or blocked. One visit starts at
    most one task, so a WIP refusal is reported once. Re-sending a status
    a task already has is skipped quietly (not refused, not remembered). Tasks
    are things to build or ship: titles that describe a meeting or a review are
-   refused. Notes can go on a task or on the board itself.
+   refused. Notes can go on a task or on the board itself. Several refusals for
+   the same mistake in one visit are reported as one ("T-2 is not in review
+   (same for T-3, T-4)").
 10. **Conversations.** Both speakers see what the board says about them and each
     other, so they talk about specific tasks. After a talk both remember it
     ("Adam and Eve talked at 10:25 about …"); the same two agents don't start
@@ -191,17 +195,40 @@ pattern for objects:
     to her). A teammate walking into the room is considered even during the
     react cooldown, and a reaction that only changes rooms ("move to office_1
     to keep debugging") moves the agent without replanning or starting the
-    cooldown. Solo work never lands in a teammate's private office.
+    cooldown. Solo work never lands in a teammate's private office, and the
+    location LLM is only asked when the answer isn't obvious (solo work goes to
+    the agent's own office without a call). Finer steps of a "collaborate with
+    Eve" block only follow Eve when they are still about working with her.
+    Speakers are shown exactly where each task in play stands ("in progress
+    since 7:10 am: not in review, not approved, not done") and told that talking
+    doesn't change the board; something a speaker says they already did ("I've
+    approved T-1") is not taken as a commitment.
 11. **No gaps.** Replans must cover the rest of the day without gaps; if one
     still leaves a gap, the agent keeps working on their in-progress task in
     their office until the next block starts.
-12. **Reflection and conversation.** Board memories feed reflection, reactions and
+12. **Dependencies.** A task lists only the tasks it truly can't start without
+    (a page can be built against mock data before the API exists). When none of
+    an agent's tasks can start, the board says so and points at `edit_task` to
+    drop a dependency that isn't really needed; plans don't schedule work on a
+    waiting task, and promise or start steps for one explain why it can't start.
+13. **Honest plans.** Plans only name tasks that are on the board (made-up ids
+    are removed) and only people who work here. "Mark T-1 as done" or "move it
+    to the done column" is board work and happens at the board. A replan keeps
+    the automatic start/finish steps for each task plus one board visit before
+    clocking out; plain "update the board" visits right after another board
+    visit, repeated steps for the same task, and zero-length blocks are dropped.
+14. **Team schedule.** `world.json` has the team's fixed meetings (`schedule`,
+    by default a daily stand-up at 8:00 am in the conference room). Every plan
+    and replan gets them at their real times, an agent's own stand-ups at other
+    times are dropped, and the teammates who show up talk to each other, even
+    if they talked shortly before.
+15. **Reflection and conversation.** Board memories feed reflection, reactions and
    conversations like any other memory. Changes on the board (a task moving to
    review, a new note) are new observations for whoever walks up next, so they can
    start a conversation there.
 
-`python scripts/seed_memories.py --reset` clears the board along with the memory
-streams.
+`python scripts/seed_memories.py --reset` clears the board (tasks and notes) along
+with the memory streams, and puts everyone back at reception for a new day.
 
 ## Reflection
 

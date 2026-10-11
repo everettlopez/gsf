@@ -245,9 +245,10 @@ def expand_plan(rt, chunks):
 def initial_planning(rt, world):
     """Day plan in broad strokes, then (optionally) the full decomposition."""
     with timed(f"{rt.tag} initial broad plan (LLM)"):
-        daily_plan = rt.planner.generate_initial_plan(rt.agent)
+        daily_plan = rt.planner.generate_initial_plan(rt.agent, world)
 
-    rt.broad_chunks = rt.planner.create_chunks(daily_plan, rt.agent, world)
+    rt.broad_chunks = rt.planner.apply_schedule(
+        rt.planner.create_chunks(daily_plan, rt.agent, world), world, START_TIME)
     rt.hour_cache, rt.minute_cache = {}, {}
 
     if not rt.broad_chunks:
@@ -457,9 +458,16 @@ def decide_phase(rt, step, current_time, world):
     # choose "talk", so "collaborate with Eve 11-12" passed in silence.)
     elif partner is not None:
         activity = TIME_PREFIX.sub("", rt.chunk["activity"]).strip()
+        activity = rt.planner._SPAN.sub("", activity).strip()
         rt.decision = "2"
-        rt.reaction = (activity if rt.chunk.get("is_reaction")      # already "greet Eve ..."
-                       else f"talk with {partner['name']} about: {activity}")
+        if rt.chunk.get("is_reaction"):                              # already "greet Eve ..."
+            rt.reaction = activity
+        elif rt.chunk.get("meeting"):
+            activity = re.sub(r"(?i)^(?:attend|join)\s+(?:the\s+)?", "", activity)
+            rt.reaction = (f"talk with {partner['name']} at the {activity}: what each is "
+                           f"working on, what is next, and anything blocking them")
+        else:
+            rt.reaction = f"talk with {partner['name']} about: {activity}"
         reason = f"planned to work with {partner['name']}, who is here (LLM skipped)"
 
     # Gate 1d: recently replanned, give the new plan time to play out, unless
@@ -514,6 +522,8 @@ def planned_partner(rt, world, current_time):
     used to arrive and then say nothing. The conversation cooldown keeps it from
     repeating, including right after a talk (the settle chunk targets the partner)."""
     chunk = rt.chunk
+    if chunk and chunk.get("meeting"):
+        return meeting_partner(rt, world, current_time)
     if not chunk or not chunk.get("target_agent"):
         return None
     other = world["agents"].get(chunk["target_agent"])
@@ -523,6 +533,22 @@ def planned_partner(rt, world, current_time):
     if _talked_recently_ids(rt.agent["id"], other["id"], rt.planner._parse_time(current_time)):
         return None
     return other
+
+
+def meeting_partner(rt, world, current_time):
+    """At a team meeting, the teammate here to talk with: anyone in the room who
+    hasn't already talked with this agent since the meeting started. The usual
+    conversation cooldown doesn't apply (a chat at 7:05 shouldn't cancel the
+    8:00 stand-up)."""
+    p = rt.planner
+    started = p._parse_time(rt.chunk.get("start_time"))
+    for other in world["agents"].values():
+        if other["id"] == rt.agent["id"] or other["current_location"] != rt.agent["current_location"]:
+            continue
+        last = _last_talk.get(frozenset((rt.agent["id"], other["id"])))
+        if last is None or started is None or last < started:
+            return other
+    return None
 
 
 def relocation_target(reaction, agent, world):
@@ -584,7 +610,9 @@ def resolve_conversations(runtimes, step, current_time, world):
                 or other.agent["current_location"] != rt.agent["current_location"]):
             continue                      # not a conversation; normal react() runs
 
-        if talked_recently(rt, other, current_time) and not TASK_ID.search(rt.reaction):
+        at_meeting = bool((rt.chunk or {}).get("meeting"))
+        if (talked_recently(rt, other, current_time) and not at_meeting
+                and not TASK_ID.search(rt.reaction)):
             # They just talked; nothing specific is new. Keep working instead.
             log.debug(f"{rt.tag} skips talking to {other.tag} again so soon: {rt.reaction}")
             rt.decision, rt.reaction = "1", ""
@@ -678,7 +706,7 @@ def replan_rest_of_day(rt, start, reason, world, label, extra_guidance=""):
 
     with timed(f"{rt.tag} {label} (LLM)"):
         items = rt.planner.regenerate_plan(
-            rt.agent, start, reason, done, remaining, guidance=guidance
+            rt.agent, start, reason, done, remaining, guidance=guidance, world=world
         )
     new_chunks = rt.planner.create_chunks(items, rt.agent, world)
 
@@ -686,9 +714,11 @@ def replan_rest_of_day(rt, start, reason, world, label, extra_guidance=""):
         log.warn(f"{rt.tag}: replan unusable, keeping old plan")
         return False
 
+    new_chunks = rt.planner.apply_schedule(new_chunks, world, start)
     new_chunks = rt.planner.add_task_checkpoints(
         new_chunks, rt.agent, project_board.open_tasks_for(world, rt.agent["id"])
     )
+    new_chunks = rt.planner.thin_board_visits(new_chunks)
 
     rt.broad_chunks = done + new_chunks
     rt.hour_cache, rt.minute_cache = {}, {}     # old decompositions are stale
@@ -837,6 +867,9 @@ def apply_chunk(rt, world):
     elif chunk.get("target_agent"):
         # update_agent_state follows the target agent's current room
         loc = None
+    elif (obvious := rt.planner.obvious_location(chunk["activity"], rt.agent, world)):
+        loc = obvious
+        log.debug(f"{rt.tag} location {loc} (obvious, LLM skipped)")
     else:
         with timed(f"{rt.tag} choose_location (LLM)"):
             loc = rt.planner.choose_location(

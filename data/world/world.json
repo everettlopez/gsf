@@ -97,5 +97,13 @@
     "description": "A public website for the company with a home page, an about page and a contact form, backed by a small API and deployed online.",
     "status": "not_started",
     "tasks": []
-  }
+  },
+  "schedule": [
+    {
+      "time": "8:00 am",
+      "minutes": 15,
+      "activity": "daily stand-up with the whole team",
+      "location": "conference_room"
+    }
+  ]
 }
