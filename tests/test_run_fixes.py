@@ -166,7 +166,8 @@ def test_conversation_sees_both_agents_tasks(fake_llm, isolated_data, w, monkeyp
 
     assert "What Eve Smith knows from the project board:" in prompts[0]
     assert "Adam Beck's open tasks: T-1 'Set up the API' (todo)." in prompts[0]
-    assert "name the tasks (T-1, T-2, ...)" in prompts[0]
+    assert "name the tasks on the board by their ids" in " ".join(prompts[0].split())
+    assert "The only tasks on the board are T-1, T-2; there is no other task id." in prompts[0]
 
 
 def test_talking_again_too_soon_is_skipped_unless_a_task_is_named(fake_llm, isolated_data, w):

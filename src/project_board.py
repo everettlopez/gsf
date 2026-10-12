@@ -655,6 +655,32 @@ def task_facts(world, task_ids):
     return [task_fact(world, tasks[t]) for t in dict.fromkeys(ordered)]
 
 
+def task_id_line(world):
+    """The ids that exist, said plainly for prompts. With an empty board the
+    model filled in "T-1" and "T-2" on its own (prompts used them as examples)."""
+    ids = [t["id"] for t in get_project(world)["tasks"]]
+    if not ids:
+        return ("The project board has no tasks yet, so no work has a task id or "
+                "number yet; talk about the work itself, not task numbers.")
+    return (f"The only tasks on the board are {', '.join(ids)}; there is no other "
+            f"task id.")
+
+
+def strip_unknown_task_ids(world, text):
+    """Remove task ids that aren't on the board ("work on T-5 'Auth'" ->
+    "work on 'Auth'", "review T-1, T-6 and T-7" -> "review T-1")."""
+    unknown = unknown_task_ids(world, text)
+    for tid in unknown:
+        t = re.escape(tid)
+        for pattern in (rf"(?:\s*,\s*|\s+and\s+){t}\b",     # "T-1, T-6" / "T-1 and T-6"
+                        rf"\b{t}(?:\s*,\s*|\s+and\s+)",     # "T-6, T-1" / "T-6 and T-1"
+                        rf"\b{t}\b\s*"):                      # "work on T-6 'X'"
+            text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    if unknown:
+        text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
+
+
 def unknown_task_ids(world, text):
     """Ids mentioned in `text` that aren't on the board (e.g. a plan's 'T-5')."""
     known = {t["id"] for t in get_project(world)["tasks"]}
@@ -875,7 +901,7 @@ def check_note_claims(world, note):
     for tid in task_ids_in(note):
         task = tasks.get(tid)
         if task is None:
-            continue
+            raise BoardError(f"the note mentions {tid}, but there is no {tid} on the board")
         claim = re.search(
             rf"\b{tid}\b(?:\s*'[^']*')?\s*(?:is|has been|was|'s|got|being)?\s*"
             rf"(?:now\s+|already\s+|fully\s+)?{_CLAIM_WORDS}\b", note, re.IGNORECASE)

@@ -77,16 +77,22 @@ def _board_context(speaker, listener, world, mentioned=""):
     Where those tasks really stand on the board right now:
 {facts}
 """ if facts else ""
+    # The example uses a real task, never an invented "T-1": with an empty
+    # board the model copied the example ids into the conversation.
+    mine = project_board.open_tasks_for(world, speaker.agent["id"])
+    example = (f"I'll move {mine[0]['id']} to review once it works" if mine
+               else "I'll add the API work to the board")
     return f"""
     What {speaker.agent['name']} knows from the project board:
 {body}
 {facts}
+    {project_board.task_id_line(world)}
     Talking doesn't change the board. Nobody can start, approve, finish or move
     a task in a conversation: that only happens at the project board, a task is
     approved by a teammate only once it is in review, and a task that waits on
     another can't start until that one is done. So {speaker.agent['name']} only
     says a task is approved, done or unblocked if the board above says so, and
-    talks about plans as plans ("I'll move T-1 to review once it works").
+    talks about plans as plans ("{example}").
 """
 
 
@@ -124,8 +130,9 @@ def _generate_line(speaker, listener, current_time, status, history, intent, wor
     Summary of relevant context from {name}'s memory:
     {context}
 {_board_context(speaker, listener, world, intent + " " + " ".join(t for _, t in history))}
-    {name} is talking with {other}. Be specific: name the tasks (T-1, T-2, ...)
-    and the concrete next step when it helps, and don't repeat what was already said.
+    {name} is talking with {other}. Be specific: name the tasks on the board by
+    their ids and the concrete next step when it helps, and don't repeat what was
+    already said.
     Only talk about work as it really stands: {name} must not claim to have
     built, reviewed or approved anything that isn't there, and a task marked todo
     has not been started. If a memory (even something {name} said earlier)
@@ -141,6 +148,20 @@ def _generate_line(speaker, listener, current_time, status, history, intent, wor
         return None
 
     line = _clean(raw, name)
+    if line and world and "project" in world:
+        made_up = project_board.unknown_task_ids(world, line)
+        if made_up:
+            # Once more, told plainly; whatever is still made up is cut out, so a
+            # task that doesn't exist never lands in either agent's memory.
+            log.debug(f"{speaker.tag} named tasks that don't exist ({', '.join(made_up)}), retrying")
+            fix = (f"\n    Careful: {', '.join(made_up)} "
+                   f"{'is' if len(made_up) == 1 else 'are'} not on the project board. "
+                   f"{project_board.task_id_line(world)}\n    ")
+            raw = llm.generate(prompt + fix, options={**CTX, "num_predict": MAX_LINE_TOKENS,
+                                                       "temperature": 0.7})
+            if history and raw.strip().upper().startswith("END"):
+                return None
+            line = project_board.strip_unknown_task_ids(world, _clean(raw, name))
     return line or None
 
 

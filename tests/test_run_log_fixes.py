@@ -114,6 +114,7 @@ def test_extract_outcomes_drops_claimed_actions(fake_llm, isolated_data, w, monk
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
+    _run_log_board(w)                                   # T-2 exists, so it's kept
     adam, eve = w["agents"]["adam"], w["agents"]["eve"]
     out = Planner(adam).extract_outcomes("Adam: ...\nEve: ...", adam, eve, w)
     assert out["commitments"] == {"Eve Smith": "I will start on T-2"}

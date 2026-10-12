@@ -360,7 +360,11 @@ class Planner:
 
     _PURPOSEFUL = re.compile(r"approv|review|assign|claim|hand\w* (?:off|over)|add\w* (?:new |any )?tasks?",
                              re.IGNORECASE)
-    _BREAK = re.compile(r"\b(?:break|lunch|coffee|snack|rest)\b", re.IGNORECASE)
+    # Blocks a dropped board visit's minutes never go to: stretching a break or
+    # a clock-in ("clock in 7:00-7:20", then split into "greet the receptionist
+    # in office_1") is not what the plan meant.
+    _BREAK = re.compile(r"\b(?:break|lunch|coffee|snack|rest|clock(?:ing|ed)? (?:in|out))\b",
+                        re.IGNORECASE)
 
     def thin_board_visits(self, chunks):
         """Fewer, more useful trips to the board.
@@ -406,7 +410,13 @@ class Planner:
                 drop = (plain(c) and i != last_board and (recent or next_is_board)) \
                     or (ids(c) and recent and ids(c) <= prev_board[1] and kind(c) == prev_board[2])
                 if drop:
-                    self._absorb(out, c, s)
+                    if next_is_board and not recent and plain(c):
+                        # Two board visits back to back: keep the one with a
+                        # purpose, at the earlier time (check the board right
+                        # after clocking in, not 15 minutes later).
+                        timed[i + 1] = self._retimed(nxt, s, nxt.get("duration") or 0)
+                    else:
+                        self._absorb(out, c, s)
                     log.debug(f"dropped a board visit that repeats a recent one: {c['activity']}")
                     continue
                 prev_board = (s + timedelta(minutes=c.get("duration") or 0), ids(c), kind(c))
@@ -480,14 +490,8 @@ class Planner:
         if not world or "project" not in world:
             return activity
         unknown = project_board.unknown_task_ids(world, activity)
-        for tid in unknown:
-            t = re.escape(tid)
-            for pattern in (rf"(?:\s*,\s*|\s+and\s+){t}\b",     # "T-1, T-6" / "T-1 and T-6"
-                            rf"\b{t}(?:\s*,\s*|\s+and\s+)",     # "T-6, T-1" / "T-6 and T-1"
-                            rf"\b{t}\b\s*"):                      # "work on T-6 'X'"
-                activity = re.sub(pattern, "", activity, flags=re.IGNORECASE)
         if unknown:
-            activity = re.sub(r"\s{2,}", " ", activity).strip()
+            activity = project_board.strip_unknown_task_ids(world, activity)
             log.debug(f"plan named tasks that aren't on the board ({', '.join(unknown)}): {activity}")
         return activity
 
@@ -1029,6 +1033,7 @@ class Planner:
         facts = project_board.task_facts(world, project_board.task_ids_in(mentioned) + own)
         facts = "".join(f"\n        - {f}" for f in facts)
         return f"""
+        {project_board.task_id_line(world)}
         How the project board works: tasks only change at the board in the
         conference room. The assignee moves their task todo -> in progress ->
         review; a teammate (never the assignee) approves it while it is in
@@ -1142,7 +1147,7 @@ class Planner:
         2. For each person, what did they commit to doing (a task, preparation, or
         a meeting at a certain time)? Write one short sentence from their point
         of view, including any time or place. Small talk is not a commitment, and
-        neither is something they say they already did ("I've approved T-1"):
+        neither is something they say they already did ("I've approved the task"):
         only what they will do next. Omit a person who committed to nothing.
         """
         schema = {
@@ -1179,6 +1184,8 @@ class Planner:
                 }
             for c in data["commitments"]:
                 text = future_part(c["commitment"].strip().rstrip("."))
+                if world and "project" in world:
+                    text = project_board.strip_unknown_task_ids(world, text)
                 if text:
                     out["commitments"][c["person"]] = text
         except Exception as e:

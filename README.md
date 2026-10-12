@@ -228,7 +228,11 @@ pattern for objects:
     drop a dependency that isn't really needed; plans don't schedule work on a
     waiting task, and promise or start steps for one explain why it can't start.
 13. **Honest plans.** Plans only name tasks that are on the board (made-up ids
-    are removed) and only people who work here. "Mark T-1 as done" or "move it
+    are removed) and only people who work here. No prompt carries an example
+    task id; prompts say which ids exist, or that the board is empty. A
+    conversation line naming a task that isn't on the board is asked for once
+    more and then has the id removed, commitments lose made-up ids, and notes
+    can't mention them. "Mark T-1 as done" or "move it
     to the done column" is board work and happens at the board. A replan keeps
     the automatic start/finish steps for each task plus one board visit before
     clocking out; plain "update the board" visits right after another board

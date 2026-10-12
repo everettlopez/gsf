@@ -258,6 +258,8 @@ def test_a_conversation_that_starts_repeating_ends(fake_llm, isolated_data, w, m
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
+    pb.create_task(w, "adam", "Backend API", area="backend", assign_to_self=True)   # T-1
+    _eves_tasks(w)                                                                   # T-2..T-4
     eve, adam = main.make_runtime("eve", w), main.make_runtime("adam", w)
     history = run_conversation(eve, adam, "7:20 am", "talk with Adam about T-3 and T-4", w)
     assert [who for who, _ in history] == ["Eve Smith", "Adam Beck", "Eve Smith"]   # was 6 turns
@@ -273,6 +275,7 @@ def test_a_conversation_with_new_content_runs_on(fake_llm, isolated_data, w, mon
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
+    pb.create_task(w, "adam", "Backend API", area="backend", assign_to_self=True)   # T-1
     eve, adam = main.make_runtime("eve", w), main.make_runtime("adam", w)
     history = run_conversation(eve, adam, "9:00 am", "ask Adam about T-1", w)
     assert len(history) == 3
