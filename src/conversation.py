@@ -144,6 +144,20 @@ def _generate_line(speaker, listener, current_time, status, history, intent, wor
     return line or None
 
 
+REPEAT_SIMILARITY = 0.5     # share of words two lines have in common to count as a repeat
+
+
+def _words(text):
+    return set(re.findall(r"[a-z0-9-]{3,}", text.lower()))
+
+
+def _similar(a, b, threshold=REPEAT_SIMILARITY):
+    wa, wb = _words(a), _words(b)
+    if not wa or not wb:
+        return a.strip().lower() == b.strip().lower()
+    return len(wa & wb) / len(wa | wb) >= threshold
+
+
 def run_conversation(initiator, partner, current_time, reaction, world=None):
     """
     Run a full conversation. Both arguments are AgentRuntime objects.
@@ -164,10 +178,11 @@ def run_conversation(initiator, partner, current_time, reaction, world=None):
 
         sname, lname = speaker.agent["name"], listener.agent["name"]
 
-        # Reject a line this speaker already said earlier (echo loops)
-        said = {t.lower() for who, t in history if who == sname}
-        if line.lower() in said:
-            log.debug(f"{speaker.tag} repeated an earlier line, ending")
+        # A line this speaker already said, or nearly said, ends the talk. Turns
+        # 3-6 of one conversation restated "I'll keep working on T-2 and wait
+        # for T-1" in new words, for 60 more seconds of LLM calls.
+        if any(_similar(line, t) for who, t in history if who == sname):
+            log.debug(f"{speaker.tag} repeated themselves, ending")
             break
 
         history.append((sname, line))

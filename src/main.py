@@ -453,6 +453,7 @@ def decide_phase(rt, step, current_time, world):
 
     rt.status = planner.get_current_status(rt.agent, current_time)
     rt.chunk = get_chunk_lazy(rt, current_time, world)
+    drop_spent_target(rt, current_time)
 
     log.debug(f"{rt.tag} status: {rt.status}")
     if rt.chunk:
@@ -539,15 +540,43 @@ def _gist(text):
     return " ".join(re.findall(r"[a-z0-9-]+", text))
 
 
+_FILLER = {"from", "with", "into", "onto", "then", "that", "this", "their", "there"}
+
+
+def _content_words(text):
+    words = set(re.findall(r"[a-z]{4,}", _gist(text)))
+    return words - _FILLER
+
+
+def _is_the_plan(reaction, planned, share=0.75):
+    """Does the reaction just restate the planned step? At 7:05 both agents
+    "reacted" with "go to the conference room to check the project board" while
+    their plan said "check the project board in the conference room", and each
+    reaction cost a full replan."""
+    wanted = _content_words(reaction)
+    return bool(wanted) and len(wanted & _content_words(planned)) / len(wanted) >= share
+
+
+def _named_teammate(text, agent, world):
+    return any(re.search(rf"\b{o['name'].split()[0]}\b", text or "", re.IGNORECASE)
+               for o in world["agents"].values() if o["id"] != agent["id"])
+
+
 def pointless_reaction(rt, reaction, current_time, world):
     """Why a reaction would only repeat what is already happening, or "".
 
     - the reaction the agent is already carrying out (Eve reacted "Move to the
-      project_board to update task T-2 ..." at 8:30 and again at 8:35);
+      project_board to update task T-2 ..." at 8:30 and again at 8:35), or what
+      the plan already says to do right now;
     - going to update the board while at the board, or right after using it."""
     chunk = rt.chunk or {}
     if chunk.get("is_reaction") and _gist(reaction) == _gist(chunk.get("activity")):
         return "already doing this"
+    if chunk.get("activity") and _is_the_plan(reaction, chunk["activity"]):
+        return "that is the plan already"
+    if re.match(r"\s*(?:continue|keep|resume|carry on|stay)\b", reaction or "", re.IGNORECASE) \
+            and not _named_teammate(reaction, rt.agent, world):
+        return "that is the plan already"
     if not project_board.mentions_board_explicitly(reaction):
         return ""
     if chunk.get("board_work") and rt.agent["interacting_with"] == project_board.BOARD_OBJECT:
@@ -563,6 +592,22 @@ def note_board_use(rt, current_time):
     """Remember when the agent last used the board (see pointless_reaction)."""
     if rt.agent["interacting_with"] == project_board.BOARD_OBJECT:
         rt.last_board_at = rt.planner._parse_time(current_time)
+
+
+def drop_spent_target(rt, current_time):
+    """A planned "collaborate with Eve" step right after the two of them talked
+    can't become a conversation (the conversation cooldown), so following Eve
+    only means standing in her office in silence. Do the step in the agent's
+    own office instead, until the cooldown is over."""
+    chunk = rt.chunk
+    if (not chunk or not chunk.get("target_agent") or chunk.get("is_reaction")
+            or chunk.get("pinned") or chunk.get("board_work")):
+        return
+    target = chunk["target_agent"]
+    if not _talked_recently_ids(rt.agent["id"], target, rt.planner._parse_time(current_time)):
+        return
+    log.debug(f"{rt.tag} just talked with {target}; doing '{chunk['activity']}' in their own office")
+    relocate(rt, rt.agent.get("office") or rt.agent["current_location"], current_time)
 
 
 def teammates_here(rt, world):
@@ -697,7 +742,7 @@ def resolve_conversations(runtimes, step, current_time, world):
         for a, b in ((rt, other), (other, rt)):
             commitment = outcomes["commitments"].get(a.agent["name"])
             replanned = bool(commitment) and replan_after_conversation(
-                a, commitment, current_time, world)
+                a, commitment, current_time, world, partner=b.agent["name"])
             settle_after_conversation(a, b, step, current_time, world, outcomes["meeting"])
             if replanned and not outcomes["meeting"]:
                 queue_board_visit(a, commitment, current_time, world)
@@ -788,7 +833,7 @@ def replan_rest_of_day(rt, start, reason, world, label, extra_guidance=""):
     return True
 
 
-def replan_after_conversation(rt, commitment, current_time, world):
+def replan_after_conversation(rt, commitment, current_time, world, partner=None):
     """Rewrite the rest of the day around a commitment (paper: replan after dialogue).
     A promise that can only be kept at the board is also remembered for the next
     board visit, and the new plan has to include that visit. A promise the agent
@@ -799,9 +844,16 @@ def replan_after_conversation(rt, commitment, current_time, world):
     rt.commitments.append(commitment)
     start = step_time(current_time)        # the talk override covers the current step
     extra = ""
+    if partner:
+        # Eve's plan kept "collaborate with Adam 7:30-8:00" right after they had
+        # talked, and she spent it standing silently in his office.
+        extra += f"""
+        {rt.agent['name']} and {partner} just talked, so leave out any block in the
+        next hour that is only about talking or collaborating with {partner}.
+        """
     if project_board.is_board_commitment(commitment):
         project_board.add_commitment(rt.agent["id"], commitment)
-        extra = f"""
+        extra += f"""
         {rt.agent['name']} can only keep this promise at the project board, so the
         plan must include a short visit to update the project board in the
         conference room soon after {start}.

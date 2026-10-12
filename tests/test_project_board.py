@@ -247,8 +247,8 @@ def test_only_agents_in_the_conference_room_see_the_board(w):
 def test_apply_actions_keeps_good_actions_and_skips_bad_ones(w):
     done, refused = pb.apply_actions(w, adam(w), [
         {"action": "create_task", "title": "Set up the API", "area": "backend",
-         "priority": "high", "assign_to_self": True},
-        {"action": "create_task", "title": "Set up the API"},        # duplicate
+         "priority": "high", "assign_to_self": True, "done_when": "GET /health answers"},
+        {"action": "create_task", "title": "Set up the API", "done_when": "x"},   # duplicate
         {"action": "claim_task", "task_id": "T-9"},                  # unknown
         {"action": "update_status", "task_id": "T-1", "status": "in_progress"},
         "garbage",
@@ -262,7 +262,8 @@ def test_apply_actions_keeps_good_actions_and_skips_bad_ones(w):
 
 
 def test_apply_actions_caps_one_visit(w):
-    actions = [{"action": "create_task", "title": f"Task {i}"} for i in range(10)]
+    actions = [{"action": "create_task", "title": f"Task {i}", "done_when": "it works"}
+               for i in range(10)]
     done, _ = pb.apply_actions(w, adam(w), actions)
     assert len(done) == pb.MAX_ACTIONS_PER_VISIT
 

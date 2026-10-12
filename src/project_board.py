@@ -74,9 +74,16 @@ _BOARD = re.compile(
     r"|\bstart\s+T-\d+\b",                                 # "start T-3" (a status change)
     re.IGNORECASE,
 )
-# A commitment that can only be kept at the board.
+# A commitment that can only be kept at the board: it names the board, or a
+# board action applied to a task ("move T-1 to review", "approve T-4", "assign
+# T-3 to Eve", "update the status of T-2"). Naming a task isn't enough: "I'll
+# keep working on T-2" sent both agents back to the board three times in 20 min.
 _BOARD_COMMITMENT = re.compile(
-    r"\b(?:board|tasks?|T-\d+|assign\w*|status|review|approv\w*|dependenc\w*|priorit\w*)\b",
+    r"\bboard\b"
+    r"|\b(?:move|mark|set|update|approve|assign|claim|add|create|start|review|edit|reassign"
+    r"|hand)\w*\s+(?:[\w'-]+\s+){0,3}?(?:T-\d+|tasks?)\b"
+    r"|\b(?:status|statuses|dependenc\w*|priorit\w*)\s+(?:of|for|on)\s+(?:T-\d+|tasks?)\b"
+    r"|\btask\s+(?:status|statuses|assignments?)\b",
     re.IGNORECASE,
 )
 
@@ -426,10 +433,17 @@ def update_status(world, agent_id, task_id, status, note=""):
                 and t["id"] != task["id"]]
         if len(busy) >= WIP_LIMIT:
             raise BoardError(f"{_agent_name(world, agent_id)} is already working on "
-                             f"{', '.join(busy)}; move it to review or blocked first")
+                             f"{', '.join(busy)}; move it to review (or blocked, if it is stuck) first")
         if not task["assignee"]:
             task["assignee"] = agent_id              # starting work claims it
             mark_workload_changed(agent_id)
+    if status == "blocked" and task["status"] not in ("in_progress", "review"):
+        # Blocked means work that got stuck. Eve marked two untouched tasks
+        # "blocked" to mean "later", invented blockers for them, and the next
+        # conversation was all about "unblocking" them.
+        raise BoardError(f"{task['id']} hasn't been started, so it can't be blocked; if it "
+                         f"has to wait for another task, add that task to its depends_on "
+                         f"with edit_task")
     if status == "review" and task["status"] not in ("in_progress", "blocked"):
         # Review is for work that was actually done. Without this, a todo task
         # went straight to review while another task sat "in progress" unworked.
@@ -923,6 +937,10 @@ def apply_action(world, agent, action):
     aid, name = agent["id"], agent["name"]
 
     if kind == "create_task":
+        if not _clean(action.get("done_when")):
+            # Every task in the run had an empty done_when, so no reviewer could
+            # tell what "finished" meant.
+            raise BoardError("needs done_when: how the team will know it is finished")
         t = create_task(world, aid, action.get("title"), action.get("description", ""),
                         action.get("area", "general"), action.get("priority", "medium"),
                         action.get("depends_on") or (), action.get("done_when", ""),
@@ -1106,7 +1124,9 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
     then give the reason in one short sentence:
     - update_status: keep {agent['name']}'s own tasks current, based on what
       {agent['name']} has actually been doing: in_progress once work has started,
-      blocked when stuck or waiting on someone (note: what is blocking it), review
+      blocked only when work already started got stuck (note: what is blocking it;
+      a task that hasn't started and must wait for another gets that task in its
+      depends_on through edit_task instead), review
       when the work is finished (note: what the reviewer should check), and done
       only after a teammate has approved it.
     - create_task: add work the goal needs that is not on the board yet. Give a short
@@ -1135,13 +1155,16 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
     - Only add tasks that move the team toward the goal, and never duplicate a task.
     - A task is something to build or ship (a page, an endpoint, a deployment),
       never a meeting or a review; reviews happen with approve_task.
-    - {agent['name']} works on one task at a time: move the current one to
-      review or blocked before starting the next.
+    - {agent['name']} works on one task at a time: finish the current one (review)
+      or, if it is truly stuck, mark it blocked before starting the next. Tasks
+      not started yet just stay in todo.
     - Only change a status when it actually changed; leave it alone otherwise.
     - Review is for finished work. A task in review stays there until a teammate
       approves it or asks for changes in a note.
     - Prefer tasks in {agent['name']}'s own area; leave other areas for teammates.
-    - Keep tasks small enough for one person to finish in a day or two.
+    - Keep each task to a few hours of work with a clear done_when: split a big
+      area into separate tasks ("auth endpoints", "contact form endpoint",
+      "deploy the API") instead of one "build the whole backend" task.
     - Do only what the current activity calls for; doing nothing is fine.
     """
 

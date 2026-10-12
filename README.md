@@ -145,7 +145,9 @@ pattern for objects:
 4. **Review.** The assignee moves their task `todo → in_progress → review`. A
    teammate then approves it at the board, and only after that can the assignee
    move it to `done`. Moving it back out of review clears the approvals. Only a
-   task that was started (in progress or blocked) can go to review. Agents
+   task that was started (in progress or blocked) can go to review, and only
+   started work (in progress or in review) can be blocked; a task that has to
+   wait for another gets it in `depends_on` instead. Agents
    at the board can't ask for review within `MIN_MINUTES_BEFORE_REVIEW` of
    starting (review is for finished work), and once a task is in review the
    assignee leaves it there until a teammate approves it or asks for changes in
@@ -157,7 +159,8 @@ pattern for objects:
 6. **Follow-through.** Anything clearly about the board ("review the project
    board", "update task statuses", "assign T-4 to Adam") is routed to the board
    without an LLM call, and other work in the conference room can't touch the
-   board. A promise about the board made in conversation is kept for the agent's
+   board. A promise about the board made in conversation ("move T-1 to review",
+   "approve T-4"; not just "keep working on T-2") is kept for the agent's
    next board visit and shown first in that prompt; when it names one of their
    tasks, the prompt says to start that task (and how to set aside the one in
    progress). If they made it while
@@ -176,7 +179,8 @@ pattern for objects:
    task already in progress becomes a progress report, and "start T-2" while
    T-1 is still in progress asks whether T-1 is finished first.
 8. **Notes.** Handing a task to a teammate, blocking a task, and asking for
-   review all require a note (what it needs, what blocks it, what to check). The
+   review all require a note (what it needs, what blocks it, what to check), and
+   a new task needs a `done_when`. Tasks are kept to a few hours of work. The
    handoff note goes with the assignment notice. A note can't contradict the
    board: "T-2 can start since T-1 is complete" is refused while T-1 is in
    progress (the same goes for "approved" and "in review").
@@ -210,7 +214,11 @@ pattern for objects:
     Speakers are shown exactly where each task in play stands ("in progress
     since 7:10 am: not in review, not approved, not done") and told that talking
     doesn't change the board; something a speaker says they already did ("I've
-    approved T-1") is not taken as a commitment.
+    approved T-1") is not taken as a commitment. A conversation ends when a
+    speaker starts repeating themselves (half their words the same as an earlier
+    line). Right after two agents talk, a planned "collaborate with" step is done
+    in the agent's own office instead of following the teammate around in
+    silence, and the replan is told they just talked.
 11. **No gaps.** Replans must cover the rest of the day without gaps; if one
     still leaves a gap, the agent keeps working on their in-progress task in
     their office until the next block starts.
@@ -235,7 +243,8 @@ pattern for objects:
     when that block ends (`REACT_REPLANS`; False brings back the old 10-minute
     detour). `REACT_COOLDOWN_STEPS` is 2, the reaction's own 10 minutes.
     Reactions that only repeat what is already happening are ignored without
-    starting the cooldown: the reaction the agent is already carrying out, and
+    starting the cooldown: the reaction the agent is already carrying out, a
+    restatement of the current plan step or a "continue ..." reaction, and
     going to update the board while at it or within
     `BOARD_REACTION_GAP_MINUTES` of using it.
 15. **Reflection and conversation.** Board memories feed reflection, reactions and

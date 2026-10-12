@@ -377,7 +377,7 @@ def test_a_wip_refusal_is_reported_once(w):
         {"action": "update_status", "task_id": t, "status": "in_progress"}
         for t in ("T-2", "T-3", "T-4")])
     assert refused == ["update_status: Eve Smith is already working on T-1; "
-                       "move it to review or blocked first"]
+                       "move it to review (or blocked, if it is stuck) first"]
 
 
 def test_finishing_one_task_then_starting_the_next_still_works(w):

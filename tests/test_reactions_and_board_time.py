@@ -286,7 +286,7 @@ def test_a_reply_cut_off_in_its_reason_still_applies_its_actions(fake_llm, isola
     def gen(prompt, options=None, format=None):
         if isinstance(format, dict) and "actions" in format["properties"]:
             return ('{"actions": [{"action": "create_task", "title": "Homepage", "area": '
-                    '"frontend", "assign_to_self": true}], "reason": "Eve Smith is currently at '
+                    '"frontend", "assign_to_self": true, "done_when": "the page renders"}], "reason": "Eve Smith is currently at '
                     'the project board and has promised to')
         return fake_generate(prompt, options, format)
 
