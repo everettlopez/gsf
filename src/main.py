@@ -224,7 +224,7 @@ def expand_hours(rt, broad, world=None):
     p = rt.planner
     bkey = (broad["start_time"], broad["activity"])
 
-    if bkey not in rt.hour_cache and broad.get("board_work"):
+    if bkey not in rt.hour_cache and (broad.get("board_work") or broad.get("pinned")):
         # One board visit is one step: broken into 5-minute pieces,
         # every piece was its own board LLM call (20 calls, 8 changes, in the run).
         rt.hour_cache[bkey] = [broad]
@@ -246,8 +246,9 @@ def expand_minutes(rt, hour, world=None):
     hkey = (hour["start_time"], hour["activity"])
 
     if hkey not in rt.minute_cache and ((hour.get("duration") or 60) <= SHORT_CHUNK_MINUTES
-                                        or hour.get("board_work")):
-        rt.minute_cache[hkey] = [hour]          # already short, or one board visit: keep whole
+                                        or hour.get("board_work") or hour.get("pinned")):
+        # Already short, one board visit, or an agreed meeting: keep whole.
+        rt.minute_cache[hkey] = [hour]
 
     if hkey not in rt.minute_cache:
         with timed(f"{rt.tag} expand hour {hkey[0]} -> minutes (LLM)"):
@@ -489,7 +490,7 @@ def decide_phase(rt, step, current_time, world):
         activity = TIME_PREFIX.sub("", rt.chunk["activity"]).strip()
         activity = rt.planner._SPAN.sub("", activity).strip()
         rt.decision = "2"
-        if rt.chunk.get("is_reaction"):                              # already "greet Eve ..."
+        if rt.chunk.get("is_reaction") or rt.chunk.get("agreed"):    # "greet Eve ...", "meet Eve ..."
             rt.reaction = activity
         else:
             rt.reaction = f"talk with {partner['name']} about: {activity}"
@@ -676,10 +677,14 @@ def drop_spent_target(rt, current_time, world=None):
     Adam Beck" alone in her office, right after the stand-up talk.)"""
     chunk = rt.chunk
     if (not chunk or not chunk.get("target_agent") or chunk.get("is_reaction")
-            or chunk.get("pinned") or chunk.get("board_work")):
+            or chunk.get("board_work")):
         return
     target = chunk["target_agent"]
-    if not _talked_recently_ids(rt.agent["id"], target, rt.planner._parse_time(current_time)):
+    if chunk.get("agreed"):
+        if meeting_pending(rt, chunk):
+            return                         # not held yet: go and meet
+    elif chunk.get("pinned") or not _talked_recently_ids(
+            rt.agent["id"], target, rt.planner._parse_time(current_time)):
         return
     relocate(rt, rt.agent.get("office") or rt.agent["current_location"], current_time)
     start = rt.override["start_time"]
@@ -707,9 +712,21 @@ def planned_partner(rt, world, current_time):
     if (other is None or other["id"] == rt.agent["id"]
             or other["current_location"] != rt.agent["current_location"]):
         return None
-    if _talked_recently_ids(rt.agent["id"], other["id"], rt.planner._parse_time(current_time)):
+    if _talked_recently_ids(rt.agent["id"], other["id"], rt.planner._parse_time(current_time)) \
+            and not meeting_pending(rt, chunk):
         return None
     return other
+
+
+def meeting_pending(rt, chunk):
+    """An agreed meeting the two haven't held yet: no talk since it started.
+    It starts a conversation even inside the conversation cooldown (meeting is
+    the point of it), and only one."""
+    if not chunk or not chunk.get("agreed"):
+        return False
+    last = _last_talk.get(frozenset((rt.agent["id"], chunk["target_agent"])))
+    start = rt.planner._parse_time(chunk.get("start_time"))
+    return last is None or start is None or last < start
 
 
 _SAME_WORK = re.compile(r"\b(?:continu\w*|keep\w*|resum\w*|carry on|as planned|get back to|finish\w*)\b",
@@ -794,12 +811,15 @@ def resolve_conversations(runtimes, step, current_time, world):
                 or other.agent["current_location"] != rt.agent["current_location"]):
             continue                      # not a conversation; normal react() runs
 
-        if talked_recently(rt, other, current_time) and not TASK_ID.search(rt.reaction):
+        if (talked_recently(rt, other, current_time) and not TASK_ID.search(rt.reaction)
+                and not meeting_pending(rt, rt.chunk)):
             # They just talked; nothing specific is new. Keep working instead.
             log.debug(f"{rt.tag} skips talking to {other.tag} again so soon: {rt.reaction}")
             rt.decision, rt.reaction = "1", ""
             continue
 
+        # Before the talk is recorded: is this the agreed meeting being held?
+        at_meeting = meeting_pending(rt, rt.chunk) or meeting_pending(other, other.chunk)
         log.conversation_start(rt.tag, other.tag, rt.agent["current_location"], rt.reaction)
         with timed(f"{rt.tag}<->{other.tag} conversation (LLM per turn)"):
             history = run_conversation(rt, other, current_time, rt.reaction, world)
@@ -811,18 +831,26 @@ def resolve_conversations(runtimes, step, current_time, world):
             transcript = "\n".join(f"{who}: {text}" for who, text in history)
             with timed(f"{rt.tag}<->{other.tag} extract outcomes (LLM)"):
                 outcomes = rt.planner.extract_outcomes(
-                    transcript, rt.agent, other.agent, world
+                    transcript, rt.agent, other.agent, world, current_time
                 )
             log_outcomes(rt, other, outcomes)
 
         busy.update({rt.agent["id"], other.agent["id"]})
 
+        meeting = outcomes["meeting"]
+        later = meeting if meeting and meeting.get("start") else None
+        # At an agreed meeting, "meet now" is the meeting they're in.
+        now_meeting = meeting if meeting and not later and not at_meeting else None
+        if later:
+            # Into both days before replanning, so the replans plan around it.
+            schedule_meeting(rt, other, later, current_time)
+
         for a, b in ((rt, other), (other, rt)):
             commitment = outcomes["commitments"].get(a.agent["name"])
             replanned = bool(commitment) and replan_after_conversation(
                 a, commitment, current_time, world, partner=b.agent["name"])
-            settle_after_conversation(a, b, step, current_time, world, outcomes["meeting"])
-            if replanned and not outcomes["meeting"]:
+            settle_after_conversation(a, b, step, current_time, world, now_meeting)
+            if replanned and not now_meeting:
                 queue_board_visit(a, commitment, current_time, world)
 
 
@@ -869,7 +897,8 @@ def log_outcomes(rt, other, outcomes):
     """Readable summary of what a conversation led to."""
     meeting = outcomes["meeting"]
     if meeting:
-        log.event(f"agreed to meet in {meeting['location']}: "
+        when = f" at {meeting['start']}" if meeting.get("start") else ""
+        log.event(f"agreed to meet in {meeting['location']}{when}: "
                   f"{meeting['activity']} ({meeting['minutes']} min)")
     for who in (rt, other):
         commitment = outcomes["commitments"].get(who.agent["name"])
@@ -928,6 +957,9 @@ def teammate_blocks(rt, remaining):
     out = []
     for c in remaining:
         target = c.get("target_agent")
+        if c.get("agreed") and target:
+            out.append(c)                  # both agreed to it: always kept
+            continue
         if not target or c.get("is_reaction") or c.get("board_work") or c.get("pinned"):
             continue
         start = rt.planner._parse_time(c.get("start_time"))
@@ -1041,6 +1073,37 @@ def settle_after_conversation(rt, partner, step, current_time, world, agreement=
             "is_reaction": True,
             "pinned": True,
         }
+
+def schedule_meeting(rt, other, meeting, current_time):
+    """A meeting the two agreed on for later today goes into both their days
+    (paper: Isabella's invitations become plans for the people she told).
+    Before this, each agent wrote its own "collaborate with ..." blocks: Adam
+    planned 11:15 with Eve, who had lunch 11:00-12:00, and Eve planned 3:30 with
+    Adam, which wasn't in his plan. The block is pinned to the agreed place and
+    kept by every replan; both agents remember the agreement."""
+    start = rt.planner._parse_time(meeting["start"])
+    end = rt.planner._fmt(start + timedelta(minutes=meeting["minutes"]))
+    topic = (meeting.get("activity") or "").strip().rstrip(".") or "the project"
+    line = (f"{rt.agent['name']} and {other.agent['name']} agreed to meet in "
+            f"{meeting['location']} at {meeting['start']}: {topic}.")
+    for a, b in ((rt, other), (other, rt)):
+        block = {
+            "activity": (f"meet {b.agent['name']} in {meeting['location']} about: {topic} "
+                         f"from {meeting['start']} to {end}"),
+            "location": meeting["location"],
+            "start_time": meeting["start"],
+            "duration": meeting["minutes"],
+            "target_agent": b.agent["id"],
+            "pinned": True,
+            "agreed": True,
+            "board_work": False,
+        }
+        a.broad_chunks = a.planner.insert_block(a.broad_chunks, block)
+        a.planner.create_plan([block])
+        a.stream.add_observations([line])
+    log.event(f"{rt.tag} and {other.tag} put the meeting in their plans: "
+              f"{meeting['location']} {meeting['start']}-{end}")
+
 
 def queue_board_visit(rt, commitment, current_time, world, minutes=10):
     """Promised something about the board while standing at it: do it right after

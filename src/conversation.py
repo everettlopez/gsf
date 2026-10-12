@@ -107,6 +107,32 @@ def _board_context(speaker, listener, world, mentioned=""):
 """
 
 
+def _plans_with(speaker, listener, current_time, limit=2):
+    """What the speaker has planned with the listener later today. Plans are
+    memories the paper's agents bring into conversation; without them each
+    agent kept its own "collaborate with ..." block that the other never knew
+    about (Adam's 11:15 fell in Eve's lunch). Seeing them, the two can confirm a
+    time and place, which then goes into both plans."""
+    parse = speaker.planner._parse_time
+    now = parse(current_time)
+    chunks = getattr(speaker, "broad_chunks", None) or []
+    upcoming = [c for c in chunks
+                if c.get("target_agent") == listener.agent["id"]
+                and parse(c.get("start_time")) is not None and now is not None
+                and parse(c.get("start_time")) > now]
+    if not upcoming:
+        return ""
+    name, other = speaker.agent["name"], listener.agent["name"]
+    lines = "\n".join(f"    - {c['activity']}" + (" (agreed with " + other + ")" if c.get("agreed") else "")
+                      for c in upcoming[:limit])
+    return f"""
+    {name}'s plan for later today with {other}:
+{lines}
+    If {name} wants to meet {other} later, they can suggest a time and place, and
+    it only happens if {other} agrees.
+"""
+
+
 def _generate_line(speaker, listener, current_time, status, history, intent, world=None):
     """Return the next utterance, or None if the speaker ends the conversation."""
     name = speaker.agent["name"]
@@ -140,7 +166,7 @@ def _generate_line(speaker, listener, current_time, status, history, intent, wor
 
     Summary of relevant context from {name}'s memory:
     {context}
-{_board_context(speaker, listener, world, intent + " " + " ".join(t for _, t in history))}
+{_board_context(speaker, listener, world, intent + " " + " ".join(t for _, t in history))}{_plans_with(speaker, listener, current_time)}
     {name} is talking with {other}. Be specific: name the tasks on the board by
     their ids and the concrete next step when it helps, and don't repeat what was
     already said.

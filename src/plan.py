@@ -342,8 +342,8 @@ class Planner:
                 visited.update(named)
                 out.append(c)
                 continue
-            if not named or start is None or minutes_total < 3 * minutes:
-                out.append(c)
+            if not named or start is None or minutes_total < 3 * minutes or c.get("pinned"):
+                out.append(c)               # an agreed meeting keeps its time
                 continue
 
             # One task at a time: only the first todo task named here is started.
@@ -584,39 +584,50 @@ class Planner:
         him on the contact form both disappeared, and the run had a single
         conversation in 30 steps. Each kept block is put back at its time unless
         the new plan already has that teammate at an overlapping time; whatever
-        overlaps it is cut around it."""
+        overlaps it is cut around it. A meeting the two agreed on ("agreed")
+        always gets its slot: the new plan's own version of time with that
+        teammate is cut around it, so it isn't there twice."""
         out = list(chunks)
         for k in kept:
             ks = self._parse_time(k.get("start_time"))
             if ks is None:
                 continue
             ke = ks + timedelta(minutes=k.get("duration") or 0)
-
-            def overlaps(c):
-                cs = self._parse_time(c.get("start_time"))
-                if cs is None:
-                    return False
-                return cs < ke and ks < cs + timedelta(minutes=c.get("duration") or 0)
-
-            if any(c.get("target_agent") == k["target_agent"] and overlaps(c) for c in out):
+            if any(c.get("target_agent") == k["target_agent"] and self._overlaps(c, ks, ke)
+                   and (c.get("agreed") or not k.get("agreed")) for c in out):
                 continue
-            rebuilt = []
-            for c in out:
-                if not overlaps(c):
-                    rebuilt.append(c)
-                    continue
-                cs = self._parse_time(c["start_time"])
-                ce = cs + timedelta(minutes=c.get("duration") or 0)
-                before = int((ks - cs).total_seconds() // 60)
-                after = int((ce - ke).total_seconds() // 60)
-                if before >= 5:
-                    rebuilt.append(self._retimed(c, cs, before))
-                if after >= 5:
-                    rebuilt.append(self._retimed(c, ke, after))
-            rebuilt.append(dict(k))
-            out = sorted(rebuilt, key=lambda c: self._parse_time(c.get("start_time")) or datetime.min)
+            out = self.insert_block(out, k)
             log.debug(f"kept a plan with a teammate the replan dropped: {k['activity']}")
         return out
+
+    def _overlaps(self, c, ks, ke):
+        cs = self._parse_time(c.get("start_time"))
+        if cs is None:
+            return False
+        return cs < ke and ks < cs + timedelta(minutes=c.get("duration") or 0)
+
+    def insert_block(self, chunks, block):
+        """`block` at its own time; whatever overlaps it is cut around it
+        (pieces shorter than 5 minutes are dropped)."""
+        ks = self._parse_time(block.get("start_time"))
+        if ks is None:
+            return list(chunks)
+        ke = ks + timedelta(minutes=block.get("duration") or 0)
+        rebuilt = []
+        for c in chunks:
+            if not self._overlaps(c, ks, ke):
+                rebuilt.append(c)
+                continue
+            cs = self._parse_time(c["start_time"])
+            ce = cs + timedelta(minutes=c.get("duration") or 0)
+            before = int((ks - cs).total_seconds() // 60)
+            after = int((ce - ke).total_seconds() // 60)
+            if before >= 5:
+                rebuilt.append(self._retimed(c, cs, before))
+            if after >= 5:
+                rebuilt.append(self._retimed(c, ke, after))
+        rebuilt.append(dict(block))
+        return sorted(rebuilt, key=lambda c: self._parse_time(c.get("start_time")) or datetime.min)
 
     @staticmethod
     def work_focus(agent, world):
@@ -1355,7 +1366,21 @@ class Planner:
                   f"({', '.join(theirs)}): {text!r} -> {kept!r}")
         return kept
 
-    def extract_outcomes(self, transcript, agent_a, agent_b, world):
+    def _meeting_start(self, text, current_time):
+        """When an agreed meeting starts: None for right afterwards ("now", no
+        time, or a time that has already come), else the time ("10:30 am").
+        A time at or after the end of the workday means no later meeting."""
+        m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\b", text or "", re.IGNORECASE)
+        when = (self._parse_time(f"{int(m.group(1))}:{m.group(2) or '00'} {m.group(3)}m")
+                if m and 1 <= int(m.group(1)) <= 12 else None)
+        now = self._parse_time(current_time) if current_time else None
+        if when is None or now is None or when <= now + timedelta(minutes=5):
+            return None
+        if when >= self._parse_time(DAY_END):
+            return None
+        return self._fmt(when)
+
+    def extract_outcomes(self, transcript, agent_a, agent_b, world, current_time=None):
         """One call: shared meeting (location-pinned) + each agent's own commitment."""
         valid = list(world["locations"].keys())
         owners = {a["office"]: a["name"] for a in world["agents"].values() if a.get("office")}
@@ -1371,9 +1396,11 @@ class Planner:
         Locations:
         {loc_lines}
 
-        1. Did they agree to meet or work together at a specific place right afterwards?
-        ("your desk" means the office of the person being addressed.)
-        If not, set meeting_agreed to false.
+        1. Did they both agree to meet or work together at a specific place, either
+        right afterwards or at a set time later today? ("your desk" means the office
+        of the person being addressed.) Set meeting_time to "now" for right
+        afterwards, or to the agreed time ("10:30 am"). Only count a meeting both
+        of them agreed to, with a place; if not, set meeting_agreed to false.
         2. For each person, what did they commit to doing (a task, preparation, or
         a meeting at a certain time)? Write one short sentence from their point
         of view, including any time or place. Small talk is not a commitment, and
@@ -1387,6 +1414,7 @@ class Planner:
                 "meeting_agreed": {"type": "boolean"},
                 "location": {"type": "string", "enum": valid},
                 "activity": {"type": "string"},
+                "meeting_time": {"type": "string"},
                 "minutes": {"type": "integer"},
                 "commitments": {
                     "type": "array",
@@ -1412,6 +1440,7 @@ class Planner:
                     "location": data["location"],
                     "activity": data["activity"],
                     "minutes": max(10, min(data["minutes"] or 30, 60)),
+                    "start": self._meeting_start(data.get("meeting_time"), current_time),
                 }
             for c in data["commitments"]:
                 text = future_part(c["commitment"].strip().rstrip("."))

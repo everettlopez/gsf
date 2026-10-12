@@ -298,7 +298,18 @@ pattern for objects:
     - promises: one about a teammate's task counts only if it's a review of it
       or working on it together with them; "I'll get T-2 ready for review"
       from someone who doesn't own T-2 is dropped.
-16. **Reflection and conversation.** Board memories feed reflection, reactions and
+16. **Agreed meetings (paper: Isabella's party).** When two agents talk, each
+    sees what they've planned with the other later today, so they can confirm a
+    time and place or suggest one. A meeting they both agree on, right afterwards
+    or later today ("stand-up at 8:00 in the conference room"), goes into both
+    their plans as a block pinned to that place, and both remember the
+    agreement. Every replan keeps it, even one right after their talk, and a
+    replan's own version of time with that teammate is cut around it instead of
+    doubling it. When they're both there they talk (inside the conversation
+    cooldown too: the meeting is the point), once; then each goes back to their
+    own task. A plan block with a teammate that nobody agreed to is still just
+    one agent's intention.
+17. **Reflection and conversation.** Board memories feed reflection, reactions and
    conversations like any other memory. Changes on the board (a task moving to
    review, a new note) are new observations for whoever walks up next, so they can
    start a conversation there.
