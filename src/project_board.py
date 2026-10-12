@@ -118,6 +118,12 @@ MAX_BOARD_NOTES = 20     # board-level notes kept on the project
 # so scripted moves and tests can still walk a task straight through.
 MIN_MINUTES_BEFORE_REVIEW = 120
 
+# Open tasks one agent can take on at the board. Past this, a task they add is
+# left unassigned for whoever is free, and they can't claim more. Adam kept
+# adding tasks to himself (T-1, T-5, T-6 within an hour) while T-1 had barely
+# started. Agent layer only, like MIN_MINUTES_BEFORE_REVIEW.
+MAX_OPEN_TASKS_PER_AGENT = 3
+
 # Titles that describe a meeting or a review, not something to build or ship.
 _NOT_A_DELIVERABLE = re.compile(
     r"^\s*(?:review|meet|meeting|discuss|sync|align|check[- ]in|stand-?up|coordinate"
@@ -740,6 +746,9 @@ def status_for_agent(world, agent_id):
         per_area = ", ".join(f"{a} {sum(t['area'] == a and t['status'] != 'done' for t in tasks)}"
                              for a in areas)
         lines.append(f"Open tasks per area: {per_area}.")
+        per_person = ", ".join(f"{a['name']} {len(open_tasks_for(world, a['id']))}"
+                               for a in world["agents"].values())
+        lines.append(f"Open tasks per person: {per_person}.")
 
     if area:
         mine_area = [t for t in tasks if t["area"] == area and t["status"] != "done"]
@@ -920,6 +929,31 @@ def check_note_claims(world, note):
                              f"is {status.replace('_', ' ')}; notes have to match the board")
 
 
+def _has_full_plate(world, agent_id):
+    return len(open_tasks_for(world, agent_id)) >= MAX_OPEN_TASKS_PER_AGENT
+
+
+def check_note_is_for_teammates(world, agent, note):
+    """Refuse a note that only narrates what the writer is doing ("Eve is
+    currently addressing high-priority bugs or issues. Please check if this
+    affects T-2 progress."). That note described work no task covered, and
+    sent Adam off for 15 minutes to "check on T-2" alone. A note is for a
+    teammate to act on, so narration passes only when it asks something
+    ("?") or names the teammate it is for."""
+    first, full = agent["name"].split()[0], agent["name"]
+    narrating = re.match(
+        rf"\s*(?:{re.escape(full)}|{re.escape(first)}|I)(?:'m|'s|\s+(?:is|am|has been|will be))"
+        rf"\s+(?:currently\s+|now\s+|still\s+|busy\s+)?\w+ing\b", note or "", re.IGNORECASE)
+    if not narrating or "?" in note:
+        return
+    for other in world["agents"].values():
+        if other["id"] != agent["id"] and re.search(
+                rf"\b{re.escape(other['name'].split()[0])}\b", note, re.IGNORECASE):
+            return
+    raise BoardError("a note is for a teammate to act on (a question, a decision, a "
+                     "blocker); it shouldn't only say what you are doing")
+
+
 def _check_review_habits(world, agent_id, task_id, status):
     """Two habits the core rules don't cover, which the 130-step run broke:
     - review is for finished work, so not right after starting;
@@ -963,15 +997,24 @@ def apply_action(world, agent, action):
     aid, name = agent["id"], agent["name"]
 
     if kind == "create_task":
+        to_self = bool(action.get("assign_to_self"))
+        full = to_self and _has_full_plate(world, aid)
         t = create_task(world, aid, action.get("title"), action.get("description", ""),
                         action.get("area", "general"), action.get("priority", "medium"),
                         action.get("depends_on") or (), action.get("done_when", ""),
-                        bool(action.get("assign_to_self")))
-        mine = " and took it on" if t["assignee"] == aid else ""
+                        to_self and not full)
+        if full:
+            mine = (f" and left it unassigned, since {name} already has "
+                    f"{MAX_OPEN_TASKS_PER_AGENT} open tasks")
+        else:
+            mine = " and took it on" if t["assignee"] == aid else ""
         return (f"{name} added task {t['id']} '{t['title']}' ({t['area']}, "
                 f"{t['priority']} priority) to the project board{mine}.")
 
     if kind == "claim_task":
+        if _has_full_plate(world, aid):
+            raise BoardError(f"{name} already has {MAX_OPEN_TASKS_PER_AGENT} open tasks; "
+                             f"finish one before taking on more")
         t = claim_task(world, aid, action.get("task_id"))
         return f"{name} took on task {t['id']} '{t['title']}' from the project board."
 
@@ -1012,6 +1055,7 @@ def apply_action(world, agent, action):
 
     if kind == "add_note":
         check_note_claims(world, action.get("note") or "")
+        check_note_is_for_teammates(world, agent, action.get("note") or "")
 
     if kind == "add_note" and not action.get("task_id"):
         n = add_board_note(world, aid, action.get("note"))
@@ -1184,6 +1228,9 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
     - Review is for finished work. A task in review stays there until a teammate
       approves it or asks for changes in a note.
     - Prefer tasks in {agent['name']}'s own area; leave other areas for teammates.
+    - Take a task on (assign_to_self, claim_task) only if {agent['name']} will work on
+      it soon; leave the rest unassigned so whoever is free can pick it up.
+      {agent['name']} can hold at most {MAX_OPEN_TASKS_PER_AGENT} open tasks.
     - Keep each task to a few hours of work: split a big area into separate
       tasks ("auth endpoints", "contact form endpoint", "deploy the API") instead
       of one "build the whole backend" task.
@@ -1266,12 +1313,107 @@ def _commitments_block(agent, commitments, world=None):
 
 
 _START_STEP = re.compile(r"\bstart (T-\d+)(?: \(move it to in progress\))?", re.IGNORECASE)
+_APPROVE_STEP = re.compile(r"\b(?:review and approve|approve)\s+(T-\d+)(?:\s*'[^']*')?", re.IGNORECASE)
+
+
+def _reconcile_approval(world, agent_id, activity):
+    """A planned "review and approve T-1" when T-1 isn't in review (yet): the
+    plan was written hours earlier, on a guess. Say what is actually there to
+    do, so the visit doesn't end in a refused approval."""
+    match = _APPROVE_STEP.search(activity or "")
+    if not match:
+        return activity
+    try:
+        task = get_task(world, match.group(1))
+    except BoardError:
+        return activity
+    if task["status"] == "review" or task["assignee"] in (None, agent_id):
+        return activity
+    tid, status = task["id"], task["status"].replace("_", " ")
+    replacement = (f"check on {tid} (it is {status}, not in review, so there is nothing "
+                   f"to approve yet)")
+    return activity[:match.start()] + replacement + activity[match.end():]
+
+
+_QUOTED_TITLE = re.compile(r"\b(T-\d+)(\s*[:(]?\s*)(['\"‘“])([^'\"’”]{2,100})"
+                           r"(['\"’”])", re.IGNORECASE)
+
+
+def correct_task_titles(world, text):
+    """Put each task's real title next to its id ("T-1 'Backend data structure'"
+    -> "T-1 'Design and implement the API ...'"). A plan block that gets a
+    task's title wrong makes the agent work on, or review, the wrong thing."""
+    if not world or "project" not in world:
+        return text
+    titles = {t["id"]: t["title"] for t in get_project(world)["tasks"]}
+
+    def words(text):
+        return {w for w in _normalize(text).split() if len(w) > 2}
+
+    def fix(m):
+        real = titles.get(m.group(1).upper())
+        # A shortened title ("Set up backend API") is still the same task.
+        if real is None or words(m.group(4)) <= words(real):
+            return m.group(0)
+        return f"{m.group(1)}{m.group(2)}{m.group(3)}{real}{m.group(5)}"
+
+    return _QUOTED_TITLE.sub(fix, text or "")
+
+
+_START_WORK = re.compile(
+    r"\b(?:start|begin|switch|move on|pick up|take on|jump|work)\w*\b(?:\s+\w+){0,4}?\s+"
+    r"(?:task\s+)?(T-\d+)", re.IGNORECASE)
+
+
+def start_conflict(world, agent_id, text):
+    """Why a reaction to start working on a task can't happen now, or "".
+
+    "Start working on task T-5" while T-1 was in progress replaced Adam's plan
+    with T-5 work the board refused to start (one task at a time), and his
+    work and the board disagreed for the rest of the morning."""
+    if not world or "project" not in world:
+        return ""
+    match = _START_WORK.search(text or "")
+    if not match:
+        return ""
+    try:
+        task = get_task(world, match.group(1))
+    except BoardError:
+        return ""
+    if task["status"] != "todo" or task["assignee"] not in (None, agent_id):
+        return ""
+    blockers = _unmet_dependencies(world, task)
+    if blockers:
+        return f"{task['id']} waits on {', '.join(blockers)}"
+    busy = [t["id"] for t in get_project(world)["tasks"]
+            if t["assignee"] == agent_id and t["status"] == "in_progress" and t["id"] != task["id"]]
+    if len(busy) >= WIP_LIMIT:
+        return f"{busy[0]} is still in progress (one task at a time)"
+    return ""
+
+
+def teammate_task(world, agent_id, text):
+    """The first task mentioned in `text` that belongs to a teammate, or None."""
+    if not world or "project" not in world:
+        return None
+    tasks = {t["id"]: t for t in get_project(world)["tasks"]}
+    for tid in task_ids_in(text):
+        task = tasks.get(tid)
+        if task and task["assignee"] and task["assignee"] != agent_id \
+                and task["assignee"] in world["agents"]:
+            return task
+    return None
 
 
 def reconcile_activity(world, agent_id, activity):
-    """Bring a planned board step up to date with the board as it is now.
+    """Bring a planned board step up to date with the board as it is now:
+    start steps for tasks that already started or can't start yet, and
+    approvals of tasks that aren't in review."""
+    return _reconcile_start(world, agent_id, _reconcile_approval(world, agent_id, activity))
 
-    Checkpoints like "start T-1 (move it to in progress)" are written into the
+
+def _reconcile_start(world, agent_id, activity):
+    """Checkpoints like "start T-1 (move it to in progress)" are written into the
     plan when it is made. If the task was started in the meantime, the step
     would ask the model to do something already done, and it picks the next
     status instead (that is how T-1 went to review at 8:00 after 50 minutes).

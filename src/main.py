@@ -216,7 +216,7 @@ def make_runtime(agent_id, world):
 # ---------------------------------------------------------------------------
 # PLANNING
 # ---------------------------------------------------------------------------
-def expand_hours(rt, broad):
+def expand_hours(rt, broad, world=None):
     """broad block -> hour chunks (cached, saved to the memory stream)."""
     p = rt.planner
     bkey = (broad["start_time"], broad["activity"])
@@ -228,7 +228,7 @@ def expand_hours(rt, broad):
 
     if bkey not in rt.hour_cache:
         with timed(f"{rt.tag} expand broad {bkey[0]} -> hours (LLM)"):
-            hours = p.decompose_chunks([broad], rt.agent)
+            hours = p.decompose_chunks([broad], rt.agent, focus=p.work_focus(rt.agent, world))
         if hours:
             p.create_plan(hours)
         # If the output didn't parse, fall back to the coarser chunk.
@@ -237,7 +237,7 @@ def expand_hours(rt, broad):
     return rt.hour_cache[bkey]
 
 
-def expand_minutes(rt, hour):
+def expand_minutes(rt, hour, world=None):
     """hour chunk -> 5-15 minute chunks (cached, saved to the memory stream)."""
     p = rt.planner
     hkey = (hour["start_time"], hour["activity"])
@@ -248,7 +248,7 @@ def expand_minutes(rt, hour):
 
     if hkey not in rt.minute_cache:
         with timed(f"{rt.tag} expand hour {hkey[0]} -> minutes (LLM)"):
-            minutes = p.decompose_hour_chunks([hour], rt.agent)
+            minutes = p.decompose_hour_chunks([hour], rt.agent, focus=p.work_focus(rt.agent, world))
         if minutes:
             p.create_plan(minutes)
         rt.minute_cache[hkey] = minutes or [hour]
@@ -256,12 +256,12 @@ def expand_minutes(rt, hour):
     return rt.minute_cache[hkey]
 
 
-def expand_plan(rt, chunks):
+def expand_plan(rt, chunks, world=None):
     """Eagerly decompose the given broad chunks all the way down (the paper's
     up-front version). Fills the same caches the lazy path uses."""
     for broad in chunks:
-        for hour in expand_hours(rt, broad):
-            expand_minutes(rt, hour)
+        for hour in expand_hours(rt, broad, world):
+            expand_minutes(rt, hour, world)
 
 
 def initial_planning(rt, world):
@@ -286,7 +286,7 @@ def initial_planning(rt, world):
     rt.planner.create_plan(rt.broad_chunks)  # plans live in the memory stream
 
     if EAGER_DECOMPOSITION:
-        expand_plan(rt, rt.broad_chunks)
+        expand_plan(rt, rt.broad_chunks, world)
 
 
 def get_chunk_lazy(rt, current_time, world=None):
@@ -318,16 +318,16 @@ def get_chunk_lazy(rt, current_time, world=None):
         if broad is None:
             return None
 
-    hour = p.get_current_minute_chunk(current_time, expand_hours(rt, broad))
+    hour = p.get_current_minute_chunk(current_time, expand_hours(rt, broad, world))
     if hour is None or not p.covers(hour, current_time):
         # The hour decomposition left a gap (the model returned too few hours).
         # Fill it from the broad block instead of replaying the last minute action
         # of an hour that already ended.
-        hour = gap_hour(rt, broad, current_time)
+        hour = gap_hour(rt, broad, current_time, world)
         if hour is None:
             return None
 
-    return p.get_current_minute_chunk(current_time, expand_minutes(rt, hour))
+    return p.get_current_minute_chunk(current_time, expand_minutes(rt, hour, world))
 
 
 def gap_block(rt, current_time, world=None):
@@ -352,10 +352,7 @@ def gap_block(rt, current_time, world=None):
     if gap_end <= now:
         return None                                    # the workday is over
 
-    working = [t for t in project_board.open_tasks_for(world, rt.agent["id"])
-               if t["status"] == "in_progress"] if world else []
-    what = (f"keep working on {working[0]['id']} '{working[0]['title']}'"
-            if working else f"focus on {rt.agent['name']}'s own work")
+    what = own_work(rt, world)
     start_text, end_text = p._fmt(gap_start), p._fmt(gap_end)
     log.debug(f"{rt.tag} broad plan gap {start_text}-{end_text}: {what}")
     return {
@@ -368,7 +365,23 @@ def gap_block(rt, current_time, world=None):
     }
 
 
-def gap_hour(rt, broad, current_time):
+def own_work(rt, world):
+    """What the agent does when the plan has nothing specific: the task they
+    have in progress, else the next one they can start, else their own work."""
+    mine = project_board.open_tasks_for(world, rt.agent["id"]) if world else []
+    working = [t for t in mine if t["status"] == "in_progress"]
+    ready = [t for t in mine if t["status"] == "todo" and not project_board.task_waits(world, t)]
+    if working:
+        return f"keep working on {working[0]['id']} '{working[0]['title']}'"
+    if ready:
+        # "focus on Adam Beck's own work" became "review Adam Beck's to-do list".
+        # (Not "start T-1": starting is a board step, and the words would send
+        # the agent to the board.)
+        return f"prepare for {ready[0]['id']} '{ready[0]['title']}' (read up and sketch the approach)"
+    return f"focus on {rt.agent['name']}'s own work"
+
+
+def gap_hour(rt, broad, current_time, world=None):
     """An hour chunk covering `current_time`, cut from the broad block.
 
     It is anchored where the gap starts (the end of the last hour chunk), in
@@ -384,7 +397,7 @@ def gap_hour(rt, broad, current_time):
         return None
 
     anchor = block_start
-    for hour in expand_hours(rt, broad):
+    for hour in expand_hours(rt, broad, world):
         hs = p._parse_time(hour.get("start_time"))
         if hs is not None and hs <= now:
             anchor = max(anchor, hs + timedelta(minutes=hour.get("duration") or 0))
@@ -453,7 +466,7 @@ def decide_phase(rt, step, current_time, world):
 
     rt.status = planner.get_current_status(rt.agent, current_time)
     rt.chunk = get_chunk_lazy(rt, current_time, world)
-    drop_spent_target(rt, current_time)
+    drop_spent_target(rt, current_time, world)
 
     log.debug(f"{rt.tag} status: {rt.status}")
     if rt.chunk:
@@ -516,6 +529,11 @@ def decide_phase(rt, step, current_time, world):
                 reason += f" -> ignored ({skip})"
                 rt.decision, rt.reaction = "1", ""
 
+            aimed = aim_at_owner(rt, rt.reaction, world) if rt.decision == "2" else rt.reaction
+            if aimed != rt.reaction:
+                reason += f" -> asks the task's owner: {aimed}"
+                rt.reaction = aimed
+
             room = (relocation_target(rt.reaction, rt.agent, world, rt.chunk["activity"])
                     if rt.decision == "2" else None)
             if room is not None:
@@ -572,6 +590,12 @@ def pointless_reaction(rt, reaction, current_time, world):
     chunk = rt.chunk or {}
     if chunk.get("is_reaction") and _gist(reaction) == _gist(chunk.get("activity")):
         return "already doing this"
+    conflict = project_board.start_conflict(world, rt.agent["id"], reaction)
+    if conflict:
+        return conflict
+    routine = object_only(reaction, rt.agent, world)
+    if routine:
+        return routine
     if chunk.get("activity") and _is_the_plan(reaction, chunk["activity"]):
         return "that is the plan already"
     if re.match(r"\s*(?:continue|keep|resume|carry on|stay)\b", reaction or "", re.IGNORECASE) \
@@ -592,17 +616,72 @@ def pointless_reaction(rt, reaction, current_time, world):
     return ""
 
 
+# What a reaction says besides naming an object, a room or a person, when it
+# is only about that object ("check the time_clock", "go to the reception to
+# check the time_clock with Adam Beck").
+_ROUTINE_WORDS = {
+    "a", "an", "the", "to", "in", "at", "on", "of", "and", "with", "for", "if", "it", "is",
+    "whether", "that", "this", "my", "his", "her", "their", "again", "quickly", "briefly",
+    "check", "checks", "checking", "look", "looks", "looking", "see", "use", "using", "inspect",
+    "verify", "confirm", "make", "sure", "go", "goes", "head", "walk", "move", "return", "back",
+    "working", "works", "properly", "correctly", "status", "state", "room", "office", "over",
+}
+
+
+def object_only(reaction, agent, world):
+    """Why a reaction is only about one of the room's ordinary objects, or "".
+
+    At 7:05 both agents reacted to the time clock (Adam: "check the time_clock
+    in the reception"; Eve: "go to the reception to check the time_clock with
+    Adam Beck"), and Eve's started a 70-second conversation in which Adam made
+    up work he had done. The board is excluded (it has its own rules), and so is
+    anything that also does something ("fix the broken coffee machine")."""
+    text = (reaction or "").lower()
+    if TASK_ID.search(text) or project_board.mentions_board_explicitly(text):
+        return ""
+    objects = {name for loc in world["locations"].values() for name in loc["objects"]
+               if name != project_board.BOARD_OBJECT}
+    named = [o for o in sorted(objects) if o in text or o.replace("_", " ") in text]
+    if not named:
+        return ""
+    names = named + list(world["locations"]) + [
+        part.lower() for a in world["agents"].values() for part in a["name"].split()]
+    for name in sorted(names, key=len, reverse=True):
+        for form in {name.lower(), name.lower().replace("_", " ")}:
+            text = re.sub(rf"\b{re.escape(form)}\b", " ", text)
+    rest = set(re.findall(r"[a-z]+", text)) - _ROUTINE_WORDS
+    return "" if rest else f"only about the {named[0].replace('_', ' ')}"
+
+
+def aim_at_owner(rt, reaction, world):
+    """A reaction about a teammate's task goes to that teammate.
+
+    "Check on T-2 progress and confirm if it affects T-1 or T-5" (T-2 is Eve's)
+    named nobody, so Adam spent 15 minutes on it alone in his office. Asking
+    Eve is how he'd find out; the conversation cooldown is skipped for a task id."""
+    if not reaction or _named_teammate(reaction, rt.agent, world) \
+            or project_board.mentions_board_explicitly(reaction):
+        return reaction
+    task = project_board.teammate_task(world, rt.agent["id"], reaction)
+    if task is None:
+        return reaction
+    owner = world["agents"][task["assignee"]]["name"]
+    return f"talk with {owner} about {task['id']}: {reaction}"
+
+
 def note_board_use(rt, current_time):
     """Remember when the agent last used the board (see pointless_reaction)."""
     if rt.agent["interacting_with"] == project_board.BOARD_OBJECT:
         rt.last_board_at = rt.planner._parse_time(current_time)
 
 
-def drop_spent_target(rt, current_time):
+def drop_spent_target(rt, current_time, world=None):
     """A planned "collaborate with Eve" step right after the two of them talked
     can't become a conversation (the conversation cooldown), so following Eve
-    only means standing in her office in silence. Do the step in the agent's
-    own office instead, until the cooldown is over."""
+    only means standing in her office in silence. The talk was the meeting:
+    the agent goes back to their own work in their own office instead, until
+    the cooldown is over. (Eve spent 8:10 "attending a stand-up meeting with
+    Adam Beck" alone in her office, right after the stand-up talk.)"""
     chunk = rt.chunk
     if (not chunk or not chunk.get("target_agent") or chunk.get("is_reaction")
             or chunk.get("pinned") or chunk.get("board_work")):
@@ -610,8 +689,11 @@ def drop_spent_target(rt, current_time):
     target = chunk["target_agent"]
     if not _talked_recently_ids(rt.agent["id"], target, rt.planner._parse_time(current_time)):
         return
-    log.debug(f"{rt.tag} just talked with {target}; doing '{chunk['activity']}' in their own office")
     relocate(rt, rt.agent.get("office") or rt.agent["current_location"], current_time)
+    start = rt.override["start_time"]
+    rt.override["activity"] = f"{start}: {own_work(rt, world)}"
+    log.debug(f"{rt.tag} just talked with {target}; instead of '{chunk['activity']}': "
+              f"{rt.override['activity']}")
 
 
 def teammates_here(rt, world):
@@ -810,7 +892,15 @@ def replan_rest_of_day(rt, start, reason, world, label, extra_guidance=""):
     If the agent has tasks on the board, the new plan is built around them.
     Returns True if the new plan was used."""
     done, remaining = rt.planner.split_plan(rt.broad_chunks, start)
+    kept = teammate_blocks(rt, remaining)
     guidance = rt.planner.task_guidance(rt.agent, world) + extra_guidance
+    if kept:
+        lines = "\n".join(f"        - {c['activity']}" for c in kept)
+        guidance += f"""
+        Keep these plans with teammates at the same time and place; the teammate
+        is counting on them:
+{lines}
+"""
 
     with timed(f"{rt.tag} {label} (LLM)"):
         items = rt.planner.regenerate_plan(
@@ -822,6 +912,7 @@ def replan_rest_of_day(rt, start, reason, world, label, extra_guidance=""):
         log.warn(f"{rt.tag}: replan unusable, keeping old plan")
         return False
 
+    new_chunks = rt.planner.keep_blocks(new_chunks, kept)
     new_chunks = rt.planner.cap_board_blocks(new_chunks)
     new_chunks = rt.planner.add_task_checkpoints(
         new_chunks, rt.agent, project_board.open_tasks_for(world, rt.agent["id"])
@@ -835,6 +926,23 @@ def replan_rest_of_day(rt, start, reason, world, label, extra_guidance=""):
     for chunk in new_chunks:
         log.debug(f"    {chunk['activity']}")
     return True
+
+
+def teammate_blocks(rt, remaining):
+    """Remaining plan blocks with a teammate that a replan should keep: planned
+    work or meetings with them (not reactions or board visits), except ones
+    that start within the conversation cooldown of their last talk (they just
+    covered it; see replan_after_conversation)."""
+    out = []
+    for c in remaining:
+        target = c.get("target_agent")
+        if not target or c.get("is_reaction") or c.get("board_work") or c.get("pinned"):
+            continue
+        start = rt.planner._parse_time(c.get("start_time"))
+        if start is None or _talked_recently_ids(rt.agent["id"], target, start):
+            continue
+        out.append(c)
+    return out
 
 
 def replan_after_conversation(rt, commitment, current_time, world, partner=None):
@@ -1003,6 +1111,18 @@ def apply_chunk(rt, world):
     world["agents"][rt.agent["id"]] = rt.agent  # keep world in sync
 
 
+def refresh_board_step_text(rt, world):
+    """Second step of a board visit: the visit isn't redone (no LLM), but the
+    shown action follows the board, so "starting T-1 (move it to in progress)"
+    becomes "reporting progress on T-1 (already in progress)" once it has."""
+    if rt.agent["interacting_with"] != project_board.BOARD_OBJECT or not rt.chunk.get("board_work"):
+        return
+    current = project_board.reconcile_activity(world, rt.agent["id"], rt.chunk["activity"])
+    if current != rt.chunk["activity"]:
+        update_agent_state(rt.agent, {**rt.chunk, "activity": current}, world,
+                           location=rt.agent["current_location"])
+
+
 def react(rt, step, current_time, world):
     """React (paper 4.3.1): do the reaction now, as a short block, and, with
     REACT_REPLANS, regenerate the rest of the day from when it ends, so the plan
@@ -1048,6 +1168,7 @@ def act_phase(rt, step, current_time, world):
                     log.debug(f"{rt.tag} act: target still here, skipping update")
             else:
                 log.debug(f"{rt.tag} act: same chunk as last step, skipping update")
+                refresh_board_step_text(rt, world)
             return
 
         apply_chunk(rt, world)

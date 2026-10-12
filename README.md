@@ -183,7 +183,10 @@ pattern for objects:
    `done_when` is optional. Tasks are kept to a few hours of work. The
    handoff note goes with the assignment notice. A note can't contradict the
    board: "T-2 can start since T-1 is complete" is refused while T-1 is in
-   progress (the same goes for "approved" and "in review").
+   progress (the same goes for "approved" and "in review"). A note is for a
+   teammate to act on, so one that only narrates what the writer is doing
+   ("Eve is currently addressing bugs") is refused unless it asks something or
+   names the teammate it is for.
 9. **One task at a time.** An agent can have one task in progress; to start
    another they move the current one to review or blocked. One visit starts at
    most one task, so a WIP refusal is reported once. Re-sending a status
@@ -191,7 +194,11 @@ pattern for objects:
    are things to build or ship: titles that describe a meeting or a review are
    refused. Notes can go on a task or on the board itself. Several refusals for
    the same mistake in one visit are reported as one ("T-2 is not in review
-   (same for T-3, T-4)").
+   (same for T-3, T-4)"). An agent holds at most `MAX_OPEN_TASKS_PER_AGENT` (3)
+   open tasks: past that, a task they add stays unassigned for whoever is free,
+   and the board shows each person's open-task count. Reactions follow the same
+   rule: "start working on T-5" while T-1 is in progress (or while T-5 waits on
+   another task) is ignored instead of replanning the day around it.
 10. **Conversations.** Both speakers see what the board says about them and each
     other, so they talk about specific tasks. After a talk both remember it
     ("Adam and Eve talked at 10:25 about …"); the same two agents don't start
@@ -216,12 +223,24 @@ pattern for objects:
     doesn't change the board; something a speaker says they already did ("I've
     approved T-1") is not taken as a commitment. A conversation ends when a
     speaker starts repeating themselves (half their words the same as an earlier
-    line). Right after two agents talk, a planned "collaborate with" step is done
-    in the agent's own office instead of following the teammate around in
-    silence, and the replan is told they just talked.
+    line), or claims to have already done what they promised earlier in the
+    same talk ("I'll outline the API" ... "I've outlined the API"; nothing gets
+    done while two agents talk), in which case that line is dropped. Right after
+    two agents talk, a planned "collaborate with" or meeting step becomes the
+    agent's own work in their own office (the talk was the meeting), and the
+    replan is told they just talked. Every replan keeps the remaining plans
+    with a teammate (a stand-up, "collaborate with Adam 10:15-11:30") at their
+    time, putting them back if the new plan dropped them, except ones within the
+    conversation cooldown of their last talk. A reaction about a teammate's task
+    that names nobody ("check on T-2 progress", T-2 being Eve's) becomes a talk
+    with that teammate.
 11. **No gaps.** Replans must cover the rest of the day without gaps; if one
-    still leaves a gap, the agent keeps working on their in-progress task in
-    their office until the next block starts.
+    still leaves a gap, the agent keeps working on their in-progress task (or
+    prepares for the next one they can start) in their office until the next
+    block starts. When a work block is broken into hours and 5-15 minute steps,
+    the prompt names the task the agent is on, and steps that would wander off
+    to the board or a "project management tool" are dropped (board visits are
+    planned on their own).
 12. **Dependencies.** A task lists only the tasks it truly can't start without
     (a page can be built against mock data before the API exists). When none of
     an agent's tasks can start, the board says so and points at `edit_task` to
@@ -241,7 +260,12 @@ pattern for objects:
     and is one step (one board LLM call), never broken into 5-minute pieces; the
     day starts with a 5-minute clock-in instead of an hour of filler. Task
     titles lose a copied "T-1:" prefix, and a board reply that runs out of
-    tokens in its reason still keeps its actions.
+    tokens in its reason still keeps its actions. A plan block that gives a task
+    the wrong title ("T-1 'Backend data structure'") gets the real one (a
+    shortened title is fine), and a planned "approve T-1" while T-1 isn't in
+    review becomes a check on T-1 when the agent gets to the board. The action
+    shown in the log follows the board too ("reporting progress on T-2 (already
+    in progress)" instead of a stale "starting T-2").
 14. **Reactions (paper 4.3.1).** When an agent reacts, it carries out the
     reaction as a short block and then regenerates the rest of its day from
     when that block ends (`REACT_REPLANS`; False brings back the old 10-minute
@@ -251,7 +275,10 @@ pattern for objects:
     restatement of the current plan step (including "go to the board" while the
     step is a board visit) or a "continue ..." reaction, and
     going to update the board while at it or within
-    `BOARD_REACTION_GAP_MINUTES` of using it.
+    `BOARD_REACTION_GAP_MINUTES` of using it. A reaction that is only about one
+    of the room's ordinary objects ("check the time_clock", "go to reception to
+    check the time_clock with Adam") is ignored too; one that does something
+    with it ("fix the broken coffee machine") is not.
 15. **Reflection and conversation.** Board memories feed reflection, reactions and
    conversations like any other memory. Changes on the board (a task moving to
    review, a new note) are new observations for whoever walks up next, so they can

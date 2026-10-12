@@ -443,6 +443,7 @@ class Planner:
         chunks = []
         for activity in daily_plan:
             activity = self.drop_unknown_task_ids(activity.strip().rstrip("."), world)
+            activity = self.correct_task_titles(activity, world)
             duration = self.extract_duration(activity)
             if self._CLOCK_IN.search(activity) and not self._HAS_END.search(activity):
                 duration = CLOCK_IN_MINUTES
@@ -494,6 +495,79 @@ class Planner:
             activity = project_board.strip_unknown_task_ids(world, activity)
             log.debug(f"plan named tasks that aren't on the board ({', '.join(unknown)}): {activity}")
         return activity
+
+    @staticmethod
+    def correct_task_titles(activity, world):
+        """Give a task named in a plan block its real title. Eve's plan had
+        "review and approve T-1 'Backend data structure'" for T-1 'Design and
+        implement the API for the company website'."""
+        fixed = project_board.correct_task_titles(world, activity)
+        if fixed != activity:
+            log.debug(f"plan had a task's title wrong: {activity!r} -> {fixed!r}")
+        return fixed
+
+    def keep_blocks(self, chunks, kept):
+        """Put back plans with teammates that a replan dropped.
+
+        Replanning rewrites the whole rest of the day, and plans with a teammate
+        got lost on the way: Eve's 8:00 stand-up with Adam and her 10:15 work with
+        him on the contact form both disappeared, and the run had a single
+        conversation in 30 steps. Each kept block is put back at its time unless
+        the new plan already has that teammate at an overlapping time; whatever
+        overlaps it is cut around it."""
+        out = list(chunks)
+        for k in kept:
+            ks = self._parse_time(k.get("start_time"))
+            if ks is None:
+                continue
+            ke = ks + timedelta(minutes=k.get("duration") or 0)
+
+            def overlaps(c):
+                cs = self._parse_time(c.get("start_time"))
+                if cs is None:
+                    return False
+                return cs < ke and ks < cs + timedelta(minutes=c.get("duration") or 0)
+
+            if any(c.get("target_agent") == k["target_agent"] and overlaps(c) for c in out):
+                continue
+            rebuilt = []
+            for c in out:
+                if not overlaps(c):
+                    rebuilt.append(c)
+                    continue
+                cs = self._parse_time(c["start_time"])
+                ce = cs + timedelta(minutes=c.get("duration") or 0)
+                before = int((ks - cs).total_seconds() // 60)
+                after = int((ce - ke).total_seconds() // 60)
+                if before >= 5:
+                    rebuilt.append(self._retimed(c, cs, before))
+                if after >= 5:
+                    rebuilt.append(self._retimed(c, ke, after))
+            rebuilt.append(dict(k))
+            out = sorted(rebuilt, key=lambda c: self._parse_time(c.get("start_time")) or datetime.min)
+            log.debug(f"kept a plan with a teammate the replan dropped: {k['activity']}")
+        return out
+
+    @staticmethod
+    def work_focus(agent, world):
+        """The task the agent's work time is for right now, as one sentence, or "".
+        Breaking "review and update any frontend tasks" into 10-minute steps
+        without it gave "prioritize task list", "update task status in project
+        management tool" and "address high-priority bugs" (there were none)."""
+        if not world or "project" not in world:
+            return ""
+        name = agent["name"]
+        mine = project_board.open_tasks_for(world, agent["id"])
+        busy = [t for t in mine if t["status"] == "in_progress"]
+        if busy:
+            t = busy[0]
+            return f"{name} is working on {t['id']} '{t['title']}' (in progress)."
+        ready = [t for t in mine if t["status"] == "todo" and not project_board.task_waits(world, t)]
+        if ready:
+            t = ready[0]
+            return (f"{name}'s next task is {t['id']} '{t['title']}' (not started yet; "
+                    f"starting it happens at the project board).")
+        return ""
 
     def resolve_location(self, activity, agent, world=None, default=None):
         return self.resolve_location_keywords(activity, agent, default=default)
@@ -762,8 +836,21 @@ class Planner:
         named = re.search(rf"\b{re.escape(target)}\b", activity, re.IGNORECASE)
         return target if named or self._TOGETHER.search(activity) else None
 
-    def decompose_chunks(self, chunks, agent):
-        """Broad blocks -> one chunk per hour (paper: hour-long chunks)."""
+    def _focus_text(self, chunk, focus):
+        """Task context for breaking a work block down. Not for breaks, board
+        visits or clocking in/out, which are about something else."""
+        if not focus or chunk.get("board_work") or self._BREAK.search(chunk.get("activity") or ""):
+            return ""
+        return f"""
+            Context: {focus}
+            If the activity is general work, make the actions concrete steps of
+            that task. Don't add actions about to-do lists, task statuses or
+            project management tools: the project board is updated on separate visits.
+"""
+
+    def decompose_chunks(self, chunks, agent, focus=""):
+        """Broad blocks -> one chunk per hour (paper: hour-long chunks).
+        `focus` (work_focus) says which task the agent's work time is for."""
         decomposed_chunks = []
 
         for chunk in chunks:
@@ -792,7 +879,7 @@ class Planner:
 
             Duration:
             {chunk["duration"]} minutes
-
+{self._focus_text(chunk, focus)}
             Example:
 
             Activity:
@@ -813,6 +900,7 @@ class Planner:
                 self._chunk_from_activity(activity, agent, chunk, duration=60)
                 for activity in self._parse_numbered(llm.generate(prompt))[:hours]
             ]
+            hour_chunks = self._drop_board_detours(hour_chunks, chunk)
             self._fit_to_block(hour_chunks, chunk)
             decomposed_chunks.extend(hour_chunks)
 
@@ -846,8 +934,34 @@ class Planner:
             return False
         return start <= now < start + timedelta(minutes=chunk.get("duration") or 0)
 
-    def decompose_hour_chunks(self, hour_chunks, agent):
-        """Hour chunks -> 5-15 minute actions (paper: finer-grained actions)."""
+    _PM_TOOL = re.compile(r"\b(?:project management|task tracker|tracking tool|jira|trello|kanban)\b",
+                          re.IGNORECASE)
+
+    def _drop_board_detours(self, actions, parent):
+        """Inside a work block, a step like "update task status in project
+        management tool" sent Eve to the board for an unplanned visit (an LLM
+        call, and a note about bugs that didn't exist). Board visits are
+        planned on their own, so such steps are dropped; the step before
+        absorbs the time, and if the first one goes, the next one starts in its place."""
+        if parent.get("board_work") or not actions:
+            return actions
+        kept = [a for a in actions
+                if not project_board.mentions_board_explicitly(a["activity"])
+                and not self._PM_TOOL.search(a["activity"])]
+        if len(kept) == len(actions):
+            return actions
+        log.debug(f"dropped board steps from a work block: "
+                  f"{[a['activity'] for a in actions if a not in kept]}")
+        if kept and kept[0] is not actions[0] and actions[0].get("start_time"):
+            first, start = dict(kept[0]), actions[0]["start_time"]
+            first["activity"] = self._TIME_PREFIX.sub(f"{start}: ", first["activity"], count=1)
+            first["start_time"] = start
+            kept[0] = first
+        return kept
+
+    def decompose_hour_chunks(self, hour_chunks, agent, focus=""):
+        """Hour chunks -> 5-15 minute actions (paper: finer-grained actions).
+        `focus` (work_focus) says which task the agent's work time is for."""
         minute_chunks = []
 
         for chunk in hour_chunks:
@@ -865,7 +979,7 @@ class Planner:
 
             Activity:
             {chunk["activity"]}
-
+{self._focus_text(chunk, focus)}
             Example Input:
 
             4:00 pm: Review and polish a music composition
@@ -883,6 +997,7 @@ class Planner:
                 self._chunk_from_activity(activity, agent, chunk)
                 for activity in self._parse_numbered(llm.generate(prompt))
             ]
+            actions = self._drop_board_detours(actions, chunk)
             self._fill_durations(actions, hour_start=chunk.get("start_time"))
             minute_chunks.extend(actions)
 
@@ -1013,7 +1128,9 @@ class Planner:
 {self._board_rules(agent, world, observations_text)}
         Should {agent["name"]} react to the observation, and if so, what would be an appropriate reaction?
         A reaction is something {agent["name"]} does (go somewhere, talk to someone, work on
-        something), written as an action, not a line of dialogue.
+        something), written as an action, not a line of dialogue. People and changes
+        to the work are worth reacting to; the room's ordinary objects (a time clock,
+        a desk, a coffee machine) being used as usual are not.
 
         Answer in exactly this format:
         DECISION: 1 (continue the current plan) or 2 (react)
@@ -1029,16 +1146,22 @@ class Planner:
         a reaction can't be "approve my own T-1 to unblock Eve" (it was)."""
         if not world or "project" not in world:
             return ""
-        own = [t["id"] for t in project_board.open_tasks_for(world, agent["id"])]
+        mine = project_board.open_tasks_for(world, agent["id"])
+        own = [t["id"] for t in mine]
         facts = project_board.task_facts(world, project_board.task_ids_in(mentioned) + own)
         facts = "".join(f"\n        - {f}" for f in facts)
+        busy = [t["id"] for t in mine if t["status"] == "in_progress"]
+        wip = (f"\n        {agent['name']} works on one task at a time: {busy[0]} is in "
+               f"progress, so {agent['name']}'s other tasks wait until it goes to review."
+               if busy else "")
         return f"""
         {project_board.task_id_line(world)}
         How the project board works: tasks only change at the board in the
         conference room. The assignee moves their task todo -> in progress ->
         review; a teammate (never the assignee) approves it while it is in
         review; then the assignee moves it to done. A task that waits on another
-        can't start until that one is done.{facts}
+        can't start until that one is done. Questions about a teammate's task
+        go to that teammate.{wip}{facts}
 """
 
     def invalidate_summary(self):

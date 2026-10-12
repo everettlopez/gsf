@@ -32,11 +32,15 @@ def save_agent(agent):
     save_world(world)
 
 
+def _strip_time_prefix(activity):
+    """'8:05 am: check on T-2' -> 'check on T-2' (the shown action has no clock).
+    Only a leading time is cut: "talk with Eve about T-2: ..." keeps its first half."""
+    activity = re.sub(r"^\s*\d{1,2}:\d{2}\s*[ap]m\s*:\s*", "", activity, flags=re.IGNORECASE)
+    return activity.strip().rstrip(".")
+
+
 def update_agent_state(agent, current_chunk, world, location=None):
-    activity = current_chunk["activity"]
-    if ": " in activity:
-        activity = activity.split(": ", 1)[1]
-    activity = activity.strip().rstrip(".")
+    activity = _strip_time_prefix(current_chunk["activity"])
 
     target = current_chunk.get("target_agent")
 
@@ -175,6 +179,12 @@ def generate_interactions(agent, world, observations, planner, chunk=None):
                 room_objects[obj]["state"] = change["new_state"]
 
     if agent["interacting_with"] == project_board.BOARD_OBJECT:
+        # A planned board step the board has overtaken ("start T-2" once T-2 is
+        # already in progress) is shown as what the agent really does there,
+        # not left reading "starting T-2 (move it to in progress)".
+        current = project_board.reconcile_activity(world, agent["id"], activity)
+        if current != activity:
+            agent["current_action"] = action_to_present(_strip_time_prefix(current))
         # Using the board means reading it and (maybe) editing tasks.
         project_board.interact(agent, world, activity, planner=planner)
 
@@ -203,6 +213,16 @@ def action_to_present(action):
     verb = words[0].lower()
     if not verb.isalpha() or verb.endswith("ing"):
         return action                         # "let's ...", already "updating ..."
+
+    # Verb + gerund: "keep working on T-2" -> "still working on T-2", not
+    # "keeping working"; "start building X" -> "starting to build X".
+    second = words[1].lower() if len(words) > 1 else ""
+    if second.endswith("ing") and second.isalpha():
+        if verb in ("keep", "continue"):
+            return " ".join(["still"] + words[1:])
+        if verb in ("start", "begin"):
+            base = (getLemma(second, upos="VERB") or (second,))[0]
+            return " ".join([f"{verb}ning" if verb == "begin" else "starting", "to", base] + words[2:])
 
     # Inflect the lemma, so "updated" becomes "updating", not "updateding".
     lemma = (getLemma(verb, upos="VERB") or (verb,))[0]

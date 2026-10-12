@@ -136,7 +136,9 @@ def _generate_line(speaker, listener, current_time, status, history, intent, wor
     Only talk about work as it really stands: {name} must not claim to have
     built, reviewed or approved anything that isn't there, and a task marked todo
     has not been started. If a memory (even something {name} said earlier)
-    disagrees with the board, the board is right.
+    disagrees with the board, the board is right. Nothing gets done while they
+    talk: anything {name} or {other} says they will do is still not done when
+    the conversation ends, so {name} never says it is finished.
     {ask}
     """
 
@@ -179,6 +181,28 @@ def _similar(a, b, threshold=REPEAT_SIMILARITY):
     return len(wa & wb) / len(wa | wb) >= threshold
 
 
+_PROMISE = re.compile(r"\b(?:i'?ll|i will|i'?m going to|let me)\b", re.IGNORECASE)
+_DONE_CLAIM = re.compile(r"\b(?:i'?ve|i have|i just)\s+(?:already\s+|just\s+)?\w+ed\b[^.!?]*",
+                         re.IGNORECASE)
+
+
+def claims_promised_work(line, earlier):
+    """Does `line` say the speaker already did what they promised earlier in
+    this same conversation? Nothing happens while two agents talk, so it is
+    made up: Adam said "I'll start by outlining the API endpoints and database
+    structure" and, one line later, "I've outlined the API endpoints and
+    database structure", which Eve then planned her morning around."""
+    claim = _DONE_CLAIM.search(line)
+    if not claim:
+        return False
+    said = _words(claim.group(0)) - {"i've", "have", "just", "already", "the", "and"}
+    for promise in earlier:
+        if _PROMISE.search(promise) and said:
+            if len(said & _words(promise)) / len(said) >= 0.5:
+                return True
+    return False
+
+
 def run_conversation(initiator, partner, current_time, reaction, world=None):
     """
     Run a full conversation. Both arguments are AgentRuntime objects.
@@ -204,6 +228,11 @@ def run_conversation(initiator, partner, current_time, reaction, world=None):
         # for T-1" in new words, for 60 more seconds of LLM calls.
         if any(_similar(line, t) for who, t in history if who == sname):
             log.debug(f"{speaker.tag} repeated themselves, ending")
+            break
+
+        if claims_promised_work(line, [t for who, t in history if who == sname]):
+            # Dropped, not remembered: neither agent should believe it.
+            log.debug(f"{speaker.tag} claimed to have already done what they just promised, ending: {line}")
             break
 
         history.append((sname, line))
