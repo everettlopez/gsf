@@ -10,11 +10,12 @@ Fixes for what the third debug run.log (18:11, 30 steps) and world.json showed:
    both went back to the board right after talking (third visit in 20 min).
 4. Right after they talked, Eve's plan still said "collaborate with Adam
    7:30-8:00", so she stood silently in his office for half an hour.
-5. Every task had an empty done_when, and T-1 was "the whole backend API".
+5. T-1 was "the whole backend API" (done_when stays optional).
 6. Turns 3-6 of a conversation restated the same thing in new words.
 """
 
 import copy
+import json
 
 import pytest
 
@@ -213,22 +214,26 @@ def test_the_replan_after_a_talk_knows_they_just_talked(fake_llm, isolated_data,
 
 
 # --- 5. tasks say when they are done, and stay small -------------------------------
-def test_a_new_task_needs_done_when(w):
+def test_a_new_task_does_not_need_done_when(w):
+    """done_when is optional: requiring it stopped every task from being created
+    (18:48 run: "couldn't create_task: needs done_when" at every board visit)."""
     done, refused = pb.apply_actions(w, w["agents"]["adam"], [
-        {"action": "create_task", "title": "Design and implement backend API for company website",
-         "area": "backend"}])
-    assert done == []
-    assert refused == ["create_task: needs done_when: how the team will know it is finished"]
+        {"action": "create_task", "title": "Auth endpoints", "area": "backend",
+         "assign_to_self": True}])
+    assert refused == []
+    assert done == ["Adam Beck added task T-1 'Auth endpoints' (backend, medium priority) "
+                    "to the project board and took it on."]
 
-    done, refused = pb.apply_actions(w, w["agents"]["adam"], [
+    pb.apply_actions(w, w["agents"]["adam"], [
         {"action": "create_task", "title": "Contact form endpoint", "area": "backend",
          "done_when": "POST /contact stores a message and returns 201"}])
-    assert refused == [] and pb.get_task(w, "T-1")["done_when"].startswith("POST /contact")
+    assert pb.get_task(w, "T-2")["done_when"].startswith("POST /contact")   # still kept if given
 
 
 def test_board_prompt_asks_for_small_tasks(w):
     prompt = " ".join(pb.build_prompt(w["agents"]["adam"], w, "check the board", "summary", "").split())
-    assert "Keep each task to a few hours of work with a clear done_when" in prompt
+    assert "Keep each task to a few hours of work" in prompt
+    assert "done_when" not in prompt.split("Rules:")[1].split("Keep each task")[1].split("Do only")[0]
     assert 'instead of one "build the whole backend" task' in prompt
 
 
@@ -279,3 +284,32 @@ def test_a_conversation_with_new_content_runs_on(fake_llm, isolated_data, w, mon
     eve, adam = main.make_runtime("eve", w), main.make_runtime("adam", w)
     history = run_conversation(eve, adam, "9:00 am", "ask Adam about T-1", w)
     assert len(history) == 3
+
+
+# --- 18:48 run --------------------------------------------------------------------------
+def test_agents_create_tasks_at_the_board_without_done_when(fake_llm, isolated_data, w, monkeypatch):
+    """The 7:05 board visit from the run, where every create_task was refused."""
+    def gen(prompt, options=None, format=None):
+        if isinstance(format, dict) and "actions" in format["properties"]:
+            return json.dumps({"actions": [
+                {"action": "create_task", "title": "Auth endpoints", "area": "backend",
+                 "priority": "high", "assign_to_self": True},
+                {"action": "create_task", "title": "Contact form endpoint", "area": "backend",
+                 "priority": "high", "assign_to_self": True}],
+                "reason": "Adam's area has no tasks yet."})
+        return fake_generate(prompt, options, format)
+
+    monkeypatch.setattr(llm, "generate", gen)
+    adam = w["agents"]["adam"]
+    done = pb.interact(adam, w, "review any new backend tasks added to the project board",
+                       planner=main.Planner(adam))
+    assert len(done) == 2 and [t["id"] for t in pb.get_project(w)["tasks"]] == ["T-1", "T-2"]
+
+
+def test_going_to_the_board_while_the_plan_is_a_board_visit_is_the_plan(fake_llm, isolated_data, w):
+    rt = main.make_runtime("adam", w)
+    rt.agent["current_location"] = "reception"
+    rt.chunk = {"activity": "review any new backend tasks added to the project board from "
+                            "7:05 am to 7:20 am", "board_work": True}
+    assert main.pointless_reaction(rt, "go to the conference room to review the project board",
+                                   "7:05 am", w) == "that is the plan already"

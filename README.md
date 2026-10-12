@@ -179,8 +179,8 @@ pattern for objects:
    task already in progress becomes a progress report, and "start T-2" while
    T-1 is still in progress asks whether T-1 is finished first.
 8. **Notes.** Handing a task to a teammate, blocking a task, and asking for
-   review all require a note (what it needs, what blocks it, what to check), and
-   a new task needs a `done_when`. Tasks are kept to a few hours of work. The
+   review all require a note (what it needs, what blocks it, what to check).
+   `done_when` is optional. Tasks are kept to a few hours of work. The
    handoff note goes with the assignment notice. A note can't contradict the
    board: "T-2 can start since T-1 is complete" is refused while T-1 is in
    progress (the same goes for "approved" and "in review").
@@ -248,7 +248,8 @@ pattern for objects:
     detour). `REACT_COOLDOWN_STEPS` is 2, the reaction's own 10 minutes.
     Reactions that only repeat what is already happening are ignored without
     starting the cooldown: the reaction the agent is already carrying out, a
-    restatement of the current plan step or a "continue ..." reaction, and
+    restatement of the current plan step (including "go to the board" while the
+    step is a board visit) or a "continue ..." reaction, and
     going to update the board while at it or within
     `BOARD_REACTION_GAP_MINUTES` of using it.
 15. **Reflection and conversation.** Board memories feed reflection, reactions and

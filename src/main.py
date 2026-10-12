@@ -581,6 +581,10 @@ def pointless_reaction(rt, reaction, current_time, world):
         return ""
     if chunk.get("board_work") and rt.agent["interacting_with"] == project_board.BOARD_OBJECT:
         return "already at the board"
+    if chunk.get("board_work") and not chunk.get("is_reaction"):
+        # "go to the conference room to review the project board" while the
+        # planned step is a board visit: the plan already takes them there.
+        return "that is the plan already"
     now = rt.planner._parse_time(current_time)
     if (rt.last_board_at is not None and now is not None
             and now - rt.last_board_at < timedelta(minutes=BOARD_REACTION_GAP_MINUTES)):

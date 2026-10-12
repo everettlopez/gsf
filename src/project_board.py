@@ -963,10 +963,6 @@ def apply_action(world, agent, action):
     aid, name = agent["id"], agent["name"]
 
     if kind == "create_task":
-        if not _clean(action.get("done_when")):
-            # Every task in the run had an empty done_when, so no reviewer could
-            # tell what "finished" meant.
-            raise BoardError("needs done_when: how the team will know it is finished")
         t = create_task(world, aid, action.get("title"), action.get("description", ""),
                         action.get("area", "general"), action.get("priority", "medium"),
                         action.get("depends_on") or (), action.get("done_when", ""),
@@ -1188,9 +1184,9 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
     - Review is for finished work. A task in review stays there until a teammate
       approves it or asks for changes in a note.
     - Prefer tasks in {agent['name']}'s own area; leave other areas for teammates.
-    - Keep each task to a few hours of work with a clear done_when: split a big
-      area into separate tasks ("auth endpoints", "contact form endpoint",
-      "deploy the API") instead of one "build the whole backend" task.
+    - Keep each task to a few hours of work: split a big area into separate
+      tasks ("auth endpoints", "contact form endpoint", "deploy the API") instead
+      of one "build the whole backend" task.
     - Do only what the current activity calls for; doing nothing is fine.
     """
 
