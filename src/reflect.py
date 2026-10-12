@@ -1,7 +1,7 @@
 """
 reflect.py - reflection (paper section 4.2)
 
-When it runs (see main.py, REFLECTION_TIMES) an agent:
+When it runs (see main.py, REFLECTION_THRESHOLD) an agent:
     1. takes its most recent unreflected observations (paper: the last 100),
     2. asks the LLM for the 3 most salient high-level questions about them,
     3. retrieves memories relevant to each question,

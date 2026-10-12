@@ -23,7 +23,7 @@ AGENT_PROFILES = {
 
         Adam Beck's team has been asked to build and deploy the company website. Adam owns the backend side of it: the API, the data it needs, and getting the site deployed. Eve Smith owns the frontend.
 
-        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Adam checks the project board at the start of each workday and adds any backend work the website still needs. When Adam starts, finishes, or gets stuck on a task, he walks to the project board to update it, and he updates his tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Adam looks it over with them and approves it at the board if it is ready. When Adam hands a task to a teammate, he leaves a note on it saying what it needs.
+        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board and take on unassigned tasks in their own area. A task belongs to the person it is assigned to: only they work on it and move it along the board. When Adam wants to help with one of Eve's tasks, he offers to work on it together with her, and it is her call. Adam checks the project board at the start of each workday and adds any backend work the website still needs. When Adam starts, finishes, or gets stuck on a task, he walks to the project board to update it, and he updates his tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Adam looks it over with them and approves it at the board if it is ready. When Adam hands a task to a teammate, he leaves a note on it saying what it needs.
 
         Adam Beck works closely with Eve Smith and enjoys collaborating on technical challenges.
 
@@ -47,7 +47,7 @@ AGENT_PROFILES = {
 
         Eve Smith's team has been asked to build and deploy the company website. Eve owns the frontend side of it: the pages, the layout, and how the site looks and feels. Adam Beck owns the backend.
 
-        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board, take on tasks, and update their status. Eve checks the project board at the start of each workday and adds any frontend work the website still needs. When Eve starts, finishes, or gets stuck on a task, she walks to the project board to update it, and she updates her tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Eve looks it over with them and approves it at the board if it is ready. When Eve hands a task to a teammate, she leaves a note on it saying what it needs.
+        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board and take on unassigned tasks in their own area. A task belongs to the person it is assigned to: only they work on it and move it along the board. When Eve wants to help with one of Adam's tasks, she offers to work on it together with him, and it is his call. Eve checks the project board at the start of each workday and adds any frontend work the website still needs. When Eve starts, finishes, or gets stuck on a task, she walks to the project board to update it, and she updates her tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Eve looks it over with them and approves it at the board if it is ready. When Eve hands a task to a teammate, she leaves a note on it saying what it needs.
 
         Eve Smith works closely with Adam Beck, and prefers collaborating one-on-one or in writing on technical challenges.
 
@@ -249,8 +249,13 @@ class Planner:
         startable = [t for t in open_tasks
                      if t["status"] != "todo" or not project_board.task_waits(world, t)]
         pick = startable[0] if startable else None
+        # The fallback names the agent's own area: "the website's navigation
+        # bar" was shown to Adam (backend) too.
         example = (f"work on {pick['id']} '{pick['title']}' in the office from ..." if pick
-                   else "work on the website's navigation bar in the office from ...")
+                   else f"work on the website's {agent.get('area') or 'part'} in the office from ...")
+        owners = "".join(f"\n        - {line}"
+                         for line in project_board.ownership_lines(world, agent["id"]))
+        owners = f"\n        Who owns what:{owners}\n" if owners else ""
         known = [t["id"] for t in project_board.get_project(world)["tasks"]]
         ids = (f"The only tasks on the board are {', '.join(known)}; never name any other "
                f"task id (new work has to be added at the board first)."
@@ -258,9 +263,12 @@ class Planner:
         return f"""
         The project board, as {name} last saw it:
 {status}
-
+{owners}
         Plan the rest of the day around the project:
         - Name the task in each work block, e.g. "{example}". {ids}
+        - Work blocks are for {name}'s own tasks. A teammate's task only appears
+          as reviewing it with them, or working on it together with them (name
+          them) when they asked for help or agreed to it.
         - Don't plan work on a task that can't start yet because it waits on
           another; plan other work instead.
         - If {name}'s area has no tasks, or nothing is waiting for {name}, add a
@@ -443,7 +451,9 @@ class Planner:
         chunks = []
         for activity in daily_plan:
             activity = self.drop_unknown_task_ids(activity.strip().rstrip("."), world)
-            activity = self.correct_task_titles(activity, world)
+            activity = self.own_tasks_only(activity, agent, world)
+            if activity is None:
+                continue
             duration = self.extract_duration(activity)
             if self._CLOCK_IN.search(activity) and not self._HAS_END.search(activity):
                 duration = CLOCK_IN_MINUTES
@@ -496,15 +506,75 @@ class Planner:
             log.debug(f"plan named tasks that aren't on the board ({', '.join(unknown)}): {activity}")
         return activity
 
-    @staticmethod
-    def correct_task_titles(activity, world):
-        """Give a task named in a plan block its real title. Eve's plan had
-        "review and approve T-1 'Backend data structure'" for T-1 'Design and
-        implement the API for the company website'."""
-        fixed = project_board.correct_task_titles(world, activity)
+    def is_joint(self, activity, owners):
+        """Is this block done together with these teammates (named, and a
+        working-together verb), or a review of their task? Those are the only
+        ways a plan touches a teammate's task."""
+        if project_board.is_review_of_task(activity):
+            return True
+        named = all(re.search(rf"\b{re.escape(o.split()[0])}\b", activity, re.IGNORECASE)
+                    for o in owners)
+        return named and bool(self._TOGETHER.search(activity) or self._HELP.search(activity))
+
+    _HELP = re.compile(r"\bhelp(?:s|ed|ing)?\b", re.IGNORECASE)
+
+    def own_tasks_only(self, activity, agent, world):
+        """An agent's plan works on the agent's own tasks. Returns the block as
+        it should be, or None to leave it out.
+
+        In the run behind this, Adam's replan put Eve's T-2 into his day ("start
+        T-2 (move it to in progress)", "work on T-2 ...") and he spent the
+        morning sketching her home page. So, for each task id in a block:
+        - an id next to another task's title is fixed or dropped (fix_task_refs);
+        - a teammate's task is fine in a review of it, or in a block that works
+          on it together with them (they're named: "pair with Eve on T-2");
+        - otherwise a board step for it is left out (only the owner moves it),
+          and a work block about it becomes the agent's own work, at the same
+          time. A block that also names the agent's own tasks just loses the
+          teammate's id."""
+        if not world or "project" not in world:
+            return activity
+        fixed = project_board.fix_task_refs(world, activity)
         if fixed != activity:
-            log.debug(f"plan had a task's title wrong: {activity!r} -> {fixed!r}")
-        return fixed
+            log.debug(f"plan named a task by another task's title: {activity!r} -> {fixed!r}")
+            activity = fixed
+        theirs = project_board.teammate_task_ids(world, agent["id"], activity)
+        if not theirs:
+            return activity
+        tasks = {t["id"]: t for t in project_board.get_project(world)["tasks"]}
+        owners = {project_board.owner_name(world, tasks[tid]) for tid in theirs}
+        if self.is_joint(activity, owners):
+            return activity
+        mine = [tid for tid in project_board.task_ids_in(activity) if tid not in theirs]
+        if mine:
+            kept = project_board.strip_task_ids(activity, theirs, with_titles=True)
+        elif project_board.mentions_board_explicitly(activity):
+            kept = None
+        else:
+            span = self._SPAN.search(activity)
+            at = self._TIME_PREFIX.match(activity)
+            kept = ((at.group(0) if at else "") + self.own_work(agent, world)
+                    + (f" {span.group(0)}" if span else ""))
+        log.debug(f"{agent['name']}'s plan had a teammate's task ({', '.join(theirs)}): "
+                  f"{activity!r} -> {kept!r}")
+        return kept
+
+    @staticmethod
+    def own_work(agent, world):
+        """What the agent works on when nothing more specific is planned: the
+        task they have in progress, else the next one they can start, else
+        their own work."""
+        mine = project_board.open_tasks_for(world, agent["id"]) if world and "project" in world else []
+        working = [t for t in mine if t["status"] == "in_progress"]
+        ready = [t for t in mine if t["status"] == "todo" and not project_board.task_waits(world, t)]
+        if working:
+            return f"keep working on {working[0]['id']} '{working[0]['title']}'"
+        if ready:
+            # "focus on Adam Beck's own work" became "review Adam Beck's to-do list".
+            # (Not "start T-1": starting is a board step, and those words would
+            # send the agent to the board.)
+            return f"prepare for {ready[0]['id']} '{ready[0]['title']}' (read up and sketch the approach)"
+        return f"focus on {agent['name']}'s own work"
 
     def keep_blocks(self, chunks, kept):
         """Put back plans with teammates that a replan dropped.
@@ -797,9 +867,12 @@ class Planner:
 
         return plan
 
-    def _chunk_from_activity(self, activity, agent, parent, duration=None):
-        """Build a plan chunk from one parsed line, inheriting the parent's target."""
-        activity = activity.strip().rstrip(".")
+    def _chunk_from_activity(self, activity, agent, parent, duration=None, world=None):
+        """Build a plan chunk from one parsed line, inheriting the parent's target.
+        None if the line is a board step for a teammate's task (own_tasks_only)."""
+        activity = self.own_tasks_only(activity.strip().rstrip("."), agent, world)
+        if activity is None:
+            return None
         chunk = {
             "activity": activity,
             "location": self.resolve_location(activity, agent),
@@ -848,7 +921,7 @@ class Planner:
             project management tools: the project board is updated on separate visits.
 """
 
-    def decompose_chunks(self, chunks, agent, focus=""):
+    def decompose_chunks(self, chunks, agent, focus="", world=None):
         """Broad blocks -> one chunk per hour (paper: hour-long chunks).
         `focus` (work_focus) says which task the agent's work time is for."""
         decomposed_chunks = []
@@ -896,10 +969,9 @@ class Planner:
             Return only a numbered list.
             """
 
-            hour_chunks = [
-                self._chunk_from_activity(activity, agent, chunk, duration=60)
-                for activity in self._parse_numbered(llm.generate(prompt))[:hours]
-            ]
+            hour_chunks = [c for c in (
+                self._chunk_from_activity(activity, agent, chunk, duration=60, world=world)
+                for activity in self._parse_numbered(llm.generate(prompt))[:hours]) if c]
             hour_chunks = self._drop_board_detours(hour_chunks, chunk)
             self._fit_to_block(hour_chunks, chunk)
             decomposed_chunks.extend(hour_chunks)
@@ -959,7 +1031,7 @@ class Planner:
             kept[0] = first
         return kept
 
-    def decompose_hour_chunks(self, hour_chunks, agent, focus=""):
+    def decompose_hour_chunks(self, hour_chunks, agent, focus="", world=None):
         """Hour chunks -> 5-15 minute actions (paper: finer-grained actions).
         `focus` (work_focus) says which task the agent's work time is for."""
         minute_chunks = []
@@ -993,10 +1065,9 @@ class Planner:
             5. 4:50 pm: Organize notes and clean the workspace.
             """
 
-            actions = [
-                self._chunk_from_activity(activity, agent, chunk)
-                for activity in self._parse_numbered(llm.generate(prompt))
-            ]
+            actions = [c for c in (
+                self._chunk_from_activity(activity, agent, chunk, world=world)
+                for activity in self._parse_numbered(llm.generate(prompt))) if c]
             actions = self._drop_board_detours(actions, chunk)
             self._fill_durations(actions, hour_start=chunk.get("start_time"))
             minute_chunks.extend(actions)
@@ -1154,6 +1225,8 @@ class Planner:
         wip = (f"\n        {agent['name']} works on one task at a time: {busy[0]} is in "
                f"progress, so {agent['name']}'s other tasks wait until it goes to review."
                if busy else "")
+        owners = "".join(f"\n        - {line}"
+                         for line in project_board.ownership_lines(world, agent["id"]))
         return f"""
         {project_board.task_id_line(world)}
         How the project board works: tasks only change at the board in the
@@ -1161,7 +1234,7 @@ class Planner:
         review; a teammate (never the assignee) approves it while it is in
         review; then the assignee moves it to done. A task that waits on another
         can't start until that one is done. Questions about a teammate's task
-        go to that teammate.{wip}{facts}
+        go to that teammate.{wip}{owners}{facts}
 """
 
     def invalidate_summary(self):
@@ -1248,6 +1321,40 @@ class Planner:
             "board_work": project_board.mentions_board_explicitly(reaction),
         }
 
+    @staticmethod
+    def _ownership_for_outcomes(agent, world):
+        if not world or "project" not in world:
+            return ""
+        lines = [line for line in project_board.ownership_lines(world, agent["id"])
+                 if line.endswith(".") and "tasks:" in line or line.startswith("Unassigned")]
+        if not lines:
+            return ""
+        return ("Whose tasks are whose: " + " ".join(lines).replace(f"{agent['name']}'s own", agent["name"] + "'s")
+                + " A person's commitment about someone else's task can only be to review it,"
+                  " or to work on it together with its owner when the owner agreed to that;"
+                  " moving it on the board or doing it alone is the owner's job, not theirs.")
+
+    def own_commitment(self, text, agent, world):
+        """What of a commitment is the agent's to keep. Adam "committed" to
+        "update the board once there is progress on T-2, T-3, and T-4" and to
+        "ensure T-2 is stable and meets the review criteria" (all Eve's): the
+        first sent him to the board to nag her in a note, the second put T-2 in
+        his plan. About a teammate's task, a commitment can be reviewing it or
+        working on it together with them (they're named); anything else is
+        dropped, or just loses that task when it is also about the agent's own."""
+        theirs = project_board.teammate_task_ids(world, agent["id"], text)
+        if not theirs:
+            return text
+        tasks = {t["id"]: t for t in project_board.get_project(world)["tasks"]}
+        owners = {project_board.owner_name(world, tasks[tid]) for tid in theirs}
+        if self.is_joint(text, owners):
+            return text
+        mine = [tid for tid in project_board.task_ids_in(text) if tid not in theirs]
+        kept = project_board.strip_task_ids(text, theirs, with_titles=True) if mine else ""
+        log.debug(f"{agent['name']}'s commitment was about a teammate's task "
+                  f"({', '.join(theirs)}): {text!r} -> {kept!r}")
+        return kept
+
     def extract_outcomes(self, transcript, agent_a, agent_b, world):
         """One call: shared meeting (location-pinned) + each agent's own commitment."""
         valid = list(world["locations"].keys())
@@ -1272,6 +1379,7 @@ class Planner:
         of view, including any time or place. Small talk is not a commitment, and
         neither is something they say they already did ("I've approved the task"):
         only what they will do next. Omit a person who committed to nothing.
+        {self._ownership_for_outcomes(agent_a, world)}
         """
         schema = {
             "type": "object",
@@ -1309,6 +1417,8 @@ class Planner:
                 text = future_part(c["commitment"].strip().rstrip("."))
                 if world and "project" in world:
                     text = project_board.strip_unknown_task_ids(world, text)
+                    person = agent_a if c["person"] == agent_a["name"] else agent_b
+                    text = self.own_commitment(text, person, world)
                 if text:
                     out["commitments"][c["person"]] = text
         except Exception as e:

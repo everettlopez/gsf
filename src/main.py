@@ -22,9 +22,10 @@ stream as a plan either way.
 On a reaction, only the plan from the current time onward is regenerated;
 what already happened today is kept (the chunk in progress is cut at "now").
 
-Reflection (paper section 4.2) runs twice per simulated day, at the times in
-REFLECTION_TIMES. Each agent reflects on what it has experienced since its last
-reflection, and the resulting insights go back into its memory stream.
+Reflection (paper section 4.2) runs when the importance of what an agent has
+perceived since its last reflection adds up to REFLECTION_THRESHOLD (150 in
+the paper, which works out to two or three times a day there). The insights go
+back into its memory stream.
 
 Project board (see project_board.py): when an agent takes on or finishes a
 task at the board, the rest of their day is replanned around their open tasks
@@ -61,9 +62,11 @@ NUM_STEPS = 30
 STEP_MINUTES = 5            # simulated minutes per step
 STEP_DELAY_SECONDS = 0      # wall-clock padding per step (0 = run flat out)
 
-# Reflection happens twice a day (paper 4.2: "two or three times a day").
-# Each time is reached once per simulated day; times before START_TIME are skipped.
-REFLECTION_TIMES = ["12:00 pm", "5:00 pm"]
+# Paper 4.2: an agent reflects when the summed importance of the events it
+# has perceived since its last reflection exceeds a threshold (150 in the
+# paper). Seeded memories don't count: they aren't events the agent perceived.
+# None turns reflection off.
+REFLECTION_THRESHOLD = 150
 
 # --- Efficiency shortcuts (NOT in the paper) --------------------------------
 
@@ -165,7 +168,7 @@ class AgentRuntime:
     retriever: MemoryRetriever
     planner: Planner
     reflector: Reflector
-    reflected_at: set = field(default_factory=set)   # REFLECTION_TIMES already handled
+    reflected_through: int = 0      # memory id: everything up to here counted for reflection
 
     # The plan, at three levels of detail. The two caches are keyed by
     # (start_time, activity), so a replan can never hit a stale entry.
@@ -228,7 +231,7 @@ def expand_hours(rt, broad, world=None):
 
     if bkey not in rt.hour_cache:
         with timed(f"{rt.tag} expand broad {bkey[0]} -> hours (LLM)"):
-            hours = p.decompose_chunks([broad], rt.agent, focus=p.work_focus(rt.agent, world))
+            hours = p.decompose_chunks([broad], rt.agent, focus=p.work_focus(rt.agent, world), world=world)
         if hours:
             p.create_plan(hours)
         # If the output didn't parse, fall back to the coarser chunk.
@@ -248,7 +251,7 @@ def expand_minutes(rt, hour, world=None):
 
     if hkey not in rt.minute_cache:
         with timed(f"{rt.tag} expand hour {hkey[0]} -> minutes (LLM)"):
-            minutes = p.decompose_hour_chunks([hour], rt.agent, focus=p.work_focus(rt.agent, world))
+            minutes = p.decompose_hour_chunks([hour], rt.agent, focus=p.work_focus(rt.agent, world), world=world)
         if minutes:
             p.create_plan(minutes)
         rt.minute_cache[hkey] = minutes or [hour]
@@ -366,19 +369,8 @@ def gap_block(rt, current_time, world=None):
 
 
 def own_work(rt, world):
-    """What the agent does when the plan has nothing specific: the task they
-    have in progress, else the next one they can start, else their own work."""
-    mine = project_board.open_tasks_for(world, rt.agent["id"]) if world else []
-    working = [t for t in mine if t["status"] == "in_progress"]
-    ready = [t for t in mine if t["status"] == "todo" and not project_board.task_waits(world, t)]
-    if working:
-        return f"keep working on {working[0]['id']} '{working[0]['title']}'"
-    if ready:
-        # "focus on Adam Beck's own work" became "review Adam Beck's to-do list".
-        # (Not "start T-1": starting is a board step, and the words would send
-        # the agent to the board.)
-        return f"prepare for {ready[0]['id']} '{ready[0]['title']}' (read up and sketch the approach)"
-    return f"focus on {rt.agent['name']}'s own work"
+    """See Planner.own_work."""
+    return rt.planner.own_work(rt.agent, world)
 
 
 def gap_hour(rt, broad, current_time, world=None):
@@ -1183,27 +1175,26 @@ def act_phase(rt, step, current_time, world):
 # ---------------------------------------------------------------------------
 # PHASE 4: REFLECT (twice a day) and per-step summary
 # ---------------------------------------------------------------------------
-def due_reflection_times(rt, current_time):
-    """Scheduled reflection times that have arrived and haven't run yet."""
-    now = rt.planner._parse_time(current_time)
-    return [
-        t for t in REFLECTION_TIMES
-        if t not in rt.reflected_at
-        and (scheduled := rt.planner._parse_time(t)) is not None
-        and now >= scheduled
-    ]
+def importance_since_reflection(rt):
+    """Summed importance of the events perceived since the last reflection
+    (paper 4.2). Plans and reflections aren't perceived events."""
+    return sum(m.importance for m in rt.stream.memories
+               if m.id > rt.reflected_through and m.memory_type == "observation")
 
 
 def reflect_phase(rt, current_time):
-    due = due_reflection_times(rt, current_time)
-    if not due:
+    if REFLECTION_THRESHOLD is None:
+        return
+    pending = importance_since_reflection(rt)
+    if pending < REFLECTION_THRESHOLD:
         return
 
-    rt.reflected_at.update(due)   # a late start still reflects once, not once per time
     log.reflection_header(rt.tag, current_time)
-
+    log.debug(f"{rt.tag} importance since last reflection: {pending} >= {REFLECTION_THRESHOLD}")
     with timed(f"{rt.tag} reflect (LLM x3+)"):
         reflections = rt.reflector.reflect()
+    # Counted either way, so a pass that finds nothing isn't retried every step.
+    rt.reflected_through = max((m.id for m in rt.stream.memories), default=0)
 
     if not reflections:
         log.event(f"{rt.tag} had nothing new to reflect on")
@@ -1231,7 +1222,7 @@ def main():
 
     log.banner(f"Generative Agents · {START_TIME} · {NUM_STEPS} steps x {STEP_MINUTES} min")
     log.info(f"  PAPER_STRICT={PAPER_STRICT} EAGER_DECOMPOSITION={EAGER_DECOMPOSITION} "
-             f"REACT_COOLDOWN_STEPS={REACT_COOLDOWN_STEPS} REFLECTION_TIMES={REFLECTION_TIMES}")
+             f"REACT_COOLDOWN_STEPS={REACT_COOLDOWN_STEPS} REFLECTION_THRESHOLD={REFLECTION_THRESHOLD}")
 
     current_time = START_TIME
     clock.set_time(current_time)
@@ -1240,9 +1231,9 @@ def main():
     _last_talk.clear()
 
     for rt in runtimes:
-        # A reflection time that is already behind us at start-up never fires.
-        start = rt.planner._parse_time(START_TIME)
-        rt.reflected_at = {t for t in REFLECTION_TIMES if rt.planner._parse_time(t) < start}
+        # What is already in the stream (the seeds, earlier days) was not
+        # perceived today and doesn't count toward the first reflection.
+        rt.reflected_through = max((m.id for m in rt.stream.memories), default=0)
         initial_planning(rt, world)
 
     try:

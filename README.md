@@ -55,7 +55,7 @@ Action
    ↓
 Memory Update
    ↓
-Reflection (twice a day)
+Reflection (when perceived importance adds up to 150)
 ```
 
 ---
@@ -279,7 +279,26 @@ pattern for objects:
     of the room's ordinary objects ("check the time_clock", "go to reception to
     check the time_clock with Adam") is ignored too; one that does something
     with it ("fix the broken coffee machine") is not.
-15. **Reflection and conversation.** Board memories feed reflection, reactions and
+15. **Everyone works on their own tasks.** A task belongs to its assignee:
+    only they work on it and move it on the board. The seeded identity says
+    so (profiles and seed memories), and every layer holds to it:
+    - the board: an agent only takes on tasks in their own area (`area` in
+      `world.json`; "general" work is anyone's); work for another area is
+      added unassigned for its owner, and can only be handed to them;
+    - plans: a work block names the agent's own tasks. A teammate's task only
+      appears in a review of it or in a block working on it together with the
+      teammate (they're named: "pair with Eve on T-2"). Otherwise a board step
+      for it is left out, and a work block about it becomes the agent's own work
+      at the same time. This holds for the hour and 5-15 minute steps too;
+    - a task id next to another task's title is the wrong id: it moves to the
+      task with that title, or is dropped and the described work stays;
+    - conversations: speakers are told whose tasks are whose, and that helping
+      with a teammate's task means offering to work on it together, which the
+      teammate can accept or turn down;
+    - promises: one about a teammate's task counts only if it's a review of it
+      or working on it together with them; "I'll get T-2 ready for review"
+      from someone who doesn't own T-2 is dropped.
+16. **Reflection and conversation.** Board memories feed reflection, reactions and
    conversations like any other memory. Changes on the board (a task moving to
    review, a new note) are new observations for whoever walks up next, so they can
    start a conversation there.
@@ -289,12 +308,16 @@ with the memory streams, and puts everyone back at reception for a new day.
 
 ## Reflection
 
-Agents reflect twice per simulated day (`REFLECTION_TIMES`, default 12:00 pm and
-5:00 pm). Each pass looks at the (up to) 100 most recent observations since the
-last reflection, asks for the 3 most salient questions, retrieves memories for
-each, and stores 5 insights as `reflection` memories that cite their sources.
-Reflections are retrieved like any other memory, and the agent's cached summary is
-rebuilt afterwards.
+As in the paper (section 4.2), an agent reflects when the importance of the
+events it has perceived since its last reflection adds up to
+`REFLECTION_THRESHOLD` (150, the paper's value; `None` turns reflection off).
+Seeded memories don't count toward the first one: they aren't events the agent
+perceived. Each pass looks at the (up to) 100 most recent observations, asks
+for the 3 most salient questions, retrieves memories for each, and stores 5
+insights as `reflection` memories that cite their sources. Reflections are
+retrieved like any other memory, and the agent's cached summary is rebuilt
+afterwards. How often this fires depends on how much an agent perceives: time
+at the board means many observations, so expect more passes on busy mornings.
 
 ## Tests
 

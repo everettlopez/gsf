@@ -65,7 +65,7 @@ def test_no_prompt_mentions_a_task_id_while_the_board_is_empty(isolated_data, mo
     monkeypatch.setattr(llm, "generate", gen)
     monkeypatch.setattr(llm, "embed", __import__("conftest").fake_embed)
     monkeypatch.setattr(main, "NUM_STEPS", 6)
-    monkeypatch.setattr(main, "REFLECTION_TIMES", [])
+    monkeypatch.setattr(main, "REFLECTION_THRESHOLD", None)
     main.timings.clear()
     main.main()
 

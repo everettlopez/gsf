@@ -353,19 +353,21 @@ def test_notes_that_only_narrate_are_refused(w, note, ok):
 
 
 # --- 7. plans name tasks as they really are ---------------------------------------
-def test_a_wrong_title_in_a_plan_is_corrected(w):
+def test_a_wrong_title_in_a_plan_drops_the_id(w):
+    """The id is what's wrong, not the title: putting T-1's title there would
+    point the agent at different work than the plan described."""
     _run_board(w)
     eve = w["agents"]["eve"]
     chunk = Planner(eve).create_chunks(
         ["review and approve T-1 'Backend data structure' with Adam Beck from 11:30 am to 11:45 am"],
         eve, w)[0]
-    assert chunk["activity"] == ("review and approve T-1 'Design and implement the API for the "
-                                 "company website' with Adam Beck from 11:30 am to 11:45 am")
+    assert chunk["activity"] == ("review and approve 'Backend data structure' with Adam Beck "
+                                 "from 11:30 am to 11:45 am")
 
 
 def test_a_short_title_is_left_alone(w):
     _run_board(w)
-    assert pb.correct_task_titles(w, "work on T-2 'homepage layout'") == "work on T-2 'homepage layout'"
+    assert pb.fix_task_refs(w, "work on T-2 'homepage layout'") == "work on T-2 'homepage layout'"
 
 
 def test_approving_a_task_not_in_review_becomes_a_check(w):

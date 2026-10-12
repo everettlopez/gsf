@@ -82,10 +82,21 @@ def _board_context(speaker, listener, world, mentioned=""):
     mine = project_board.open_tasks_for(world, speaker.agent["id"])
     example = (f"I'll move {mine[0]['id']} to review once it works" if mine
                else "I'll add the API work to the board")
+    # Whose tasks are whose. Without it Adam offered to "split up" Eve's
+    # frontend tasks and promised to get her T-2 ready for review.
+    owners = "\n".join(f"    - {line}"
+                       for line in project_board.ownership_lines(world, speaker.agent["id"]))
+    owners = f"""
+    Who owns what:
+{owners}
+    So {speaker.agent['name']} talks about their own tasks as theirs to do, and about
+    {other}'s tasks as {other}'s: asking how they're going, reviewing them, or
+    offering to work on one together, which {other} can accept or turn down.
+""" if owners else ""
     return f"""
     What {speaker.agent['name']} knows from the project board:
 {body}
-{facts}
+{facts}{owners}
     {project_board.task_id_line(world)}
     Talking doesn't change the board. Nobody can start, approve, finish or move
     a task in a conversation: that only happens at the project board, a task is

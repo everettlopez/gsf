@@ -675,15 +675,24 @@ def task_id_line(world):
 def strip_unknown_task_ids(world, text):
     """Remove task ids that aren't on the board ("work on T-5 'Auth'" ->
     "work on 'Auth'", "review T-1, T-6 and T-7" -> "review T-1")."""
-    unknown = unknown_task_ids(world, text)
-    for tid in unknown:
+    return strip_task_ids(text, unknown_task_ids(world, text))
+
+
+def strip_task_ids(text, ids, with_titles=False):
+    """Remove these task ids from `text`, keeping the list around them readable.
+    with_titles also removes a quoted title right after an id ("T-2 'Home page'")."""
+    title = r"(?:\s*'[^']*')?" if with_titles else ""
+    for tid in ids:
         t = re.escape(tid)
-        for pattern in (rf"(?:\s*,\s*|\s+and\s+){t}\b",     # "T-1, T-6" / "T-1 and T-6"
-                        rf"\b{t}(?:\s*,\s*|\s+and\s+)",     # "T-6, T-1" / "T-6 and T-1"
-                        rf"\b{t}\b\s*"):                      # "work on T-6 'X'"
+        for pattern in (rf"(?:\s*,\s*|\s+and\s+){t}\b{title}",     # "T-1, T-6" / "T-1 and T-6"
+                        rf"\b{t}{title}(?:\s*,\s*|\s+and\s+)",     # "T-6, T-1" / "T-6 and T-1"
+                        rf"\b{t}\b{title}\s*"):                      # "work on T-6 'X'"
             text = re.sub(pattern, "", text, flags=re.IGNORECASE)
-    if unknown:
+    if ids:
         text = re.sub(r"\s{2,}", " ", text).strip()
+        # "... and check on T-2" -> "... and check on" -> "..."
+        text = re.sub(r"(?:\s+(?:and|or)\s+\w+)?\s+(?:on|with|for|of|to|about|and)\s*$", "", text,
+                      flags=re.IGNORECASE)
     return text
 
 
@@ -933,6 +942,77 @@ def _has_full_plate(world, agent_id):
     return len(open_tasks_for(world, agent_id)) >= MAX_OPEN_TASKS_PER_AGENT
 
 
+def in_lane(world, agent_id, area):
+    """Is work in `area` this agent's to take on? Each agent has an area
+    (backend, frontend); "general" work is anyone's. An agent with no area
+    can take anything."""
+    own = world["agents"][agent_id].get("area")
+    return not own or area in (own, "general")
+
+
+def _lane_owner(world, area):
+    """The teammate whose area this is, or None."""
+    return next((a for a in world["agents"].values() if a.get("area") == area), None)
+
+
+def _check_lane(world, agent_id, area, who="you"):
+    if in_lane(world, agent_id, area):
+        return
+    owner = _lane_owner(world, area)
+    raise BoardError(f"that is {area} work" + (f", which is {owner['name']}'s area" if owner else "")
+                     + f"; {who} can offer to work on it together with them instead")
+
+
+# ---------------------------------------------------------------------------
+# Ownership (who works on what)
+# ---------------------------------------------------------------------------
+def owner_name(world, task):
+    return _agent_name(world, task["assignee"]) if task["assignee"] else None
+
+
+def teammate_task_ids(world, agent_id, text):
+    """Ids in `text` of tasks that belong to a teammate (not to this agent,
+    and not unassigned)."""
+    tasks = {t["id"]: t for t in get_project(world)["tasks"]}
+    return [tid for tid in task_ids_in(text)
+            if tid in tasks and tasks[tid]["assignee"] not in (None, agent_id)]
+
+
+# "review T-2", "approve Eve's T-2", "review and approve T-1 'X'": looking a
+# teammate's work over is everyone's job. ("meets the review criteria so we
+# can move T-2 to review" is not: the task id doesn't follow the verb.)
+_REVIEW_OF = re.compile(r"\b(?:review|approv)\w*\s+(?:and\s+approv\w*\s+)?(?:[\w']+\s+){0,2}?T-\d+",
+                        re.IGNORECASE)
+
+
+def is_review_of_task(text):
+    return bool(_REVIEW_OF.search(text or ""))
+
+
+def ownership_lines(world, agent_id):
+    """Whose tasks are whose, said plainly for prompts. Plans and conversations
+    used to treat every task on the board as up for grabs: Adam offered to
+    "split up" Eve's frontend tasks, promised to get her T-2 ready for review,
+    and spent the morning sketching her home page."""
+    tasks = [t for t in get_project(world)["tasks"] if t["status"] != "done"]
+    if not tasks:
+        return []
+    name = _agent_name(world, agent_id)
+    lines = []
+    for a in world["agents"].values():
+        ids = [t["id"] for t in tasks if t["assignee"] == a["id"]]
+        if ids:
+            who = f"{name}'s own" if a["id"] == agent_id else f"{a['name']}'s"
+            lines.append(f"{who} tasks: {', '.join(ids)}.")
+    loose = [t["id"] for t in tasks if not t["assignee"]]
+    if loose:
+        lines.append(f"Unassigned: {', '.join(loose)}.")
+    lines.append(f"Each task belongs to its assignee: only they work on it and move it on the "
+                 f"board. {name} can review a teammate's task with them, or offer to work on "
+                 f"one together with them (the teammate decides), but never does it alone.")
+    return lines
+
+
 def check_note_is_for_teammates(world, agent, note):
     """Refuse a note that only narrates what the writer is doing ("Eve is
     currently addressing high-priority bugs or issues. Please check if this
@@ -998,12 +1078,19 @@ def apply_action(world, agent, action):
 
     if kind == "create_task":
         to_self = bool(action.get("assign_to_self"))
+        area = action.get("area", "general")
+        area = area if area in AREAS else "general"
         full = to_self and _has_full_plate(world, aid)
+        other_lane = to_self and not in_lane(world, aid, area)
         t = create_task(world, aid, action.get("title"), action.get("description", ""),
-                        action.get("area", "general"), action.get("priority", "medium"),
+                        area, action.get("priority", "medium"),
                         action.get("depends_on") or (), action.get("done_when", ""),
-                        to_self and not full)
-        if full:
+                        to_self and not full and not other_lane)
+        if other_lane:
+            owner = _lane_owner(world, area)
+            mine = (f" and left it unassigned for {owner['name']}, whose area that is" if owner
+                    else " and left it unassigned")
+        elif full:
             mine = (f" and left it unassigned, since {name} already has "
                     f"{MAX_OPEN_TASKS_PER_AGENT} open tasks")
         else:
@@ -1015,6 +1102,7 @@ def apply_action(world, agent, action):
         if _has_full_plate(world, aid):
             raise BoardError(f"{name} already has {MAX_OPEN_TASKS_PER_AGENT} open tasks; "
                              f"finish one before taking on more")
+        _check_lane(world, aid, get_task(world, action.get("task_id"))["area"])
         t = claim_task(world, aid, action.get("task_id"))
         return f"{name} took on task {t['id']} '{t['title']}' from the project board."
 
@@ -1034,6 +1122,14 @@ def apply_action(world, agent, action):
         note = "" if to_self else _required_note(
             action, "tell the teammate what the task needs and why it is theirs")
         check_note_claims(world, note)
+        target = next((a["id"] for a in world["agents"].values()
+                       if to in (a["id"], a["name"].lower(), a["name"].split()[0].lower())), None)
+        if target is not None:
+            task_area = get_task(world, action.get("task_id"))["area"]
+            if not in_lane(world, target, task_area):
+                who = "you" if target == aid else _agent_name(world, target)
+                raise BoardError(f"{task_area} work isn't {who}'s area"
+                                 + ("" if target == aid else "; hand it to whoever owns that area"))
         t = assign_task(world, aid, action.get("task_id"), action.get("assignee"), note)
         line = (f"{name} assigned task {t['id']} '{t['title']}' to "
                 f"{_agent_name(world, t['assignee'])} on the project board")
@@ -1227,7 +1323,10 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
     - Only change a status when it actually changed; leave it alone otherwise.
     - Review is for finished work. A task in review stays there until a teammate
       approves it or asks for changes in a note.
-    - Prefer tasks in {agent['name']}'s own area; leave other areas for teammates.
+    - {agent['name']} only takes on tasks in their own area ({agent.get('area') or 'any'});
+      work in another area is added unassigned, for the teammate whose area it is.
+      A teammate's task is theirs: {agent['name']} can review or approve it, or leave a
+      note on it (a question, or an offer to work on it together), never move it.
     - Take a task on (assign_to_self, claim_task) only if {agent['name']} will work on
       it soon; leave the rest unassigned so whoever is free can pick it up.
       {agent['name']} can hold at most {MAX_OPEN_TASKS_PER_AGENT} open tasks.
@@ -1339,23 +1438,29 @@ _QUOTED_TITLE = re.compile(r"\b(T-\d+)(\s*[:(]?\s*)(['\"‘“])([^'\"’”]{2,
                            r"(['\"’”])", re.IGNORECASE)
 
 
-def correct_task_titles(world, text):
-    """Put each task's real title next to its id ("T-1 'Backend data structure'"
-    -> "T-1 'Design and implement the API ...'"). A plan block that gets a
-    task's title wrong makes the agent work on, or review, the wrong thing."""
+def fix_task_refs(world, text):
+    """A task id next to a title that isn't that task's is a wrong id: the
+    model meant other work. A replan wrote "work on T-2 'Implement and secure
+    user authentication endpoints'" (T-2 was Eve's home page); putting T-2's
+    real title there sent Adam to sketch Eve's home page. So the id goes to the
+    task whose title it is, or is dropped and the described work stays. A
+    shortened title ("Set up backend API") still counts as the same task."""
     if not world or "project" not in world:
         return text
-    titles = {t["id"]: t["title"] for t in get_project(world)["tasks"]}
+    tasks = get_project(world)["tasks"]
 
-    def words(text):
-        return {w for w in _normalize(text).split() if len(w) > 2}
+    def words(t):
+        return {w for w in _normalize(t).split() if len(w) > 2}
 
     def fix(m):
-        real = titles.get(m.group(1).upper())
-        # A shortened title ("Set up backend API") is still the same task.
-        if real is None or words(m.group(4)) <= words(real):
+        tid, quoted = m.group(1).upper(), words(m.group(4))
+        real = next((t for t in tasks if t["id"] == tid), None)
+        if real is None or not quoted or quoted <= words(real["title"]):
             return m.group(0)
-        return f"{m.group(1)}{m.group(2)}{m.group(3)}{real}{m.group(5)}"
+        meant = [t for t in tasks if quoted <= words(t["title"])]
+        if len(meant) == 1:
+            return f"{meant[0]['id']}{m.group(2)}{m.group(3)}{m.group(4)}{m.group(5)}"
+        return f"{m.group(3)}{m.group(4)}{m.group(5)}"
 
     return _QUOTED_TITLE.sub(fix, text or "")
 
@@ -1426,10 +1531,13 @@ def _reconcile_start(world, agent_id, activity):
         task = get_task(world, match.group(1))
     except BoardError:
         return activity
-    if task["assignee"] not in (None, agent_id):
-        return activity
-
     tid = task["id"]
+    if task["assignee"] not in (None, agent_id):
+        # Adam's plan had "start T-2 (move it to in progress)" for Eve's T-2.
+        replacement = (f"check on {tid} ({owner_name(world, task)}'s task: only they move it "
+                       f"on the board)")
+        return activity[:match.start()] + replacement + activity[match.end():]
+
     blockers = _unmet_dependencies(world, task) if task["status"] == "todo" else []
     if blockers:
         deps = ", ".join(blockers)
