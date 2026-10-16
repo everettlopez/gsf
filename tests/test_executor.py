@@ -404,3 +404,52 @@ def test_a_review_verdict_goes_straight_to_the_board(fake_llm, isolated_data, w)
     ag.work_on_task(rt, "9:00 am", w)
     visit = ag.get_chunk_lazy(rt, "9:05 am", w)
     assert visit["board_work"] and visit["activity"].startswith("9:05 am: approve T-1")
+
+
+
+# --- from the 75-step run ------------------------------------------------------------
+def test_an_approved_task_sends_its_owner_to_the_board_once(fake_llm, isolated_data, w):
+    rt, _ = _eve_at_her_desk(w, [PROGRESS])
+    pb.update_status(w, "eve", "T-2", "review", note="check the layout")
+    pb.approve_task(w, "adam", "T-2")
+    ag.finish_approved_tasks(rt, "9:00 am", w)
+    visit = ag.get_chunk_lazy(rt, "9:05 am", w)
+    assert visit["board_work"] and visit["activity"] == (
+        "9:05 am: move T-2 to done on the project board: Adam Beck approved it")
+    rt.override = None
+    ag.finish_approved_tasks(rt, "9:10 am", w)
+    assert rt.override is None                                          # once per approval
+
+
+def test_no_done_trip_for_a_teammates_task_or_while_at_the_board(fake_llm, isolated_data, w):
+    rt, _ = _eve_at_her_desk(w, [PROGRESS])
+    _adams_task_in_review(w)
+    pb.approve_task(w, "eve", "T-1")
+    ag.finish_approved_tasks(rt, "9:00 am", w)                          # Adam's task, not hers
+    assert rt.override is None
+    pb.update_status(w, "eve", "T-2", "review", note="check it")
+    pb.approve_task(w, "adam", "T-2")
+    rt.agent["interacting_with"] = pb.BOARD_OBJECT
+    ag.finish_approved_tasks(rt, "9:00 am", w)
+    assert rt.override is None
+
+
+def test_a_question_queued_behind_a_board_trip_is_still_asked_after_it(fake_llm, isolated_data, w):
+    asks = ExecResult("Built the layout.", ["site/template.html"], True,
+                      question="Adam, what goes inside each team list item?")
+    rt, _ = _eve_at_her_desk(w, [asks])
+    ag.work_on_task(rt, "7:35 am", w)                   # question, then the trip to move it to review
+    assert ag.get_chunk_lazy(rt, "7:40 am", w)["board_work"]
+    ask = ag.get_chunk_lazy(rt, "7:50 am", w)          # in the run this had expired by now
+    assert ask is not None and ask.get("question") and ask["start_time"] == "7:50 am"
+    assert ask["activity"].startswith("7:50 am: ask Adam Beck about T-2")
+
+
+def test_a_promise_about_later_doesnt_send_anyone_to_the_board_now(fake_llm, isolated_data, w):
+    rt, _ = _eve_at_her_desk(w, [PROGRESS])
+    rt.agent["current_location"] = "conference_room"
+    ag.queue_board_visit(rt, "I will wait for the reviewer's confirmation before moving T-2 to done",
+                         "9:00 am", w)
+    assert rt.queued is None
+    ag.queue_board_visit(rt, "I'll move T-2 to review now", "9:00 am", w)
+    assert rt.queued["board_work"]

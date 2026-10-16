@@ -428,7 +428,7 @@ def create_task(world, agent_id, title, description="", area="general",
 def claim_task(world, agent_id, task_id):
     task = get_task(world, task_id)
     if task["assignee"] == agent_id:
-        raise BoardError(f"{task['id']} is already assigned to you")
+        raise NoChange(f"{task['id']} is already assigned to you")
     if task["assignee"]:
         raise BoardError(f"{task['id']} is already claimed by {_agent_name(world, task['assignee'])}")
     if task["status"] == "done":
@@ -572,9 +572,15 @@ def approve_task(world, agent_id, task_id, note=""):
     if task["assignee"] == agent_id:
         raise BoardError(f"{task['id']} is your own task; a teammate has to approve it")
     if agent_id in task["approved_by"]:
-        raise BoardError(f"you already approved {task['id']}")
+        raise NoChange(f"you already approved {task['id']}")
     task["approved_by"].append(agent_id)
     _log_event(task, agent_id, "approved", _clean(note) or None)
+    # The owner is told, like a handoff: in the 75-step run, T-1 and T-3 were
+    # approved by 8:05 and still in review at the end of the day.
+    owner = task["assignee"]
+    mark_workload_changed(owner, f"{_agent_name(world, agent_id)} approved {task['id']} "
+                                 f"'{task['title']}' on the project board, so "
+                                 f"{_agent_name(world, owner)} can move it to done.")
     return task
 
 
@@ -592,11 +598,21 @@ def add_board_note(world, agent_id, note):
     return notes[-1]
 
 
+def _similar_words(a, b, share=0.6):
+    wa, wb = set(re.findall(r"[a-z0-9-]{3,}", a.lower())), set(re.findall(r"[a-z0-9-]{3,}", b.lower()))
+    return bool(wa and wb) and len(wa & wb) / len(wa | wb) >= share
+
+
 def add_note(world, agent_id, task_id, note):
     task = get_task(world, task_id)
     note = _clean(note)
     if not note:
         raise BoardError("an empty note")
+    # Eve left "Backend integration notes will be added around 10:30 am" on T-3
+    # five times in one run.
+    if any(e.get("event") == "note" and e.get("agent") == agent_id
+           and _similar_words(e.get("note") or "", note) for e in task["history"]):
+        raise NoChange(f"that note is already on {task['id']}")
     _log_event(task, agent_id, "note", note)
     return task
 
@@ -813,8 +829,35 @@ def status_for_agent(world, agent_id):
             f"{t['id']} '{t['title']}' ({t['status'].replace('_', ' ')})" for t in mine) + ".")
     else:
         lines.append(f"{name} has no open tasks.")
+    for t in mine:
+        if t["status"] != "review":
+            continue
+        if t["approved_by"]:
+            who = " and ".join(_agent_name(world, a) for a in t["approved_by"])
+            lines.append(f"{name}'s {t['id']} is approved by {who}: {name} can move it to done now.")
+        else:
+            lines.append(f"{name}'s {t['id']} is in review, waiting for a teammate's approval; "
+                         f"there is nothing to do on it until then.")
+    lines.extend(goal_lines(world, agent_id))
     lines.extend(waiting_lines(world, agent_id))
     return lines
+
+
+def goal_lines(world, agent_id):
+    """What the goal still needs when the board has nothing left in progress.
+    In the 75-step run every task was approved by 8:30, and for the rest of
+    the day nobody asked what the goal still needed (getting it all onto main,
+    building and shipping the site)."""
+    tasks = get_project(world)["tasks"]
+    name = world["agents"][agent_id]["name"]
+    if not tasks or any(t["status"] in ("todo", "in_progress", "blocked") for t in tasks):
+        return []
+    if all(t["status"] == "done" for t in tasks):
+        return ["Every task on the board is done: check whether the goal is met, and add a "
+                "task for anything it still needs (such as building and shipping the site)."]
+    return [f"No task is in progress or waiting to start: every task is in review or done. "
+            f"{name} should look at what the goal still needs once these are done (everything "
+            f"merged, the site built and shipped) and add a task for anything that has none."]
 
 
 def waiting_lines(world, agent_id):
@@ -1081,6 +1124,11 @@ def _check_review_habits(world, agent_id, task_id, status):
 
     if task["status"] == "review" and status in ("in_progress", "todo") \
             and not changes_requested(task):
+        if task["approved_by"]:
+            raise BoardError(
+                f"{task['id']} is approved by "
+                f"{' and '.join(_agent_name(world, a) for a in task['approved_by'])}: "
+                f"move it to done, not back to {status.replace('_', ' ')}")
         raise BoardError(
             f"{task['id']} is waiting for a teammate's review; leave it in review "
             f"unless a teammate asks for changes")
@@ -1134,6 +1182,9 @@ def apply_action(world, agent, action):
 
     if kind == "update_status":
         status = action.get("status")
+        current = get_task(world, action.get("task_id"))
+        if current["status"] == status:
+            raise NoChange(f"{current['id']} is already {status}")
         if status in NOTE_REQUIRED:
             _required_note(action, NOTE_REQUIRED[status])
         _check_review_habits(world, aid, action.get("task_id"), status)
@@ -1396,6 +1447,13 @@ def promised_task_steps(world, agent, commitments):
             if task is None or tid in seen or task["assignee"] not in (None, aid):
                 continue
             seen.add(tid)
+            if task["status"] == "review" and task["assignee"] == aid:
+                if task["approved_by"]:
+                    steps.append(f"{tid} is approved: move {tid} to done.")
+                else:
+                    steps.append(f"{tid} is in review: it waits for a teammate's approval, "
+                                 f"so leave it as it is.")
+                continue
             if task["status"] != "todo":
                 continue                      # already started: nothing to switch
             blockers = _unmet_dependencies(world, task)
@@ -1613,6 +1671,8 @@ def interact(agent, world, activity, planner=None, retriever=None, memory_stream
         log.warn(f"project board call failed for {agent['name']} ({e})")
         return []
 
+    log.debug(f"{agent['name']} at the board ({activity}) proposes: "
+              f"{json.dumps(result.get('actions'), ensure_ascii=False)}")
     done, refused = apply_actions(world, agent, result.get("actions"))
     _after_visit(agent["id"], acted=bool(done))
     log.debug(f"{agent['name']} at board: {result.get('reason', '')}")

@@ -45,3 +45,18 @@ def test_reflect_stores_cited_insights_and_resets_window(fake_llm, isolated_data
 
     # Nothing new happened since, so a second pass does nothing.
     assert reflector.reflect() == []
+
+
+
+def test_insights_with_a_leading_citation_or_a_heading():
+    from reflect import parse_insights
+
+    text = ("insight 1 (because of 1, 2): Eve Smith is building the layout.\n"
+            "Insight (because of 3): The team reviews each other's work.\n"
+            "Collaborative Task Management\n"
+            "Adam Beck owns the build (because of 2)")
+    assert parse_insights(text, [1, 2, 3], "Adam Beck") == [
+        ("Eve Smith is building the layout.", [1, 2]),
+        ("The team reviews each other's work.", [3]),
+        ("Adam Beck owns the build", [2]),
+    ]

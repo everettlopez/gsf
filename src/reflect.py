@@ -28,6 +28,11 @@ MEMORIES_PER_QUESTION = 10
 # ---------------------------------------------------------------------------
 _LEADING_LIST_MARKER = re.compile(r"^(?:\d+[.)]|[-*•])\s*")
 _CITATION = re.compile(r"\s*\((?:because of|from|based on)\s*([^)]*)\)\s*\.?$", re.IGNORECASE)
+# "insight 1 (because of 17, 24): text" and "Insight (because of 205): text"
+_LEADING_CITATION = re.compile(
+    r"^(?:insight\s*\d*\s*)?\((?:because of|from|based on)\s*([^)]*)\)\s*[:.\-\u2013\u2014]\s*",
+    re.IGNORECASE)
+_INSIGHT_LABEL = re.compile(r"^insight\s*\d*\s*[:.\-\u2013\u2014]\s*", re.IGNORECASE)
 
 
 def _clean_line(line):
@@ -63,13 +68,21 @@ def parse_insights(text, valid_ids, agent_name, limit=NUM_INSIGHTS):
         line = _clean_line(line)
 
         cited = []
-        match = _CITATION.search(line)
-        if match:
-            cited = [int(n) for n in re.findall(r"\d+", match.group(1))]
-            line = line[:match.start()].strip()
+        lead = _LEADING_CITATION.match(line)
+        if lead:
+            cited = [int(n) for n in re.findall(r"\d+", lead.group(1))]
+            line = line[lead.end():].strip()
+        else:
+            line = _INSIGHT_LABEL.sub("", line)
+            match = _CITATION.search(line)
+            if match:
+                cited = [int(n) for n in re.findall(r"\d+", match.group(1))]
+                line = line[:match.start()].strip()
 
         if not line:
             continue
+        if not cited and len(line.split()) <= 6 and not line.endswith((".", "!", "?")):
+            continue                     # a heading ("Collaborative Task Management")
 
         line = _normalize_pronoun(line, agent_name)
         sources = [i for i in cited if i in valid_ids] or sorted(valid_ids)

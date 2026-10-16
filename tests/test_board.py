@@ -736,3 +736,82 @@ def test_work_the_hands_tested_can_go_to_review_without_the_wait(w):
     assert refused == [] and pb.get_task(w, "T-1")["status"] == "review"
     assert not pb.is_tested("adam", "T-1")                               # it's Eve's evidence
     pb.clear_tested()
+
+
+
+# --- from the 75-step run: approval leads to done ------------------------------------
+def _approved_t1(w):
+    import clock
+
+    clock.set_time("9:00 am")
+    pb.create_task(w, "adam", "Build script", area="backend", assign_to_self=True)
+    pb.update_status(w, "adam", "T-1", "in_progress")
+    pb.update_status(w, "adam", "T-1", "review", note="check build.py")
+    pb.clear_workload_changed()
+    pb.approve_task(w, "eve", "T-1")
+
+
+def test_an_approval_tells_the_owner(w):
+    _approved_t1(w)
+    assert pb.workload_notices("adam") == [
+        "Eve Smith approved T-1 'Build script' on the project board, so Adam Beck can move it to done."]
+
+
+def test_repeating_an_approval_or_a_claim_is_a_quiet_no_op(w):
+    _approved_t1(w)
+    with pytest.raises(pb.NoChange):
+        pb.approve_task(w, "eve", "T-1")
+    pb.create_task(w, "adam", "Deploy", area="backend", assign_to_self=True)
+    with pytest.raises(pb.NoChange):
+        pb.claim_task(w, "adam", "T-2")
+    done, refused = pb.apply_actions(w, w["agents"]["eve"], [{"action": "approve_task", "task_id": "T-1"}])
+    assert done == [] and refused == []
+
+
+def test_asking_for_a_status_the_task_has_is_a_no_op_not_a_missing_note(w):
+    _approved_t1(w)
+    done, refused = pb.apply_actions(w, w["agents"]["adam"], [
+        {"action": "update_status", "task_id": "T-1", "status": "review"}])    # no note
+    assert done == [] and refused == []
+
+
+def test_an_approved_task_goes_to_done_not_back_to_work(w):
+    _approved_t1(w)
+    _, refused = pb.apply_actions(w, w["agents"]["adam"], [
+        {"action": "update_status", "task_id": "T-1", "status": "in_progress"}])
+    assert refused == ["update_status: T-1 is approved by Eve Smith: move it to done, "
+                       "not back to in progress"]
+
+
+def test_the_owner_sees_what_review_means_for_them(w):
+    _approved_t1(w)
+    pb.create_task(w, "adam", "Content", area="backend", assign_to_self=True)
+    pb.update_status(w, "adam", "T-2", "in_progress")
+    pb.update_status(w, "adam", "T-2", "review", note="check site.json")
+    lines = pb.status_for_agent(w, "adam")
+    assert "Adam Beck's T-1 is approved by Eve Smith: Adam Beck can move it to done now." in lines
+    assert ("Adam Beck's T-2 is in review, waiting for a teammate's approval; there is nothing "
+            "to do on it until then.") in lines
+
+
+def test_with_nothing_in_progress_the_board_asks_what_the_goal_still_needs(w):
+    _approved_t1(w)
+    assert any(line.startswith("No task is in progress or waiting to start") for line in pb.status_for_agent(w, "eve"))
+    pb.update_status(w, "adam", "T-1", "done")
+    assert any(line.startswith("Every task on the board is done") for line in pb.status_for_agent(w, "adam"))
+    pb.create_task(w, "eve", "Footer", area="frontend")
+    assert pb.goal_lines(w, "eve") == []                                  # there is work to start
+
+
+def test_a_promise_about_an_approved_task_says_move_it_to_done(w):
+    _approved_t1(w)
+    steps = pb.promised_task_steps(w, w["agents"]["adam"], ["I'll move T-1 to done once approved"])
+    assert steps == ["T-1 is approved: move T-1 to done."]
+
+
+def test_the_same_note_twice_on_a_task_is_a_no_op(w):
+    pb.create_task(w, "eve", "Home page", area="frontend", assign_to_self=True)
+    pb.add_note(w, "eve", "T-1", "Backend integration notes will be added to this task around 10:30 am.")
+    with pytest.raises(pb.NoChange):
+        pb.add_note(w, "eve", "T-1", "Backend integration notes will be added around 10:30 am.")
+    pb.add_note(w, "adam", "T-1", "Backend integration notes will be added around 10:30 am.")  # someone else's

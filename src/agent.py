@@ -156,6 +156,8 @@ class Agent:
     shipped: set = field(default_factory=set)          # task ids merged into main
     reviewed: dict = field(default_factory=dict)       # teammate task id -> review round done
     team: list = field(default_factory=list)           # (name, area) of everyone on the team
+    world: Optional[dict] = None                       # the world the agent lives in
+    done_trips: set = field(default_factory=set)       # approved task ids already headed to done
 
     # Per-step scratch space (filled in by the phases below)
     observations: list = field(default_factory=list)
@@ -185,6 +187,7 @@ class Agent:
             executor=executor,
             workspace=workspace,
             team=[(a["name"], a.get("area") or "general") for a in world["agents"].values()],
+            world=world,
         )
 
     # -- PHASE 1: PERCEIVE ---------------------------------------------------
@@ -296,6 +299,7 @@ class Agent:
             return
         self._carry_out(step, current_time, world)
         work_on_task(self, current_time, world)
+        finish_approved_tasks(self, current_time, world)
         ship_approved_work(self, world)
 
     def _carry_out(self, step, current_time, world):
@@ -1030,12 +1034,18 @@ def settle_after_conversation(rt, partner, step, current_time, world):
     rt.decision = "3"
 
 
+# "I will wait for the reviewer's confirmation before moving T-1 to approved":
+# a promise about later, not something to walk to the board for now.
+_CONDITIONAL = re.compile(r"\b(?:wait\w*|once|after|when|until|as soon as|later)\b", re.IGNORECASE)
+
+
 def queue_board_visit(rt, commitment, current_time, world, minutes=10):
     """Promised something about the board while standing at it: do it right after
     the conversation instead of hoping the replan comes back to it."""
     room = project_board.board_location(world)
     if (room is None or rt.agent["current_location"] != room
-            or not project_board.is_board_commitment(commitment)):
+            or not project_board.is_board_commitment(commitment)
+            or _CONDITIONAL.search(commitment)):
         return
     start = step_time(current_time)
     rt.queued = {
@@ -1292,7 +1302,17 @@ def head_to_board(rt, commitment, current_time, world, minutes=10):
     }
     # The trip goes next, even in the middle of a long step (a whole work
     # block, say); that step picks up again afterwards if it has time left.
-    rt.queued = rt.override or rt.queued
+    # A short one (a question to ask) would expire during the trip, so it
+    # starts when the trip ends: both questions in the 75-step run were lost.
+    later = rt.override or rt.queued
+    if later is not None:
+        parse = rt.planner._parse_time
+        trip_end = parse(start) + timedelta(minutes=minutes)
+        if parse(later["start_time"]) + timedelta(minutes=later.get("duration") or 0) <= trip_end:
+            when = rt.planner._fmt(trip_end)
+            later = {**later, "start_time": when,
+                     "activity": f"{when}: {TIME_PREFIX.sub('', later.get('activity') or '')}"}
+    rt.queued = later
     rt.override = visit
     log.event(f"{rt.tag} heads to the board to: {commitment}")
 
@@ -1382,3 +1402,21 @@ def review_teammate_work(rt, task, block, current_time, world):
     for line in lines:
         log.event(f"🔍 {line}")
     return result
+
+
+def finish_approved_tasks(rt, current_time, world):
+    """A task of the agent's own that a teammate approved goes to the board to
+    be moved to done, once per approval: done is what gets it merged. In the
+    75-step run T-1 and T-3 were approved by 8:05 and never moved to done."""
+    if "project" not in world or rt.agent["interacting_with"] == project_board.BOARD_OBJECT:
+        return
+    for task in project_board.get_project(world)["tasks"]:
+        key = (task["id"], tuple(task["approved_by"]))
+        if (task["assignee"] != rt.agent["id"] or task["status"] != "review"
+                or not task["approved_by"] or key in rt.done_trips):
+            continue
+        rt.done_trips.add(key)
+        who = " and ".join(world["agents"][a]["name"] for a in task["approved_by"])
+        head_to_board(rt, f"move {task['id']} to done on the project board: {who} approved it",
+                      current_time, world)
+        return                                                # one trip at a time
