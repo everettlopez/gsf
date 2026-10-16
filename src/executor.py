@@ -47,6 +47,7 @@ class ExecResult:
     files_changed: list = field(default_factory=list)
     tests_passed: Optional[bool] = None             # None: no tests were run
     blocked_reason: str = ""                        # why the work can't go on, if it can't
+    question: str = ""                              # what to ask the teammate, if anything
     cost: float = 0.0                               # estimated $ of the session
 
     @property
@@ -175,8 +176,10 @@ TOOLS = [
           {"summary": {"type": "string", "description": "One or two plain sentences: what is "
                        "done now and what is left"},
            "blocked_reason": {"type": "string", "description": "Only if the work can't go on "
-                              "without something outside this task (a teammate's work, an "
-                              "account, a decision): what that is"}},
+                              "without something outside this task (a decision, an account, a "
+                              "teammate's answer): what that is"},
+           "question": {"type": "string", "description": "Only if a teammate's answer would "
+                        "help this task: the question to ask them, naming the task"}},
           required=["summary"]),
 ]
 REVIEW_TOOLS = [t for t in TOOLS if t["name"] in ("list_files", "read_file", "run_command",
@@ -290,6 +293,9 @@ two-person team building the company website. {who} {style}
 {a['name']}'s own copy of the team's repository, on the task's branch. Stay inside that task \
 and {a['name']}'s area: a teammate's work is theirs to change.
 
+If a teammate could answer something that would help, put it in the report's question: \
+they will be asked, and the answer comes with the next session on this task.
+
 Each task is built on its own branch from main, and the teammates' halves meet only once both \
 are approved and merged. So a teammate's files missing from your branch is expected, not a \
 blocker: build and test against a small stand-in, as the conventions below say. Report \
@@ -332,12 +338,32 @@ in a Linux container with Python 3.12 and no network; use show_changes for the d
             lines += [f"- {e['agent']} at {e['time']}: {e['note']}" for e in notes]
         return lines
 
+    @staticmethod
+    def _known(agent, task, n=6):
+        """What the agent remembers that bears on the task (a teammate's answer,
+        what was agreed in a talk), from its memory stream. Not its plans, and
+        not the work reports, which come under earlier sessions."""
+        retriever = getattr(agent, "retriever", None)
+        if retriever is None:
+            return []
+        name, out = agent.agent["name"], []
+        for found in retriever.retrieve(f"{task['id']} {task['title']}", n=n * 2, touch=False):
+            memory = found["memory"]
+            if memory.memory_type == "plan" or memory.description.startswith(f"{name} worked on"):
+                continue
+            out.append(memory.description)
+        return out[:n]
+
     def brief(self, agent, task):
         lines = self._task_lines(task)
         before = [s["result"].summary for s in agent.work_log.get(task["id"], [])]
         if before:
             lines.append("Earlier work sessions on this task (their files are on the branch):")
-            lines += [f"- {s}" for s in before]
+            lines += [f"- {short(s)}" for s in before]
+        known = self._known(agent, task)
+        if known:
+            lines.append(f"What {agent.agent['name']} remembers that bears on it:")
+            lines += [f"- {k}" for k in known]
         lines.append("Work on it now.")
         return "\n".join(lines)
 
@@ -447,6 +473,7 @@ in a Linux container with Python 3.12 and no network; use show_changes for the d
         result = ExecResult(summary=(report.get("summary") or text).strip() or "Worked on the task.",
                             tests_passed=self._final_tests(workspace),
                             blocked_reason=stopped or (report.get("blocked_reason") or "").strip(),
+                            question=(report.get("question") or "").strip(),
                             cost=session.cost())
         workspace.commit(f"{task['id']}: {short(result.summary, 1, 120)}", body=result.summary)
         result.files_changed = workspace.changed_files()

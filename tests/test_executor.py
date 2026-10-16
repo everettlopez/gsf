@@ -356,3 +356,51 @@ def test_a_long_report_becomes_a_short_memory(fake_llm, isolated_data, w):
     assert ("Eve Smith worked on T-2 'Design and implement the home page layout' at 9:00 am: "
             "Built the template and the styles. 23 tests pass.") in _memories(rt)
     assert not any("Details" in m for m in _memories(rt))
+
+
+
+# --- the loop: finishing, asking and reviewing lead somewhere ---------------------
+def test_finished_work_goes_straight_to_the_board_for_review(fake_llm, isolated_data, w):
+    rt, _ = _eve_at_her_desk(w, [DONE])
+    ag.work_on_task(rt, "9:00 am", w)
+    visit = ag.get_chunk_lazy(rt, "9:05 am", w)
+    assert visit["board_work"] and visit["activity"].startswith("9:05 am: move T-2 to review")
+    assert pb.is_tested("eve", "T-2")
+
+
+def test_a_question_from_the_hands_becomes_a_talk_with_the_teammate(fake_llm, isolated_data, w):
+    asks = ExecResult("Laid out the contact section.", ["site/template.html"], None,
+                      question="Adam, will the contact email come from site.json as contact_email?")
+    rt, _ = _eve_at_her_desk(w, [asks])
+    adam = w["agents"]["adam"]
+    adam["current_location"] = "office_1"
+    ag.work_on_task(rt, "9:00 am", w)
+    assert ("Eve Smith wants to ask Adam Beck about T-2: Adam, will the contact email come from "
+            "site.json as contact_email?") in _memories(rt)
+    talk = ag.get_chunk_lazy(rt, "9:05 am", w)
+    assert talk["target_agent"] == "adam" and talk["question"]
+    assert not pb.commitments_for("eve")                                 # not a board matter
+
+    # Even right after a talk, a question about the task gets asked once they're together.
+    import main
+    main.remember_conversation(rt, ag.Agent.load("adam", w), "8:55 am", "the stand-up")
+    rt.agent["current_location"] = "office_1"
+    rt.chunk = talk
+    assert ag.planned_partner(rt, w, "9:05 am") is adam
+
+
+def test_a_blocked_report_with_a_question_asks_instead_of_marking_blocked(fake_llm, isolated_data, w):
+    stuck = ExecResult("Can't fill the form.", [], False, blocked_reason="no contact key",
+                       question="Adam, what key holds the contact email?")
+    rt, _ = _eve_at_her_desk(w, [stuck])
+    ag.work_on_task(rt, "9:00 am", w)
+    assert ag.get_chunk_lazy(rt, "9:05 am", w)["target_agent"] == "adam"
+    assert pb.commitments_for("eve") == []
+
+
+def test_a_review_verdict_goes_straight_to_the_board(fake_llm, isolated_data, w):
+    rt, _ = _eve_at_her_desk(w, [PROGRESS])
+    _adams_task_in_review(w)
+    ag.work_on_task(rt, "9:00 am", w)
+    visit = ag.get_chunk_lazy(rt, "9:05 am", w)
+    assert visit["board_work"] and visit["activity"].startswith("9:05 am: approve T-1")

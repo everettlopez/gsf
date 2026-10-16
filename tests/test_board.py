@@ -671,8 +671,10 @@ def test_taking_on_or_finishing_work_marks_a_workload_change(w):
     pb.clear_workload_changed("eve")
 
     pb.update_status(w, "eve", "T-1", "in_progress")
+    assert not pb.workload_changed("eve")            # starting it is what the plan said
     pb.update_status(w, "eve", "T-1", "review")
-    assert not pb.workload_changed("eve")            # progress alone keeps the plan
+    assert pb.workload_changed("eve")                # off her plate: plan around what's left
+    pb.clear_workload_changed("eve")
 
     pb.approve_task(w, "adam", "T-1")
     pb.update_status(w, "eve", "T-1", "done")
@@ -714,3 +716,23 @@ def test_promises_are_dropped_after_visits_without_acting(w):
     assert pb.commitments_for("eve") == ["assign T-4"]
     pb._after_visit("eve", acted=False)
     assert pb.commitments_for("eve") == []
+
+
+def test_work_the_hands_tested_can_go_to_review_without_the_wait(w):
+    import clock
+
+    pb.clear_tested()
+    clock.set_time("9:00 am")
+    pb.create_task(w, "eve", "Home page", area="frontend", assign_to_self=True)
+    pb.create_task(w, "eve", "About page", area="frontend", assign_to_self=True)
+    pb.update_status(w, "eve", "T-1", "in_progress")
+    clock.set_time("9:10 am")
+    review = {"action": "update_status", "task_id": "T-1", "status": "review", "note": "check it"}
+    _, refused = pb.apply_actions(w, w["agents"]["eve"], [review])
+    assert refused and "only went in progress at 9:00 am" in refused[0]   # nothing to show yet
+
+    pb.record_tested("eve", "T-1")                                       # her hands' tests pass
+    done, refused = pb.apply_actions(w, w["agents"]["eve"], [review])
+    assert refused == [] and pb.get_task(w, "T-1")["status"] == "review"
+    assert not pb.is_tested("adam", "T-1")                               # it's Eve's evidence
+    pb.clear_tested()

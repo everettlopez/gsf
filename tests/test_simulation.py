@@ -207,3 +207,10 @@ def test_with_fake_hands_work_steps_reach_the_executor_and_come_back_as_memories
     assert worked["eve"] and set(worked["eve"]) == {"T-2"}
     memories = [m.description for m in MemoryStream("eve").memories]
     assert any(m.startswith("Eve Smith worked on T-2 'Home page'") for m in memories)
+
+
+
+def test_the_number_of_steps_can_come_from_the_environment(fake_llm, isolated_data, monkeypatch, capsys):
+    monkeypatch.setenv("GA_STEPS", "3")
+    out = _run(monkeypatch, capsys, steps=30, threshold=None)
+    assert "STEP 3/3" in out and "STEP 4/" not in out

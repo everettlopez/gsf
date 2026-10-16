@@ -19,6 +19,7 @@ The per-agent switches (PAPER_STRICT, EAGER_DECOMPOSITION, REFLECTION_THRESHOLD,
 Verbosity: set GA_LOG=quiet|info|debug (default info). See log.py.
 """
 
+import os
 import time
 from datetime import timedelta
 
@@ -39,7 +40,7 @@ from world import load_world, save_world
 # CONFIG
 # ---------------------------------------------------------------------------
 START_TIME = "7:00 am"
-NUM_STEPS = 30
+NUM_STEPS = 30               # GA_STEPS overrides it for one run
 STEP_DELAY_SECONDS = 0      # wall-clock padding per step (0 = run flat out)
 
 
@@ -176,12 +177,13 @@ def schedule_meeting(rt, other, meeting, current_time):
 # MAIN LOOP
 # ---------------------------------------------------------------------------
 def main():
+    steps = int(os.environ.get("GA_STEPS") or NUM_STEPS)
     world = load_world()
     budget = run_budget()                       # one cap on executor sessions for the run
     runtimes = [Agent.load(agent_id, world, *hands_for(world["agents"][agent_id], budget))
                 for agent_id in ("adam", "eve")]
 
-    log.banner(f"Generative Agents · {START_TIME} · {NUM_STEPS} steps x {STEP_MINUTES} min")
+    log.banner(f"Generative Agents · {START_TIME} · {steps} steps x {STEP_MINUTES} min")
     log.info(f"  PAPER_STRICT={agent.PAPER_STRICT} EAGER_DECOMPOSITION={agent.EAGER_DECOMPOSITION} "
              f"REACT_COOLDOWN_STEPS={agent.REACT_COOLDOWN_STEPS} REFLECTION_THRESHOLD={agent.REFLECTION_THRESHOLD}")
 
@@ -189,6 +191,7 @@ def main():
     clock.set_time(current_time)
     project_board.clear_workload_changed()      # nothing carried over from a previous run
     project_board.clear_commitments()
+    project_board.clear_tested()
     clear_talks()
 
     for rt in runtimes:
@@ -198,10 +201,10 @@ def main():
         initial_planning(rt, world)
 
     try:
-        for step in range(1, NUM_STEPS + 1):
+        for step in range(1, steps + 1):
             step_start = time.time()
             clock.set_time(current_time)
-            log.step_header(step, NUM_STEPS, current_time)
+            log.step_header(step, steps, current_time)
 
             # Run each phase for every agent before moving on, so one agent's
             # actions don't leak into the other's perception mid-step.

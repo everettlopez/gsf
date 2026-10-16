@@ -365,3 +365,17 @@ def test_session_cost_is_estimated_from_the_models_usage(eve, script):
     script["replies"] = [reply]
     result = LocalExecutor().run(rt, task, rt.workspace)
     assert round(result.cost, 3) == round((10_000 * 4 + 2_000 * 20 + 100_000 * 0.2) / 1e6, 3)
+
+
+
+def test_the_next_session_gets_what_the_agent_learned_and_the_question_comes_back(eve, script):
+    rt, task = eve
+    rt.stream.add_observations(['Adam Beck said to Eve Smith: "For T-2, the email is '
+                                'contact_email in site.json."'])
+    script["replies"] = [_turn(("report", {"summary": "Wired the contact link.",
+                                           "question": "Adam, is the tagline optional?"}))]
+    result = LocalExecutor().run(rt, task, rt.workspace)
+    brief = script["requests"][0]["messages"][0]["content"]
+    assert "What Eve Smith remembers that bears on it:" in brief
+    assert "contact_email in site.json" in brief
+    assert result.question == "Adam, is the tagline optional?"

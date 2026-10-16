@@ -773,6 +773,8 @@ def planned_partner(rt, world, current_time):
         return None
     if chunk.get("agreed") and rt.agent["current_location"] != chunk["location"]:
         return None                        # the meeting is held where they agreed
+    if chunk.get("question"):
+        return other                       # the hands need an answer: ask, even soon after a talk
     if talked_recently_ids(rt.agent["id"], other["id"], rt.planner._parse_time(current_time)) \
             and not meeting_pending(rt, chunk):
         return None
@@ -1185,17 +1187,50 @@ def work_on_task(rt, current_time, world):
 
     from executor import short
 
-    if result.blocked:
+    if result.question:
+        ask_teammate(rt, task, result.question, current_time, world)
+    if result.blocked and not result.question:
         head_to_board(rt, f"mark {task['id']} blocked on the project board: "
                           f"{short(result.blocked_reason).rstrip('.')}", current_time, world)
     elif result.finished:
-        # What the reviewer should check goes on the card with the move.
+        # Done as far as the hands can tell: straight to the board to ask for
+        # review, with what the reviewer should check on the card. (In the first
+        # live run Eve's T-2 was done at 7:30 and she spent two hours on it anyway.)
+        project_board.record_tested(rt.agent["id"], task["id"])
         files = ", ".join(result.files_changed[:6])
-        project_board.add_commitment(
-            rt.agent["id"], f"move {task['id']} to review on the project board, noting for the "
-                            f"reviewer: {short(result.summary).rstrip('.')}. Changed: {files}. "
-                            f"Tests pass on branch task/{task['id']}.")
+        head_to_board(rt, f"move {task['id']} to review on the project board, noting for the "
+                          f"reviewer: {short(result.summary).rstrip('.')}. Changed: {files}. "
+                          f"Tests pass on branch task/{task['id']}.", current_time, world)
     return result
+
+
+def ask_teammate(rt, task, question, current_time, world, minutes=10):
+    """Something the hands found only a teammate can answer: go and ask them,
+    right after this step. The talk is about the task (it names it), so it
+    happens even soon after the last one; the answer is remembered, and the
+    next session on the task gets it (LocalExecutor.brief)."""
+    from executor import short
+
+    others = [a for a in world["agents"].values() if a["id"] != rt.agent["id"]]
+    if not others:
+        return
+    other = others[0]
+    question = short(question).rstrip("?. ")
+    line = f"{rt.agent['name']} wants to ask {other['name']} about {task['id']}: {question}?"
+    rt.stream.add_observations([line])
+    log.event(f"❓ {line}")
+    start = step_time(current_time)
+    talk = {
+        "activity": f"{start}: ask {other['name']} about {task['id']}: {question}?",
+        "location": other["current_location"],
+        "start_time": start,
+        "duration": minutes,
+        "target_agent": other["id"],
+        "is_reaction": True,
+        "question": True,
+    }
+    rt.queued = rt.override or rt.queued
+    rt.override = talk
 
 
 def _use_hands(rt, session):
@@ -1343,7 +1378,7 @@ def review_teammate_work(rt, task, block, current_time, world):
         lines.append(f"{name} wants changes to {task['id']}: {asks}.")
         promise = f"leave a note on {task['id']} on the project board asking {owner} for changes: {asks}"
     rt.stream.add_observations(lines)
-    project_board.add_commitment(rt.agent["id"], promise)
+    head_to_board(rt, promise, current_time, world)            # the teammate is waiting on it
     for line in lines:
         log.event(f"🔍 {line}")
     return result

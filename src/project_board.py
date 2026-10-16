@@ -310,6 +310,27 @@ COMMITMENT_VISITS = 2        # give up on a promise after this many visits witho
 _commitments = {}            # agent id -> [{"text": ..., "visits": n}]
 
 
+# Tasks whose owner's hands report the tests passing on the task's branch
+# (agent.work_on_task). Like a promise, it is something the agent brings to
+# the board: it lets the task go to review without the usual wait.
+_tested = {}                 # agent id -> task ids
+
+
+def record_tested(agent_id, task_id):
+    _tested.setdefault(agent_id, set()).add(task_id)
+
+
+def is_tested(agent_id, task_id):
+    return task_id in _tested.get(agent_id, set())
+
+
+def clear_tested(agent_id=None):
+    if agent_id is None:
+        _tested.clear()
+    else:
+        _tested.pop(agent_id, None)
+
+
 def add_commitment(agent_id, text):
     items = _commitments.setdefault(agent_id, [])
     if all(c["text"] != text for c in items):
@@ -467,7 +488,9 @@ def update_status(world, agent_id, task_id, status, note=""):
         task["approved_by"] = []                     # reopened: approvals no longer apply
     task["status"] = status
     _log_event(task, agent_id, f"{old} -> {status}", _clean(note) or None)
-    if status == "done":
+    if status in ("review", "done"):
+        # Off the owner's plate (for now): plan the rest of the day around
+        # what is left, after this board visit.
         mark_workload_changed(agent_id)
     refresh_project_status(world)
     sync_board_object(world)
@@ -1047,7 +1070,9 @@ def _check_review_habits(world, agent_id, task_id, status):
     if task["assignee"] != agent_id:
         return                               # update_status reports who owns it
 
-    if status == "review" and task["status"] == "in_progress":
+    if status == "review" and task["status"] == "in_progress" and not is_tested(agent_id, task_id):
+        # Work the agent's hands have finished and tested is finished, however
+        # quickly it went; the wait is for work nobody can show yet.
         minutes = minutes_in_progress(task)
         if minutes is not None and minutes < MIN_MINUTES_BEFORE_REVIEW:
             raise BoardError(
