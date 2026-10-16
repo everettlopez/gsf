@@ -95,6 +95,22 @@ def test_extraction_asks_for_later_meetings_and_keeps_the_time(fake_llm, isolate
     assert "either right afterwards or at a set time later today" in prompts[0]
 
 
+@pytest.mark.parametrize("activity,said,start", [
+    ("check-in at 8:00 am", "now", "8:00 am"),     # the run: agreed at 7:45, put at 7:50
+    ("check-in at 7:00 am", "now", None),          # already past: right afterwards
+    ("check-in", "now", None),
+    ("check-in", "9:30 am", "9:30 am"),
+])
+def test_a_time_named_in_the_activity_wins_over_now(fake_llm, isolated_data, w, monkeypatch,
+                                                    activity, said, start):
+    monkeypatch.setattr(llm, "generate", lambda p, options=None, format=None: json.dumps(
+        {"meeting_agreed": True, "location": "conference_room", "activity": activity,
+         "meeting_time": said, "minutes": 30, "commitments": []}))
+    adam, eve = w["agents"]["adam"], w["agents"]["eve"]
+    out = Planner(adam).extract_outcomes("...", adam, eve, w, "7:45 am")
+    assert out["meeting"]["start"] == start
+
+
 # --- both plans ----------------------------------------------------------------------
 def test_the_meeting_goes_into_both_days(fake_llm, isolated_data, w):
     adam, eve = _pair(w)
@@ -276,3 +292,42 @@ def test_the_talk_at_a_meeting_doesnt_schedule_it_again(isolated_data, w, monkey
         main.decide_phase(rt, 14, "8:05 am", w)
     main.resolve_conversations([adam, eve], 14, "8:05 am", w)
     assert adam.queued is None and eve.queued is None
+
+
+def test_a_meeting_agreed_for_right_now_goes_into_both_plans(isolated_data, w, monkeypatch):
+    """At 11:00 Eve and Adam agreed to review T-6 in the conference room right
+    away. The meeting was only a one-off chunk outside the plans, and Eve's
+    replan (told to drop blocks with Adam for the next hour) sent her back to
+    her office: "work on T-6 from 11:10 am in office_2"."""
+    def gen(prompt, options=None, format=None):
+        if isinstance(format, dict) and "meeting_agreed" in format["properties"]:
+            return json.dumps({"meeting_agreed": True, "location": "conference_room",
+                               "activity": "review T-6's progress", "meeting_time": "now",
+                               "minutes": 15, "commitments": []})
+        if "talking with" in prompt:
+            return "SAY: Let's review it in the conference room." if "dialogue history" not in prompt else "END"
+        return fake_generate(prompt, options, format)
+
+    monkeypatch.setattr(llm, "generate", gen)
+    monkeypatch.setattr(llm, "embed", __import__("conftest").fake_embed)
+    adam, eve = _pair(w)
+    for rt in (adam, eve):
+        rt.agent["current_location"] = "office_2"
+        rt.status = "in Eve's office"
+    adam.decision, adam.reaction = "2", "check on T-6 with Eve Smith"
+    eve.decision = "1"
+    main.resolve_conversations([adam, eve], 3, "7:10 am", w)
+    for rt in (adam, eve):
+        block = _at(rt, "7:15 am")
+        assert block.get("agreed") and block["location"] == "conference_room"
+        assert block["start_time"] == "7:15 am"
+        assert rt.queued is None
+
+    # Still in Eve's office: they go to the conference room before holding it.
+    for rt in (adam, eve):
+        rt.override = None
+        rt.chunk = _at(rt, "7:15 am")
+    assert main.planned_partner(adam, w, "7:15 am") is None
+    for rt in (adam, eve):
+        rt.agent["current_location"] = "conference_room"
+    assert main.planned_partner(adam, w, "7:20 am") is eve.agent

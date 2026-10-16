@@ -712,6 +712,8 @@ def planned_partner(rt, world, current_time):
     if (other is None or other["id"] == rt.agent["id"]
             or other["current_location"] != rt.agent["current_location"]):
         return None
+    if chunk.get("agreed") and rt.agent["current_location"] != chunk["location"]:
+        return None                        # the meeting is held where they agreed
     if _talked_recently_ids(rt.agent["id"], other["id"], rt.planner._parse_time(current_time)) \
             and not meeting_pending(rt, chunk):
         return None
@@ -838,19 +840,23 @@ def resolve_conversations(runtimes, step, current_time, world):
         busy.update({rt.agent["id"], other.agent["id"]})
 
         meeting = outcomes["meeting"]
-        later = meeting if meeting and meeting.get("start") else None
         # At an agreed meeting, "meet now" is the meeting they're in.
-        now_meeting = meeting if meeting and not later and not at_meeting else None
-        if later:
+        meet_now = bool(meeting) and not meeting.get("start") and not at_meeting
+        if meet_now:
+            # Right after this step. It used to be only a one-off queued chunk
+            # outside the plan, and the replan (told to drop blocks with the
+            # partner for the next hour) sent Eve back to her office instead.
+            meeting = {**meeting, "start": step_time(current_time)}
+        if meeting and meeting.get("start"):
             # Into both days before replanning, so the replans plan around it.
-            schedule_meeting(rt, other, later, current_time)
+            schedule_meeting(rt, other, meeting, current_time)
 
         for a, b in ((rt, other), (other, rt)):
             commitment = outcomes["commitments"].get(a.agent["name"])
             replanned = bool(commitment) and replan_after_conversation(
                 a, commitment, current_time, world, partner=b.agent["name"])
-            settle_after_conversation(a, b, step, current_time, world, now_meeting)
-            if replanned and not now_meeting:
+            settle_after_conversation(a, b, step, current_time, world)
+            if replanned and not meet_now:
                 queue_board_visit(a, commitment, current_time, world)
 
 
@@ -985,7 +991,8 @@ def replan_after_conversation(rt, commitment, current_time, world, partner=None)
         # talked, and she spent it standing silently in his office.
         extra += f"""
         {rt.agent['name']} and {partner} just talked, so leave out any block in the
-        next hour that is only about talking or collaborating with {partner}.
+        next hour that is only about talking or collaborating with {partner}, except
+        a meeting the two of them agreed on (keep that one as it is).
         """
     if project_board.is_board_commitment(commitment):
         project_board.add_commitment(rt.agent["id"], commitment)
@@ -1046,8 +1053,9 @@ def replan_after_board(rt, current_time, world):
         log.event(f"{rt.tag} replanned the day around their tasks: {summary or 'none open'}")
 
 
-def settle_after_conversation(rt, partner, step, current_time, world, agreement=None):
-    """Hold both agents in place for one step, then send them to any agreed meeting."""
+def settle_after_conversation(rt, partner, step, current_time, world):
+    """Hold both agents in place for one step; their plans take over after that
+    (including a meeting they just agreed to hold right away)."""
     rt.last_react_step = step
     rt.override = {
         "activity": f"{current_time}: Talk with {partner.agent['name']}",
@@ -1061,18 +1069,6 @@ def settle_after_conversation(rt, partner, step, current_time, world, agreement=
     update_agent_state(rt.agent, rt.chunk, world)
     rt.agent["interacting_with"] = None
     rt.decision = "3"
-
-    if agreement:
-        start = step_time(current_time)
-        rt.queued = {
-            "activity": f"{start}: {agreement['activity']}",
-            "location": agreement["location"],
-            "start_time": start,
-            "duration": agreement["minutes"],
-            "target_agent": None,        # location is pinned, don't chase the partner
-            "is_reaction": True,
-            "pinned": True,
-        }
 
 def schedule_meeting(rt, other, meeting, current_time):
     """A meeting the two agreed on for later today goes into both their days

@@ -158,6 +158,12 @@ def test_a_teammates_start_step_is_turned_into_a_check(w):
     ("I will review T-2 with Eve once it is in review", "I will review T-2 with Eve once it is in review"),
     ("I will move T-1 to review and check on T-2", "I will move T-1 to review"),
     ("I will finish T-1", "I will finish T-1"),
+    # Cutting just the id out left "I will ensure is properly set up" and
+    # "keep T-6 in todo until is in review" in the run log.
+    ("I will make sure T-2 is properly set up so we can move it to in progress, "
+     "and I'll check in on T-1 later today", "I'll check in on T-1 later today"),
+    ("I will start T-1 as soon as T-2 moves to review", "I will start T-1 as soon as T-2 moves to review"),
+    ("I will keep T-1 in todo until T-2 is in review", "I will keep T-1 in todo until T-2 is in review"),
 ])
 def test_promises_about_a_teammates_task(w, commitment, kept):
     _run_board(w)

@@ -1361,10 +1361,28 @@ class Planner:
         if self.is_joint(text, owners):
             return text
         mine = [tid for tid in project_board.task_ids_in(text) if tid not in theirs]
-        kept = project_board.strip_task_ids(text, theirs, with_titles=True) if mine else ""
+        kept = self._own_clauses(text, agent, world, owners) if mine else ""
         log.debug(f"{agent['name']}'s commitment was about a teammate's task "
                   f"({', '.join(theirs)}): {text!r} -> {kept!r}")
         return kept
+
+    _CLAUSE = re.compile(r"\s*;\s*|,?\s+and\s+(?:then\s+)?|,\s+(?=(?:then\s+)?(?:I\b|I'll|I'm|we\b))",
+                         re.IGNORECASE)
+
+    def _own_clauses(self, text, agent, world, owners):
+        """The parts of a commitment that are the agent's: a part only about a
+        teammate's task is dropped whole. Cutting just the task id out left
+        "I will ensure is properly set up" and "keep T-6 in todo until is in
+        review". A part about the agent's own task that waits on a teammate's
+        ("start T-6 as soon as T-1 moves to review") is kept as it is."""
+        kept = []
+        for part in self._CLAUSE.split(text):
+            ids = project_board.task_ids_in(part)
+            theirs = project_board.teammate_task_ids(world, agent["id"], part)
+            if not theirs or len(ids) > len(theirs) or self.is_joint(part, owners):
+                if part.strip():
+                    kept.append(part.strip())
+        return " and ".join(kept)
 
     def _meeting_start(self, text, current_time):
         """When an agreed meeting starts: None for right afterwards ("now", no
@@ -1440,7 +1458,10 @@ class Planner:
                     "location": data["location"],
                     "activity": data["activity"],
                     "minutes": max(10, min(data["minutes"] or 30, 60)),
-                    "start": self._meeting_start(data.get("meeting_time"), current_time),
+                    # "now" with "check-in at 8:00 am" as the activity (said at
+                    # 7:45) was put at 7:50: the time named in the activity wins.
+                    "start": (self._meeting_start(data.get("activity"), current_time)
+                              or self._meeting_start(data.get("meeting_time"), current_time)),
                 }
             for c in data["commitments"]:
                 text = future_part(c["commitment"].strip().rstrip("."))
