@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -105,16 +106,35 @@ def fake_llm(monkeypatch):
     monkeypatch.setattr(llm, "embed", fake_embed)
 
 
+@pytest.fixture(scope="session")
+def committed_data(tmp_path_factory):
+    """The repo's data/ as committed. A sim run rewrites the memory streams and
+    world.json in place, and tests built on that leftover state failed until it
+    was reverted. Falls back to the working copy outside a git checkout."""
+    out = tmp_path_factory.mktemp("committed") / "data"
+    shutil.copytree(ROOT / "data", out)
+    try:
+        listed = subprocess.run(["git", "ls-files", "data"], cwd=ROOT, capture_output=True,
+                                text=True, check=True).stdout.split()
+        for path in listed:
+            blob = subprocess.run(["git", "show", f"HEAD:{path}"], cwd=ROOT,
+                                  capture_output=True, check=True).stdout
+            (out.parent / path).write_bytes(blob)
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return out
+
+
 @pytest.fixture
-def isolated_data(tmp_path, monkeypatch):
+def isolated_data(tmp_path, monkeypatch, committed_data):
     """Point the memory streams and world file at a temp copy of the repo data."""
     data = tmp_path / "data"
-    shutil.copytree(ROOT / "data", data)
+    shutil.copytree(committed_data, data)
     monkeypatch.setattr(memory_stream, "DATA_DIR", data)
     monkeypatch.setattr(world_module, "WORLD_PATH", data / "world" / "world.json")
     return data
 
 
 @pytest.fixture
-def world():
-    return json.loads((ROOT / "data" / "world" / "world.json").read_text())
+def world(committed_data):
+    return json.loads((committed_data / "world" / "world.json").read_text())
