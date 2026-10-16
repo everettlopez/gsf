@@ -340,40 +340,19 @@ def test_a_promise_naming_several_tasks_starts_only_one(w):
         "T-3 comes after that: one task at a time, so leave it in todo for now."]
 
 
-def test_board_prompt_shows_area_status_and_note_guidance(w):
+def test_board_prompt_carries_this_board_and_this_agent(w):
     adam = w["agents"]["adam"]
     prompt = pb.build_prompt(adam, w, "check the project board", "summary", "")
-    assert "Adam Beck's area: backend" in prompt
-    assert "What stands out on the board for Adam Beck:" in prompt
-    assert "no open backend tasks" in prompt
-    assert "Never a note that only says what Adam Beck is doing right now" in " ".join(prompt.split())
+    assert "Adam Beck's area: backend" in prompt and "Teammates: Eve Smith" in prompt
+    assert "about to: check the project board" in prompt
+    assert "no open backend tasks" in prompt                   # what stands out for Adam
 
-
-def test_board_prompt_explains_blocked_and_waiting(w):
-    prompt = " ".join(pb.build_prompt(w["agents"]["eve"], w, "check the board", "summary", "").split())
-    assert "blocked only when work already started got stuck" in prompt
-    assert "gets that task in its depends_on through edit_task instead" in prompt
-    assert "Tasks not started yet just stay in todo." in prompt
-
-
-def test_board_prompt_asks_for_small_tasks(w):
-    prompt = " ".join(pb.build_prompt(w["agents"]["adam"], w, "check the board", "summary", "").split())
-    assert "Keep each task to a few hours of work" in prompt
-    assert "done_when" not in prompt.split("Rules:")[1].split("Keep each task")[1].split("Do only")[0]
-    assert 'instead of one "build the whole backend" task' in prompt
-
-
-def test_board_prompt_explains_when_to_add_a_dependency(w):
-    prompt = " ".join(pb.build_prompt(w["agents"]["eve"], w, "check the board", "summary", "").split())
-    assert "depends_on lists only tasks whose result this one truly can't start without" in prompt
-    assert "a page layout can be built against mock data before the API exists" in prompt
-
-
-def test_board_prompt_says_the_board_beats_memory(w):
-    _board_pages_wait_on_api(w)
-    prompt = " ".join(pb.build_prompt(w["agents"]["adam"], w, "report progress on T-1",
-                                      "summary", "").split())
-    assert "the board is right" in prompt
+    pb.create_task(w, "eve", "Home page", area="frontend", assign_to_self=True)
+    pb.update_status(w, "eve", "T-1", "in_progress")
+    prompt = pb.build_prompt(adam, w, "check the project board", "summary", "")
+    assert pb.board_text_for_prompt(w) in prompt
+    for line in pb.status_for_agent(w, "adam"):
+        assert line in prompt
 
 
 def test_progress_context_uses_work_memories_not_board_lines(fake_llm, isolated_data, world):

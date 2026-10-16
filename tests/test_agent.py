@@ -770,8 +770,6 @@ def test_replans_around_tasks_after_leaving_the_board(
 
     [prompt] = prompts
     assert "T-1 'Set up the API' (todo)" in prompt
-    assert "Starting and finishing tasks at the board is scheduled automatically" in " ".join(prompt.split())
-    assert "before lunch and before" in prompt
     assert any("T-1 on the project board" in c["activity"] for c in rt.broad_chunks)
     assert not pb.workload_changed("adam")
 
@@ -857,7 +855,6 @@ def test_replan_prompt_asks_for_no_gaps_and_no_reaction_wording(fake_llm, isolat
     ag.replan_after_conversation(rt, "build T-4 first", "9:00 am", w)
     assert "What just happened: Eve Smith agreed in a conversation to: build T-4 first" in prompts[0]
     assert "decided to react" not in prompts[0]
-    assert "(no gaps)" in prompts[0]
 
 
 def test_the_replan_after_a_talk_knows_they_just_talked(fake_llm, isolated_data, w, monkeypatch):

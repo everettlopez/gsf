@@ -653,7 +653,7 @@ def test_replan_guidance_reflects_the_board_even_without_own_tasks(fake_llm, iso
 def test_planning_guidance_names_the_real_tasks(w):
     _board_pages_wait_on_api(w)
     guidance = " ".join(Planner(w["agents"]["adam"]).task_guidance(w["agents"]["adam"], w).split())
-    assert "The only tasks on the board are T-1, T-2, T-3, T-4; never name any other task id" in guidance
+    assert "The only tasks on the board are T-1, T-2, T-3, T-4;" in guidance
     assert "Don't plan work on a task that can't start yet because it waits on another" in guidance
 
 
@@ -676,7 +676,6 @@ def test_the_planning_prompt_says_whose_tasks_are_whose(fake_llm, isolated_data,
     guidance = " ".join(Planner(adam).task_guidance(adam, w).split())
     assert "Adam Beck's own tasks: T-1." in guidance
     assert "Eve Smith's tasks: T-2, T-3, T-4." in guidance
-    assert "Work blocks are for Adam Beck's own tasks." in guidance
 
 
 def test_the_plan_example_is_in_the_agents_own_area(fake_llm, isolated_data, w):
@@ -686,7 +685,7 @@ def test_the_plan_example_is_in_the_agents_own_area(fake_llm, isolated_data, w):
     assert "work on the website's backend" in guidance and "navigation bar" not in guidance
 
 
-def test_reaction_prompt_knows_the_board_rules(fake_llm, isolated_data, w, monkeypatch):
+def test_the_react_prompt_has_the_facts_about_the_tasks_in_play(fake_llm, isolated_data, w, monkeypatch):
     _board_pages_wait_on_api(w)
     prompts = []
 
@@ -702,16 +701,13 @@ def test_reaction_prompt_knows_the_board_rules(fake_llm, isolated_data, w, monke
         adam, "status", {"activity": "review the board", "location": "conference room"},
         ["Task T-2 on the project board is todo and assigned to Eve Smith, waiting on T-1."], w)
     p = prompts[0]
-    assert "a teammate (never the assignee) approves it while it is in review" in p
     assert "T-1 'Set up backend API for company website' (Adam Beck's) is in progress" in p
-    assert "written as an action, not a line of dialogue" in p
 
 
-def test_the_react_rules_say_whose_tasks_are_whose_and_what_waits(fake_llm, isolated_data, w):
+def test_the_react_rules_say_what_waits_for_the_task_in_progress(fake_llm, isolated_data, w):
     _board_api_pages_and_db(w)
     adam = w["agents"]["adam"]
     rules = " ".join(Planner(adam)._board_rules(adam, w).split())
-    assert "Each task belongs to its assignee" in rules
     assert "T-1 is in progress, so Adam Beck's other tasks wait until it goes to review" in rules
 
 

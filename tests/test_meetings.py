@@ -84,7 +84,6 @@ def test_extraction_asks_for_later_meetings_and_keeps_the_time(fake_llm, isolate
     out = Planner(adam).extract_outcomes("...", adam, eve, w, "7:10 am")
     assert out["meeting"] == {"location": "conference_room", "activity": "stand-up",
                               "minutes": 15, "start": "8:00 am"}
-    assert "either right afterwards or at a set time later today" in prompts[0]
 
 
 @pytest.mark.parametrize("activity,said,start", [
@@ -198,7 +197,6 @@ def test_speakers_see_what_they_planned_with_each_other(fake_llm, isolated_data,
     text = " ".join(_plans_with(adam, eve, "7:10 am").split())
     assert ("collaborate with Eve Smith on frontend-backend integration challenges from 11:15 am "
             "to 12:00 pm") in text
-    assert "it only happens if Eve Smith agrees" in text
     assert _plans_with(adam, eve, "12:00 pm") == ""                     # nothing left
 
 

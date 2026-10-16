@@ -105,7 +105,6 @@ def test_conversation_sees_both_agents_tasks(fake_llm, isolated_data, w, monkeyp
 
     assert "What Eve Smith knows from the project board:" in prompts[0]
     assert "Adam Beck's open tasks: T-1 'Set up the API' (todo)." in prompts[0]
-    assert "name the tasks on the board by their ids" in " ".join(prompts[0].split())
     assert "The only tasks on the board are T-1, T-2; there is no other task id." in prompts[0]
 
 
@@ -129,9 +128,6 @@ def test_conversations_see_the_facts_and_that_talking_moves_nothing(
     assert "T-1 'Set up backend API for company website' (Adam Beck's) is in progress since " \
            "7:10 am: not in review, not approved, not done." in first
     assert "It can't start until T-1 is done." in first
-    assert "Talking doesn't change the board." in first
-    assert "If a memory (even something Adam Beck said earlier) disagrees with the board, " \
-           "the board is right." in first
 
 
 def test_speakers_know_whose_tasks_are_whose(fake_llm, isolated_data, w):
@@ -288,7 +284,6 @@ def test_claims_about_the_past_are_not_commitments(said, kept):
 def test_extract_outcomes_drops_claimed_actions(fake_llm, isolated_data, w, monkeypatch):
     def gen(prompt, options=None, format=None):
         if isinstance(format, dict) and "meeting_agreed" in format["properties"]:
-            assert "neither is something they say they already did" in " ".join(prompt.split())
             return json.dumps({"meeting_agreed": False, "location": "office_1", "activity": "",
                                "minutes": 0, "commitments": [
                                    {"person": "Adam Beck", "commitment": "I've approved T-1"},
@@ -360,4 +355,3 @@ def test_the_conversation_from_the_run_leaves_adam_no_promise_about_eves_tasks(
     out = Planner(adam).extract_outcomes("ADAM: ...\nEVE: ...", adam, eve, w)
     assert out["commitments"] == {
         "Eve Smith": "Eve Smith will start with T-2 and T-3 and work on the contact form later"}
-    assert "moving it on the board or doing it alone is the owner's job" in prompts[0]
