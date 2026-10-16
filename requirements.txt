@@ -1,3 +1,4 @@
 numpy==2.5.3
 ollama==0.6.3
 lemminflect==0.2.3
+anthropic==1.15.0

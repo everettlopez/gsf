@@ -63,12 +63,18 @@ Reflection (when perceived importance adds up to 150)
 ## Running
 
 ```bash
-pip install -r requirements.txt        # numpy, ollama, lemminflect
+pip install -r requirements.txt        # numpy, ollama, lemminflect, anthropic
 ollama pull qwen3 && ollama pull nomic-embed-text
 
 python scripts/seed_memories.py --reset   # fresh start: clear memories + board, then seed
 python src/main.py                     # run the simulation
 ```
+
+Two model roles (`src/llm.py`): the agents' minds (importance, reactions, planning,
+conversation, the board) run on Ollama `qwen3`; their hands (the executor that will
+write and test code for a board task) run on a hosted model with tools, Claude Opus 5.5
+by default. The executor reads `GA_EXECUTOR_MODEL`, `GA_EXECUTOR_EFFORT` (default `high`)
+and the usual Anthropic credentials (`ANTHROPIC_API_KEY` or an `ant auth login` profile).
 
 The run length (start time, steps) is at the top of `src/main.py`; the agents'
 settings (cooldowns, reflection threshold, paper-strict mode) are at the top of
@@ -114,7 +120,7 @@ Verbosity is controlled by `GA_LOG`:
 | `src/reflect.py` | Reflection: questions → retrieval → cited insights |
 | `src/world.py`, `perceive.py` | World state and what agents observe |
 | `src/project_board.py` | The shared project board: structured tasks and the actions agents take on them |
-| `src/llm.py` | The only module that talks to Ollama |
+| `src/llm.py` | The only module that talks to models: Ollama for the minds, Claude for the executor |
 | `src/log.py` | Logging levels, output layout, and timings |
 
 ## Project board
@@ -340,6 +346,6 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The suite runs without Ollama: `tests/conftest.py` swaps `llm.generate` / `llm.embed`
+The suite runs without Ollama or an API key: `tests/conftest.py` swaps `llm.generate` / `llm.embed`
 for deterministic fakes, and includes full-loop runs covering planning, reflection,
 and the conversation → commitment → replan path.
