@@ -7,8 +7,9 @@ day before (section 4.3: the previous day's summary starts the next day's
 plan). Each of those is a field here, kept as the sentences the prompts use.
 
 work_style and communication_style describe how the agent goes about work and
-talk. They are read by the prompts that make decisions (see describe_style),
-not only the ones that set the tone.
+talk. They are part of the profile, and style() also puts them into the
+prompts that make decisions (react or not, board actions, what to say), not
+only the ones that set the tone.
 """
 
 import json
@@ -42,6 +43,28 @@ def profile(agent_id):
         f"Name: {p['name']} (age: {p['age']})",
         f"Innate traits: {', '.join(p['innate_traits'])}",
         *p["occupation"], *p["lifestyle"], *p["relationships"], *p["aspirations"],
+        " ".join(p.get("work_style", [])), " ".join(p.get("communication_style", [])),
         previous_day(p),
     ]
-    return _INDENT.join(paragraphs)
+    return _INDENT.join(x for x in paragraphs if x)
+
+
+def style(agent_id, indent="        "):
+    """How the agent works and talks, for the prompts that decide what they do:
+    react or carry on, what to do at the board, what to say. The summary those
+    prompts start with comes from memories and says little about habits, so
+    Adam and Eve made the same choices in different words."""
+    try:
+        p = load(agent_id)
+    except FileNotFoundError:
+        return ""
+    name = p["name"].split()[0]
+    lines = []
+    if p.get("work_style"):
+        lines.append(f"How {name} works: {' '.join(p['work_style'])}")
+    if p.get("communication_style"):
+        lines.append(f"How {name} communicates: {' '.join(p['communication_style'])}")
+    if not lines:
+        return ""
+    lines.append(f"{name} decides the way this person would.")
+    return "\n" + "\n".join(indent + line for line in lines) + "\n"

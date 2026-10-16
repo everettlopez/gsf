@@ -53,6 +53,7 @@ from datetime import datetime
 import clock
 import llm
 import log
+import persona
 from llm import CTX
 
 BOARD_OBJECT = "project_board"
@@ -1259,7 +1260,7 @@ def build_prompt(agent, world, activity, summary, role_context, progress="", com
     others = ", ".join(a["name"] for a in world["agents"].values() if a["id"] != agent["id"])
     return f"""
     {summary}
-
+{persona.style(agent["id"], indent="    ")}
     What {agent['name']} knows about the team and the project:
     {role_context or '- (nothing specific)'}
 

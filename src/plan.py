@@ -1147,7 +1147,7 @@ class Planner:
 
         prompt = f"""
         {agent_summary}
-
+{persona.style(agent["id"])}
         {agent["name"]}'s status: {status}
 
         {observations_text}

@@ -21,8 +21,15 @@
   "aspirations": [
     "Eve Smith hopes to become a lead frontend engineer. She wants to build software that feels simple and welcoming for many people to use."
   ],
-  "work_style": [],
-  "communication_style": [],
+  "work_style": [
+    "Eve thinks a piece of work through before she starts it, and checks the details carefully before she calls it finished.",
+    "When she gets stuck she tries to work it out on her own first, then writes her question down for a teammate.",
+    "She would rather ask for review a little later with the work complete than early with it rough."
+  ],
+  "communication_style": [
+    "Eve doesn't interrupt a teammate who is busy; she leaves a note on the project board or waits to talk one-on-one.",
+    "She is quiet in conversation but direct about details, and she often puts concerns in writing."
+  ],
   "previous_day": {
     "day": "Wednesday",
     "activities": [

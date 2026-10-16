@@ -21,8 +21,15 @@
   "aspirations": [
     "Adam Beck hopes to become a software architect. He wants to build software that positively impacts many people."
   ],
-  "work_style": [],
-  "communication_style": [],
+  "work_style": [
+    "Adam gets a rough version working end to end first, then improves it in small steps.",
+    "If he has been stuck on the same problem for half an hour, he goes and asks a teammate instead of staying stuck.",
+    "He finishes the task he has in progress before taking on another one."
+  ],
+  "communication_style": [
+    "Adam would rather walk over and talk something through than write it down.",
+    "He keeps updates short and concrete: what works, what doesn't, and what he'll do next."
+  ],
   "previous_day": {
     "day": "Wednesday",
     "activities": [

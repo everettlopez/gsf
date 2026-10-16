@@ -19,6 +19,7 @@ from datetime import timedelta
 
 import llm
 import log
+import persona
 import project_board
 from llm import CTX
 
@@ -188,7 +189,7 @@ def _generate_line(speaker, listener, current_time, status, history, intent, wor
 
     prompt = f"""
     {speaker.planner.generate_agent_summary(speaker.agent)}
-
+{persona.style(speaker.agent["id"], indent="    ")}
     It is {current_time}.
     {name}'s status: {status}
 
