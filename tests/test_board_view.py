@@ -202,12 +202,10 @@ def test_task_facts_spell_out_what_in_progress_means(w):
         "7:10 am: not in review, not approved, not done."]
 
 
-def test_the_empty_board_line_names_no_id(w):
+def test_the_task_id_line_lists_only_real_ids(w):
     line = pb.task_id_line(w)
     assert "no tasks yet" in line and not TASK_ID.search(line)
 
-
-def test_with_tasks_the_prompts_list_the_real_ids(w):
     pb.create_task(w, "adam", "Auth endpoints", area="backend", assign_to_self=True)
     pb.create_task(w, "eve", "Homepage", area="frontend", assign_to_self=True)
     assert pb.task_id_line(w) == "The only tasks on the board are T-1, T-2; there is no other task id."
@@ -218,32 +216,22 @@ def test_a_short_title_is_left_alone(w):
     assert pb.fix_task_refs(w, "work on T-2 'homepage layout'") == "work on T-2 'homepage layout'"
 
 
-@pytest.mark.parametrize("activity,expected", [
+@pytest.mark.parametrize("activity,board", [
     ("updating task statuses based on recent progress", True),
     ("assign T-4 to Adam", True),
     ("update T-1", True),
-    ("work on T-1 'Set up the API'", False),
-    ("add tests for T-1", False),
-])
-def test_board_only_activities_route_to_the_board(activity, expected):
-    assert pb.mentions_board_explicitly(activity) is expected
-
-
-@pytest.mark.parametrize("activity,board", [
     ("mark T-1 as completed and move it to the done column from 9:20 am to 9:30 am", True),
     ("start T-3 'Design and implement about page layout' from 1:00 pm to 1:10 pm", True),
     ("move it to the review column", True),
-    ("work on T-1 'Set up backend API' from 7:30 am to 8:50 am", False),
+    ("Move to the project_board to update tasks", True),     # the object's name, as observed
+    ("work on T-1 'Set up the API'", False),
+    ("add tests for T-1", False),
     ("start working on T-3", False),
     ("discuss T-1 with Eve", False),
     ("move to office_1", False),
 ])
-def test_board_actions_go_to_the_board(activity, board):
+def test_what_counts_as_board_work(activity, board):
     assert pb.mentions_board_explicitly(activity) is board
-
-
-def test_project_board_with_an_underscore_is_board_work():
-    assert pb.mentions_board_explicitly("Move to the project_board to update tasks")
 
 
 def test_start_step_for_a_task_already_in_progress_becomes_a_progress_report(w):

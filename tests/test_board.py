@@ -108,20 +108,16 @@ def test_world_has_an_empty_project_and_a_board_in_the_conference_room(w):
 def test_create_task_is_fully_structured_and_numbered(w):
     t1 = pb.create_task(w, "adam", "Set up the API", "Make the API.", "backend", "high",
                         done_when="Health check passes.")
-    t2 = pb.create_task(w, "eve", "Build the home page", area="frontend", depends_on=["t-1"])
+    t2 = pb.create_task(w, "eve", "Build the home page", area="frontend",
+                        depends_on=["t-1", "T-1", "T-1"])
 
     assert set(t1) == TASK_FIELDS
     assert (t1["id"], t2["id"]) == ("T-1", "T-2")
     assert t1["status"] == "todo" and t1["assignee"] is None
     assert t1["history"][0]["event"] == "created"
-    assert t2["depends_on"] == ["T-1"]          # ids are normalized
+    assert t2["depends_on"] == ["T-1"]          # ids are normalized and listed once
     assert pb.get_project(w)["status"] == "in_progress"
 
-
-def test_dependencies_are_listed_once(w):
-    pb.create_task(w, "adam", "API", area="backend")
-    t = pb.create_task(w, "eve", "Contact form", area="frontend", depends_on=["T-1", "t-1", "T-1"])
-    assert t["depends_on"] == ["T-1"]
 
 
 def test_duplicate_titles_are_refused(w):
@@ -746,15 +742,12 @@ def test_open_tasks_for_skips_done_and_other_peoples_tasks(w):
     ("assign T-3 to Eve", True),
     ("I will add the backend tasks for the goal", True),
     ("make sure the project board reflects the current status", True),
+    ("I will update the task assignments for T-4", True),
+    ("bring snacks to the meeting", False),
 ])
 def test_board_promises_need_a_board_action(promise, board):
     assert pb.is_board_commitment(promise) is board
 
-
-def test_board_commitments_are_recognised():
-    assert pb.is_board_commitment("I will update the task assignments for T-4")
-    assert pb.is_board_commitment("make sure the project board reflects the current status")
-    assert not pb.is_board_commitment("bring snacks to the meeting")
 
 
 def test_promises_are_dropped_after_visits_without_acting(w):

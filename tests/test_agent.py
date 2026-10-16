@@ -308,21 +308,17 @@ def test_is_the_plan(reaction, planned, same):
     assert ag._is_the_plan(reaction, planned) is same
 
 
-def test_reacting_with_the_planned_step_is_ignored(fake_llm, isolated_data, w):
-    rt = ag.Agent.load("adam", w)
-    rt.chunk = {"activity": "check the project board in the conference room from 7:05 am to 7:20 am",
-                "board_work": True}
-    assert ag.pointless_reaction(rt, "go to the conference room to check the project board",
-                                   "7:05 am", w) == "that is the plan already"
-
-
-def test_going_to_the_board_while_the_plan_is_a_board_visit_is_the_plan(fake_llm, isolated_data, w):
+@pytest.mark.parametrize("planned,reaction", [
+    ("check the project board in the conference room from 7:05 am to 7:20 am",
+     "go to the conference room to check the project board"),
+    ("review any new backend tasks added to the project board from 7:05 am to 7:20 am",
+     "go to the conference room to review the project board"),
+])
+def test_reacting_with_the_planned_board_visit_is_ignored(fake_llm, isolated_data, w, planned, reaction):
     rt = ag.Agent.load("adam", w)
     rt.agent["current_location"] = "reception"
-    rt.chunk = {"activity": "review any new backend tasks added to the project board from "
-                            "7:05 am to 7:20 am", "board_work": True}
-    assert ag.pointless_reaction(rt, "go to the conference room to review the project board",
-                                   "7:05 am", w) == "that is the plan already"
+    rt.chunk = {"activity": planned, "board_work": True}
+    assert ag.pointless_reaction(rt, reaction, "7:05 am", w) == "that is the plan already"
 
 
 @pytest.mark.parametrize("reaction,ignored", [
@@ -626,32 +622,24 @@ def test_a_move_only_reaction_relocates_without_a_cooldown(fake_llm, isolated_da
     assert adam.chunk["activity"] == "11:10 am: set up development environment"
 
 
-@pytest.mark.parametrize("reaction,expected", [
-    ("Move to office_1 to continue debugging integration issues", "office_1"),
-    ("head back to my office to keep coding", "office_1"),
-    ("go to the conference room to update T-1", None),    # board work: a real reaction
-    ("Move to office_2 to talk with Eve", None),          # about a teammate: a real reaction
-    ("Move to office_2 to check something", None),        # already there
-    ("Let's quickly check in on T-4 progress", None),     # not a move
-    ("ask Eve about the API", None),
-])
-def test_relocation_target(w, reaction, expected):
-    adam = w["agents"]["adam"]
-    adam["current_location"] = "office_2"
-    assert ag.relocation_target(reaction, adam, w) == expected
-
-
 @pytest.mark.parametrize("reaction,current,expected", [
-    ("Walk to the conference room to update the project board",
-     "Review the day's tasks and priorities", None),
-    ("Move to the conference room to update the project board",
-     "Begin designing the homepage layout", None),
-    ("Move to office_1 to write the deployment docs", "Debug integration issues", None),
+    ("Move to office_1", "Debug integration issues", "office_1"),
+    ("Move to office_1 to continue debugging integration issues", "Debug integration issues", "office_1"),
     ("Move to office_1 to set up the development environment as planned",
      "Set up the development environment", "office_1"),
-    ("Move to office_1 to continue debugging integration issues",
-     "Debug integration issues", "office_1"),
-    ("Move to office_1", "Debug integration issues", "office_1"),
+    ("head back to my office to keep coding", "", "office_1"),
+    # A move to do something else is a real reaction:
+    ("Move to office_1 to write the deployment docs", "Debug integration issues", None),
+    ("Move to the conference room to update the project board",
+     "Begin designing the homepage layout", None),
+    ("Walk to the conference room to update the project board",
+     "Review the day's tasks and priorities", None),
+    ("go to the conference room to update T-1", "", None),         # board work
+    ("Move to office_2 to talk with Eve", "", None),               # about a teammate
+    # Not a room change at all:
+    ("Move to office_2 to check something", "", None),             # already there
+    ("Let's quickly check in on T-4 progress", "", None),          # not a move
+    ("ask Eve about the API", "", None),
 ])
 def test_relocation_only_when_the_purpose_is_the_current_work(w, reaction, current, expected):
     adam = w["agents"]["adam"]
@@ -659,29 +647,19 @@ def test_relocation_only_when_the_purpose_is_the_current_work(w, reaction, curre
     assert ag.relocation_target(reaction, adam, w, current) == expected
 
 
-def test_board_activity_goes_to_the_board_without_asking_the_llm(
-    fake_llm, isolated_data, w, monkeypatch
-):
+@pytest.mark.parametrize("chunk", [
+    {"activity": "11:40 am: reviewing the project board for updates"},          # says so
+    {"activity": "7:20 am: checking all frontend tasks for updates", "board_work": True},
+])
+def test_board_work_goes_to_the_board_without_asking_the_llm(fake_llm, isolated_data, w,
+                                                             monkeypatch, chunk):
     rt = ag.Agent.load("eve", w)
     monkeypatch.setattr(rt.planner, "choose_location",
                         lambda *a, **k: pytest.fail("board work should not ask the LLM"))
-    rt.chunk = {"activity": "11:40 am: reviewing the project board for updates",
-                "start_time": "11:40 am", "duration": 10, "target_agent": None}
+    rt.chunk = {"start_time": "7:20 am", "duration": 10, "target_agent": None, **chunk}
     ag.apply_chunk(rt, w)
     assert rt.agent["current_location"] == "conference_room"
     assert rt.agent["interacting_with"] == "project_board"
-
-
-def test_inherited_board_work_goes_to_the_board(fake_llm, isolated_data, w, monkeypatch):
-    rt = ag.Agent.load("adam", w)
-    monkeypatch.setattr(rt.planner, "choose_location",
-                        lambda *a, **k: pytest.fail("board work should not ask the LLM"))
-    rt.chunk = {"activity": "7:20 am: checking all frontend tasks for updates",
-                "start_time": "7:20 am", "duration": 10, "target_agent": None,
-                "board_work": True}
-    ag.apply_chunk(rt, w)
-    assert (rt.agent["current_location"], rt.agent["interacting_with"]) == \
-        ("conference_room", "project_board")
 
 
 def test_apply_chunk_skips_the_location_llm_for_solo_work(fake_llm, isolated_data, w, monkeypatch):

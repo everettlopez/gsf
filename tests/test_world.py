@@ -62,31 +62,19 @@ def test_observations_ignore_agents_in_other_rooms(world):
     assert not any(o.startswith("Eve Smith") for o in observations)
 
 
-def test_action_to_present_converts_leading_verb():
-    assert action_to_present("work on the navigation menu") == "working on the navigation menu"
-    assert action_to_present("") == ""
-
-
-@pytest.mark.parametrize("action,expected", [
-    ("updated the project board", "updating the project board"),
-    ("update the project board", "updating the project board"),
-    ("Let's quickly check in on T-4", "Let's quickly check in on T-4"),
-    ("reporting progress on T-1", "reporting progress on T-1"),
-    ("set up the environment", "setting up the environment"),
-])
-def test_action_to_present(action, expected):
-    assert action_to_present(action) == expected
-
-
 @pytest.mark.parametrize("plan,shown", [
+    ("work on the navigation menu", "working on the navigation menu"),
+    ("set up the environment", "setting up the environment"),
+    ("updated the project board", "updating the project board"),      # not "updateding"
     ("keep working on T-2 'Homepage'", "still working on T-2 'Homepage'"),
     ("continue working on the API", "still working on the API"),
     ("start building the navigation bar", "starting to build the navigation bar"),
-    ("work on T-1", "working on T-1"),
-    ("update the project board", "updating the project board"),
+    ("reporting progress on T-1", "reporting progress on T-1"),       # already -ing
+    ("Let's quickly check in on T-4", "Let's quickly check in on T-4"),
+    ("", ""),
 ])
 def test_shown_actions_read_naturally(plan, shown):
-    assert world_module.action_to_present(plan) == shown
+    assert action_to_present(plan) == shown
 
 
 def test_a_shown_action_keeps_text_after_a_colon(w):

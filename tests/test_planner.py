@@ -442,22 +442,13 @@ def test_long_solo_blocks_do_not_follow_a_teammate(w, activity, target):
 
 
 @pytest.mark.parametrize("step,target", [
-    ("8:30 am: Summarize key points from the discussion", None),
-    ("8:20 am: Synchronize the data models", None),
-    ("8:10 am: Review authentication requirements with Eve Smith", "eve"),
-    ("9:00 am: Discuss integration requirements", "eve"),
-])
-def test_nouns_are_not_collaboration(w, step, target):
-    adam = w["agents"]["adam"]
-    parent = {"activity": "collaborate with Eve Smith", "target_agent": "eve"}
-    assert Planner(adam)._chunk_from_activity(step, adam, parent)["target_agent"] == target
-
-
-@pytest.mark.parametrize("step,target", [
     ("9:00 am: Discuss integration requirements", "eve"),
     ("9:40 am: Debug integration issues with Eve", "eve"),
+    ("8:10 am: Review authentication requirements with Eve Smith", "eve"),
     ("9:10 am: Set up the development environment", None),
     ("9:15 am: Review backend requirements", None),
+    ("8:30 am: Summarize key points from the discussion", None),     # a noun isn't working together
+    ("8:20 am: Synchronize the data models", None),
 ])
 def test_finer_steps_keep_the_teammate_only_when_working_with_them(w, step, target):
     adam = w["agents"]["adam"]
@@ -716,17 +707,12 @@ def test_reaction_prompt_knows_the_board_rules(fake_llm, isolated_data, w, monke
     assert "written as an action, not a line of dialogue" in p
 
 
-def test_the_react_prompt_says_one_task_at_a_time(fake_llm, isolated_data, w):
+def test_the_react_rules_say_whose_tasks_are_whose_and_what_waits(fake_llm, isolated_data, w):
     _board_api_pages_and_db(w)
-    rules = Planner(w["agents"]["adam"])._board_rules(w["agents"]["adam"], w)
-    assert "T-1 is in progress, so Adam Beck's other tasks wait until it goes to review" in rules
-
-
-def test_the_react_prompt_says_whose_tasks_are_whose(fake_llm, isolated_data, w):
-    _board_api_and_pages(w)
     adam = w["agents"]["adam"]
     rules = " ".join(Planner(adam)._board_rules(adam, w).split())
     assert "Each task belongs to its assignee" in rules
+    assert "T-1 is in progress, so Adam Beck's other tasks wait until it goes to review" in rules
 
 
 def test_the_reaction_prompt_says_which_ids_exist(fake_llm, isolated_data, w, monkeypatch):
