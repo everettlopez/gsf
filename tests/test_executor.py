@@ -319,3 +319,18 @@ def test_the_budget_comes_from_the_environment(monkeypatch):
     assert executor.run_budget().left == executor.DEFAULT_MAX_SESSIONS  # real hands: capped
     monkeypatch.setenv("GA_EXECUTOR_MAX_SESSIONS", "5")
     assert executor.run_budget().left == 5
+
+
+def test_a_failing_executor_stops_the_hands_and_the_agent_carries_on(fake_llm, isolated_data, w):
+    import llm
+
+    def out_of_credit(agent, task, workspace):
+        raise llm.LLMError("executor call failed: your credit balance is too low")
+
+    rt, _ = _eve_at_her_desk(w, out_of_credit)
+    before = len(rt.stream.memories)
+    assert ag.work_on_task(rt, "9:00 am", w) is None
+    assert rt.executor is None                                          # no more sessions this run
+    assert len(rt.stream.memories) == before and rt.work_log.get("T-2") == []
+    rt.decision = "1"
+    rt.act(21, "9:05 am", w)                                            # the step still runs

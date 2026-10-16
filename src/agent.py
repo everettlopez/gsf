@@ -1174,7 +1174,9 @@ def work_on_task(rt, current_time, world):
 
     log.event(f"🔧 {rt.tag} works on {task['id']} '{task['title']}'")
     with timed(f"{rt.tag} executor on {task['id']}"):
-        result = rt.executor.run(rt, task, rt.workspace)
+        result = _use_hands(rt, lambda: rt.executor.run(rt, task, rt.workspace))
+    if result is None:
+        return None
     sessions.append({"block": block, "time": current_time, "result": result,
                      "history": len(task["history"])})
     remember_work(rt, task, result, current_time)
@@ -1190,6 +1192,22 @@ def work_on_task(rt, current_time, world):
                             f"reviewer: {result.summary.strip().rstrip('.')}. Changed: {files}. "
                             f"Tests pass on branch task/{task['id']}.")
     return result
+
+
+def _use_hands(rt, session):
+    """Run one executor session. If the executor itself fails (the model API
+    is unreachable, out of credit, misconfigured; the workspace's git breaks),
+    the hands stop for the rest of the run and the agent carries on as in the
+    paper. It isn't something the agent experienced, so nothing is remembered."""
+    from llm import LLMError
+    from workspace import WorkspaceError
+
+    try:
+        return session()
+    except (LLMError, WorkspaceError) as e:
+        log.warn(f"{rt.tag}'s hands stop for this run: {e}")
+        rt.executor = None
+        return None
 
 
 def remember_work(rt, task, result, current_time):
@@ -1287,7 +1305,9 @@ def review_teammate_work(rt, task, block, current_time, world):
     owner = world["agents"][task["assignee"]]["name"]
     log.event(f"🔍 {rt.tag} reviews {owner}'s {task['id']} '{task['title']}'")
     with timed(f"{rt.tag} executor review of {task['id']}"):
-        result = rt.executor.review(rt, task, rt.workspace, owner_name=owner)
+        result = _use_hands(rt, lambda: rt.executor.review(rt, task, rt.workspace, owner_name=owner))
+    if result is None:
+        return None
     rt.work_log.setdefault(f"review {task['id']}", []).append(
         {"block": block, "time": current_time, "result": result, "history": len(task["history"])})
 
