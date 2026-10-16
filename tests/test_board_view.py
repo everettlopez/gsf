@@ -44,7 +44,7 @@ def _eve_with_frontend_tasks(w):
 
 def test_empty_board_observations(w):
     assert pb.board_observations(w) == [
-        "The project board shows the team goal: Build and deploy the company website.",
+        "The project board shows the team goal: Build and ship the company's one-page website.",
         "The project board has no tasks on it yet.",
     ]
 

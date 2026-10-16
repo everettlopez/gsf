@@ -8,7 +8,7 @@ in ``world["project"]``, a structured record the LLM never edits directly:
 
     "project": {
       "name": "Company Website",
-      "goal": "Build and deploy the company website",
+      "goal": "Build and ship the company's one-page website",
       "description": "...",
       "status": "not_started" | "in_progress" | "done",
       "tasks": [ <task>, ... ]
