@@ -4,6 +4,7 @@ and llm.embed with deterministic stand-ins that recognise each prompt type.
 """
 
 import hashlib
+import importlib.util
 import json
 import re
 import shutil
@@ -18,8 +19,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import clock  # noqa: E402
+import conversation  # noqa: E402
 import llm  # noqa: E402
 import memory_stream  # noqa: E402
+import project_board  # noqa: E402
 import world as world_module  # noqa: E402
 
 
@@ -138,3 +141,26 @@ def isolated_data(tmp_path, monkeypatch, committed_data):
 @pytest.fixture
 def world(committed_data):
     return json.loads((committed_data / "world" / "world.json").read_text())
+
+
+@pytest.fixture
+def w(world):
+    """A fresh world, with the board's and the conversations' module state
+    (pending replans, promises, who talked when) cleared before and after."""
+    def reset():
+        project_board.clear_workload_changed()
+        project_board.clear_commitments()
+        conversation.clear_talks()
+
+    reset()
+    yield world
+    reset()
+
+
+def seed_module():
+    """scripts/seed_memories.py, loaded as a module."""
+    spec = importlib.util.spec_from_file_location("seed_memories",
+                                                  ROOT / "scripts" / "seed_memories.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

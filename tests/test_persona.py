@@ -4,28 +4,14 @@ styles have to reach the prompts that decide what an agent does (react or not,
 what to do at the board, what to say), not only the planning profile.
 """
 
-import copy
-
 import pytest
 
 import agent as ag
 import llm
-import main
 import persona
 import project_board as pb
-from conftest import fake_generate
+from conftest import fake_generate, seed_module
 from conversation import run_conversation
-
-
-@pytest.fixture
-def w(world):
-    pb.clear_workload_changed()
-    pb.clear_commitments()
-    main.clear_talks()
-    yield copy.deepcopy(world)
-    pb.clear_workload_changed()
-    pb.clear_commitments()
-    main.clear_talks()
 
 
 @pytest.fixture
@@ -91,3 +77,19 @@ def test_each_speaker_talks_in_their_own_style(fake_llm, isolated_data, w, monke
     run_conversation(eve, adam, "7:20 am", "ask Adam how the backend is going", w)
     assert "How Eve communicates:" in spoken[0] and "How Adam" not in spoken[0]
     assert "How Adam communicates:" in spoken[1] and "How Eve" not in spoken[1]
+
+
+@pytest.mark.parametrize("agent_id", ["adam", "eve"])
+def test_profiles_say_tasks_belong_to_their_assignee(agent_id):
+    profile = " ".join(persona.profile(agent_id).split())
+    assert "update their status" not in profile           # "anyone can ... update their status"
+    assert "A task belongs to the person it is assigned to" in profile
+    assert "offers to work on it together with" in profile
+
+
+def test_seeds_say_tasks_belong_to_their_assignee():
+    seeds = seed_module()
+    for memories in (seeds.adam_seed_memories, seeds.eve_seed_memories):
+        text = " ".join(memories)
+        assert "belongs to the person it is assigned to" in text
+        assert "take them on, and update their status" not in text

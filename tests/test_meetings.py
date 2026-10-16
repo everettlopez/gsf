@@ -8,47 +8,17 @@ were alone in their offices from 7:35 to 9:30. In the paper, agents agree on a
 time and place in conversation (Isabella's party) and both plan around it.
 """
 
-import copy
 import json
 
 import pytest
 
-import llm
 import agent as ag
+import llm
 import main
 import project_board as pb
 from conftest import fake_generate
 from conversation import _plans_with
 from plan import Planner
-
-
-@pytest.fixture
-def w(world):
-    pb.clear_workload_changed()
-    pb.clear_commitments()
-    main.clear_talks()
-    yield copy.deepcopy(world)
-    pb.clear_workload_changed()
-    pb.clear_commitments()
-    main.clear_talks()
-
-
-ADAM_DAY = [
-    "clock in at reception from 7:00 am to 7:05 am",
-    "check the project board in the conference room from 7:05 am to 7:20 am",
-    "work on backend API development for the website from 7:20 am to 11:00 am",
-    "collaborate with Eve Smith on frontend-backend integration challenges from 11:15 am to 12:00 pm",
-    "take a lunch break in the break room from 12:00 pm to 1:00 pm",
-]
-EVE_DAY = [
-    "clock in at reception from 7:00 am to 7:05 am",
-    "check the project board in the conference room from 7:05 am to 7:20 am",
-    "sketch additional page layouts for the website from 7:20 am to 11:00 am",
-    "take a lunch break in the break room from 11:00 am to 12:00 pm",
-    "collaborate with Adam Beck on technical challenges from 3:30 pm to 4:30 pm",
-]
-STANDUP = {"location": "conference_room", "activity": "stand-up on the API and the homepage",
-           "minutes": 15, "start": "8:00 am"}
 
 
 def _pair(w):
@@ -58,11 +28,32 @@ def _pair(w):
     return adam, eve
 
 
+ADAM_DAY = [
+    "clock in at reception from 7:00 am to 7:05 am",
+    "check the project board in the conference room from 7:05 am to 7:20 am",
+    "work on backend API development for the website from 7:20 am to 11:00 am",
+    "collaborate with Eve Smith on frontend-backend integration challenges from 11:15 am to 12:00 pm",
+    "take a lunch break in the break room from 12:00 pm to 1:00 pm",
+]
+
+
+EVE_DAY = [
+    "clock in at reception from 7:00 am to 7:05 am",
+    "check the project board in the conference room from 7:05 am to 7:20 am",
+    "sketch additional page layouts for the website from 7:20 am to 11:00 am",
+    "take a lunch break in the break room from 11:00 am to 12:00 pm",
+    "collaborate with Adam Beck on technical challenges from 3:30 pm to 4:30 pm",
+]
+
+
+STANDUP = {"location": "conference_room", "activity": "stand-up on the API and the homepage",
+           "minutes": 15, "start": "8:00 am"}
+
+
 def _at(rt, time):
     return next(c for c in rt.broad_chunks if rt.planner.covers(c, time))
 
 
-# --- extracting the agreement ---------------------------------------------------
 @pytest.mark.parametrize("said,start", [
     ("10:30 am", "10:30 am"),
     ("10 am", "10:00 am"),
@@ -112,7 +103,6 @@ def test_a_time_named_in_the_activity_wins_over_now(fake_llm, isolated_data, w, 
     assert out["meeting"]["start"] == start
 
 
-# --- both plans ----------------------------------------------------------------------
 def test_the_meeting_goes_into_both_days(fake_llm, isolated_data, w):
     adam, eve = _pair(w)
     main.schedule_meeting(adam, eve, STANDUP, "7:10 am")
@@ -178,7 +168,6 @@ def test_a_meeting_is_one_step_not_broken_down(fake_llm, isolated_data, w):
     assert ag.expand_minutes(adam, block, w) == [block]
 
 
-# --- meeting up ----------------------------------------------------------------------
 def test_they_talk_at_the_meeting_even_inside_the_cooldown_and_only_once(fake_llm, isolated_data, w):
     adam, eve = _pair(w)
     main.remember_conversation(adam, eve, "7:30 am", "the plan")        # 30 min before
@@ -204,7 +193,6 @@ def test_after_the_meeting_they_go_back_to_their_own_work(fake_llm, isolated_dat
     assert "focus on Adam Beck's own work" in adam.chunk["activity"]
 
 
-# --- in conversation -----------------------------------------------------------------
 def test_speakers_see_what_they_planned_with_each_other(fake_llm, isolated_data, w):
     adam, eve = _pair(w)
     text = " ".join(_plans_with(adam, eve, "7:10 am").split())
