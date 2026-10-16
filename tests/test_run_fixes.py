@@ -10,6 +10,7 @@ import json
 import pytest
 
 import llm
+import agent as ag
 import main
 import project_board as pb
 from conftest import fake_generate
@@ -22,11 +23,11 @@ from plan import Planner
 def w(world):
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
     yield copy.deepcopy(world)
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
 
 
 # --- 1. one task at a time; repeating a status is not a mistake ---------------
@@ -101,7 +102,7 @@ def test_checkpoint_starts_only_one_task(fake_llm, isolated_data, w):
 def test_gap_in_the_broad_plan_is_filled_with_the_task_in_progress(
     fake_llm, isolated_data, w
 ):
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     pb.create_task(w, "adam", "Set up the API", assign_to_self=True)
     pb.update_status(w, "adam", "T-1", "in_progress")
     rt.broad_chunks = [
@@ -112,21 +113,21 @@ def test_gap_in_the_broad_plan_is_filled_with_the_task_in_progress(
          "location": "break room", "start_time": "12:30 pm", "duration": 60,
          "target_agent": None, "board_work": False},
     ]
-    chunk = main.get_chunk_lazy(rt, "11:40 am", w)
+    chunk = ag.get_chunk_lazy(rt, "11:40 am", w)
     assert rt.planner.covers(chunk, "11:40 am")
     assert "board" not in chunk["activity"]                     # not stuck on the 11:15 step
 
-    gap = main.gap_block(rt, "11:40 am", w)
+    gap = ag.gap_block(rt, "11:40 am", w)
     assert gap["activity"] == ("keep working on T-1 'Set up the API' in the office "
                                "from 11:20 am to 12:30 pm")
     assert (gap["start_time"], gap["duration"]) == ("11:20 am", 70)
 
 
 def test_no_gap_filling_after_the_workday(fake_llm, isolated_data, w):
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     rt.broad_chunks = [{"activity": "clock out at 4:00 pm", "location": "reception",
                         "start_time": "4:00 pm", "duration": 60, "target_agent": None}]
-    assert main.gap_block(rt, "5:10 pm", w) is None
+    assert ag.gap_block(rt, "5:10 pm", w) is None
 
 
 def test_replan_prompt_asks_for_no_gaps_and_no_reaction_wording(fake_llm, isolated_data, w,
@@ -139,9 +140,9 @@ def test_replan_prompt_asks_for_no_gaps_and_no_reaction_wording(fake_llm, isolat
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    rt = main.make_runtime("eve", w)
-    main.initial_planning(rt, w)
-    main.replan_after_conversation(rt, "build T-4 first", "9:00 am", w)
+    rt = ag.Agent.load("eve", w)
+    ag.initial_planning(rt, w)
+    ag.replan_after_conversation(rt, "build T-4 first", "9:00 am", w)
     assert "What just happened: Eve Smith agreed in a conversation to: build T-4 first" in prompts[0]
     assert "decided to react" not in prompts[0]
     assert "(no gaps)" in prompts[0]
@@ -158,7 +159,7 @@ def test_conversation_sees_both_agents_tasks(fake_llm, isolated_data, w, monkeyp
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    adam, eve = main.make_runtime("adam", w), main.make_runtime("eve", w)
+    adam, eve = ag.Agent.load("adam", w), ag.Agent.load("eve", w)
     pb.create_task(w, "adam", "Set up the API", area="backend", assign_to_self=True)
     pb.create_task(w, "eve", "Home page", area="frontend", assign_to_self=True)
 
@@ -171,7 +172,7 @@ def test_conversation_sees_both_agents_tasks(fake_llm, isolated_data, w, monkeyp
 
 
 def test_talking_again_too_soon_is_skipped_unless_a_task_is_named(fake_llm, isolated_data, w):
-    adam, eve = main.make_runtime("adam", w), main.make_runtime("eve", w)
+    adam, eve = ag.Agent.load("adam", w), ag.Agent.load("eve", w)
     main.remember_conversation(adam, eve, "10:25 am", "review integration issues")
 
     assert main.talked_recently(adam, eve, "11:00 am")
@@ -199,13 +200,13 @@ def test_a_repeated_promise_does_not_replan_again(fake_llm, isolated_data, w, mo
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    rt = main.make_runtime("adam", w)
-    main.initial_planning(rt, w)
+    rt = ag.Agent.load("adam", w)
+    ag.initial_planning(rt, w)
 
-    assert main.replan_after_conversation(
+    assert ag.replan_after_conversation(
         rt, "I will review the integration issues and task list with Eve", "9:00 am", w)
-    assert not main.replan_after_conversation(
+    assert not ag.replan_after_conversation(
         rt, "I will review the integration issues and the task list with Eve Smith",
         "10:30 am", w)
-    assert main.replan_after_conversation(rt, "I will deploy T-2 to staging", "11:00 am", w)
+    assert ag.replan_after_conversation(rt, "I will deploy T-2 to staging", "11:00 am", w)
     assert len(calls) == 2

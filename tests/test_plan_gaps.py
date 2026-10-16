@@ -2,7 +2,7 @@
 agent replaying the last minute action of an hour that already ended."""
 
 import llm
-import main
+import agent as ag
 from conftest import fake_generate
 
 
@@ -16,14 +16,14 @@ def test_gap_after_a_short_hour_decomposition_is_filled(
     fake_llm, isolated_data, world, monkeypatch
 ):
     monkeypatch.setattr(llm, "generate", short_hours)
-    rt = main.make_runtime("adam", world)
+    rt = ag.Agent.load("adam", world)
     rt.broad_chunks = [{"activity": "work on T-1 'Set up the API' from 10:05 am to 12:00 pm",
                         "location": "office_1", "start_time": "10:05 am", "duration": 115,
                         "target_agent": None}]
 
-    early = main.get_chunk_lazy(rt, "10:30 am")
-    late = main.get_chunk_lazy(rt, "11:30 am")
-    later = main.get_chunk_lazy(rt, "11:50 am")
+    early = ag.get_chunk_lazy(rt, "10:30 am")
+    late = ag.get_chunk_lazy(rt, "11:30 am")
+    later = ag.get_chunk_lazy(rt, "11:50 am")
 
     assert rt.planner.covers(early, "10:30 am")
     assert rt.planner.covers(late, "11:30 am")         # not a stale 10:xx action

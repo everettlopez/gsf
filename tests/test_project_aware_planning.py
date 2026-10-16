@@ -10,7 +10,7 @@ import pytest
 
 import clock
 import llm
-import main
+import agent as ag
 import project_board as pb
 from conftest import fake_generate
 from memory_stream import MemoryStream
@@ -216,24 +216,24 @@ def test_board_work_is_inherited_by_finer_chunks(fake_llm, isolated_data, w):
 
 
 def test_inherited_board_work_goes_to_the_board(fake_llm, isolated_data, w, monkeypatch):
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     monkeypatch.setattr(rt.planner, "choose_location",
                         lambda *a, **k: pytest.fail("board work should not ask the LLM"))
     rt.chunk = {"activity": "7:20 am: checking all frontend tasks for updates",
                 "start_time": "7:20 am", "duration": 10, "target_agent": None,
                 "board_work": True}
-    main.apply_chunk(rt, w)
+    ag.apply_chunk(rt, w)
     assert (rt.agent["current_location"], rt.agent["interacting_with"]) == \
         ("conference_room", "project_board")
 
 
 def test_short_chunks_are_not_sent_for_minute_decomposition(fake_llm, isolated_data, w,
                                                             monkeypatch):
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     step = {"activity": "move T-1 to in progress on the project board from 9:00 am to 9:10 am",
             "start_time": "9:00 am", "duration": 10, "target_agent": None, "board_work": True}
     monkeypatch.setattr(llm, "generate", lambda *a, **k: pytest.fail("no LLM call expected"))
-    assert main.expand_minutes(rt, step) == [step]
+    assert ag.expand_minutes(rt, step) == [step]
 
 
 def test_replan_after_the_board_adds_checkpoints(fake_llm, isolated_data, w, monkeypatch):
@@ -243,10 +243,10 @@ def test_replan_after_the_board_adds_checkpoints(fake_llm, isolated_data, w, mon
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    rt = main.make_runtime("adam", w)
-    main.initial_planning(rt, w)
+    rt = ag.Agent.load("adam", w)
+    ag.initial_planning(rt, w)
     pb.create_task(w, "adam", "Set up the API", area="backend", assign_to_self=True)
-    main.replan_after_board(rt, "9:00 am", w)
+    ag.replan_after_board(rt, "9:00 am", w)
 
     new = [c for c in rt.broad_chunks if c["start_time"] in ("9:05 am", "9:15 am", "10:50 am")]
     assert [(c["start_time"], bool(c.get("board_work"))) for c in new] == [

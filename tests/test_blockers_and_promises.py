@@ -20,6 +20,7 @@ import json
 import pytest
 
 import llm
+import agent as ag
 import main
 import project_board as pb
 from conftest import fake_generate
@@ -30,11 +31,11 @@ from conversation import run_conversation
 def w(world):
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
     yield copy.deepcopy(world)
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
 
 
 def _eves_tasks(w):
@@ -87,14 +88,14 @@ def test_board_prompt_explains_blocked_and_waiting(w):
      "Review pending backend tasks", False),
 ])
 def test_is_the_plan(reaction, planned, same):
-    assert main._is_the_plan(reaction, planned) is same
+    assert ag._is_the_plan(reaction, planned) is same
 
 
 def test_reacting_with_the_planned_step_is_ignored(fake_llm, isolated_data, w):
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     rt.chunk = {"activity": "check the project board in the conference room from 7:05 am to 7:20 am",
                 "board_work": True}
-    assert main.pointless_reaction(rt, "go to the conference room to check the project board",
+    assert ag.pointless_reaction(rt, "go to the conference room to check the project board",
                                    "7:05 am", w) == "that is the plan already"
 
 
@@ -104,9 +105,9 @@ def test_reacting_with_the_planned_step_is_ignored(fake_llm, isolated_data, w):
     ("continue the discussion with Eve about the API", False),     # involves a teammate
 ])
 def test_continue_reactions_are_the_plan(fake_llm, isolated_data, w, reaction, ignored):
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     rt.chunk = {"activity": "7:30 am: Sketch the homepage layout"}
-    assert bool(main.pointless_reaction(rt, reaction, "7:35 am", w)) is ignored
+    assert bool(ag.pointless_reaction(rt, reaction, "7:35 am", w)) is ignored
 
 
 def test_no_replan_for_a_reaction_that_is_the_plan(fake_llm, isolated_data, w, monkeypatch):
@@ -120,14 +121,14 @@ def test_no_replan_for_a_reaction_that_is_the_plan(fake_llm, isolated_data, w, m
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     rt.prev_company = set()
-    monkeypatch.setattr(main, "get_chunk_lazy", lambda rt, t, world=None: {
+    monkeypatch.setattr(ag, "get_chunk_lazy", lambda rt, t, world=None: {
         "activity": "check the project board in the conference room from 7:05 am to 7:20 am",
         "location": "conference room", "start_time": "7:05 am", "duration": 15,
         "target_agent": None, "board_work": True})
     rt.new_obs = ["Eve Smith is currently clocking in at reception."]
-    main.decide_phase(rt, 2, "7:05 am", w)
+    rt.decide(2, "7:05 am", w)
     assert rt.decision == "1" and replans == []
 
 
@@ -157,42 +158,42 @@ def test_keep_working_promise_does_not_send_anyone_to_the_board(fake_llm, isolat
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    rt = main.make_runtime("adam", w)
-    main.initial_planning(rt, w)
+    rt = ag.Agent.load("adam", w)
+    ag.initial_planning(rt, w)
     rt.agent["current_location"] = "conference_room"
     promise = "Adam Beck will continue working on T-1 and keep Eve Smith updated"
-    assert main.replan_after_conversation(rt, promise, "7:20 am", w, partner="Eve Smith")
+    assert ag.replan_after_conversation(rt, promise, "7:20 am", w, partner="Eve Smith")
     assert pb.commitments_for("adam") == []
-    main.queue_board_visit(rt, promise, "7:20 am", w)
+    ag.queue_board_visit(rt, promise, "7:20 am", w)
     assert rt.queued is None
 
 
 # --- 4. no silent shadowing right after a talk -----------------------------------
 def test_after_talking_a_planned_collaboration_step_happens_in_your_own_office(
         fake_llm, isolated_data, w, monkeypatch):
-    eve, adam = main.make_runtime("eve", w), main.make_runtime("adam", w)
+    eve, adam = ag.Agent.load("eve", w), ag.Agent.load("adam", w)
     eve.agent["current_location"] = "conference_room"
     adam.agent["current_location"] = "office_1"
     main.remember_conversation(eve, adam, "7:20 am", "T-3 and T-4")
-    monkeypatch.setattr(main, "get_chunk_lazy", lambda rt, t, world=None: {
+    monkeypatch.setattr(ag, "get_chunk_lazy", lambda rt, t, world=None: {
         "activity": "7:30 am: Start collaborating with Adam Beck on technical challenges",
         "location": "conference room", "start_time": "7:30 am", "duration": 10,
         "target_agent": "adam"})
 
-    main.decide_phase(eve, 8, "7:30 am", w)
+    eve.decide(8, "7:30 am", w)
     assert eve.chunk["target_agent"] is None
     assert eve.chunk["location"] == "office_2" and eve.chunk["pinned"]
-    main.apply_chunk(eve, w)
+    ag.apply_chunk(eve, w)
     assert eve.agent["current_location"] == "office_2"        # not Adam's office
 
 
 def test_before_talking_the_step_still_goes_to_the_teammate(fake_llm, isolated_data, w, monkeypatch):
-    eve = main.make_runtime("eve", w)
-    monkeypatch.setattr(main, "get_chunk_lazy", lambda rt, t, world=None: {
+    eve = ag.Agent.load("eve", w)
+    monkeypatch.setattr(ag, "get_chunk_lazy", lambda rt, t, world=None: {
         "activity": "7:30 am: Start collaborating with Adam Beck",
         "location": "conference room", "start_time": "7:30 am", "duration": 10,
         "target_agent": "adam"})
-    main.decide_phase(eve, 8, "7:30 am", w)
+    eve.decide(8, "7:30 am", w)
     assert eve.chunk["target_agent"] == "adam"
 
 
@@ -206,9 +207,9 @@ def test_the_replan_after_a_talk_knows_they_just_talked(fake_llm, isolated_data,
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    rt = main.make_runtime("eve", w)
-    main.initial_planning(rt, w)
-    main.replan_after_conversation(rt, "I will keep working on T-2", "7:20 am", w, partner="Adam Beck")
+    rt = ag.Agent.load("eve", w)
+    ag.initial_planning(rt, w)
+    ag.replan_after_conversation(rt, "I will keep working on T-2", "7:20 am", w, partner="Adam Beck")
     assert ("Eve Smith and Adam Beck just talked, so leave out any block in the next hour that "
             "is only about talking or collaborating with Adam Beck") in prompts[0]
 
@@ -265,7 +266,7 @@ def test_a_conversation_that_starts_repeating_ends(fake_llm, isolated_data, w, m
     monkeypatch.setattr(llm, "generate", gen)
     pb.create_task(w, "adam", "Backend API", area="backend", assign_to_self=True)   # T-1
     _eves_tasks(w)                                                                   # T-2..T-4
-    eve, adam = main.make_runtime("eve", w), main.make_runtime("adam", w)
+    eve, adam = ag.Agent.load("eve", w), ag.Agent.load("adam", w)
     history = run_conversation(eve, adam, "7:20 am", "talk with Adam about T-3 and T-4", w)
     assert [who for who, _ in history] == ["Eve Smith", "Adam Beck", "Eve Smith"]   # was 6 turns
 
@@ -281,7 +282,7 @@ def test_a_conversation_with_new_content_runs_on(fake_llm, isolated_data, w, mon
 
     monkeypatch.setattr(llm, "generate", gen)
     pb.create_task(w, "adam", "Backend API", area="backend", assign_to_self=True)   # T-1
-    eve, adam = main.make_runtime("eve", w), main.make_runtime("adam", w)
+    eve, adam = ag.Agent.load("eve", w), ag.Agent.load("adam", w)
     history = run_conversation(eve, adam, "9:00 am", "ask Adam about T-1", w)
     assert len(history) == 3
 
@@ -302,14 +303,14 @@ def test_agents_create_tasks_at_the_board_without_done_when(fake_llm, isolated_d
     monkeypatch.setattr(llm, "generate", gen)
     adam = w["agents"]["adam"]
     done = pb.interact(adam, w, "review any new backend tasks added to the project board",
-                       planner=main.Planner(adam))
+                       planner=ag.Planner(adam))
     assert len(done) == 2 and [t["id"] for t in pb.get_project(w)["tasks"]] == ["T-1", "T-2"]
 
 
 def test_going_to_the_board_while_the_plan_is_a_board_visit_is_the_plan(fake_llm, isolated_data, w):
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     rt.agent["current_location"] = "reception"
     rt.chunk = {"activity": "review any new backend tasks added to the project board from "
                             "7:05 am to 7:20 am", "board_work": True}
-    assert main.pointless_reaction(rt, "go to the conference room to review the project board",
+    assert ag.pointless_reaction(rt, "go to the conference room to review the project board",
                                    "7:05 am", w) == "that is the plan already"

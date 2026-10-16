@@ -70,8 +70,9 @@ python scripts/seed_memories.py --reset   # fresh start: clear memories + board,
 python src/main.py                     # run the simulation
 ```
 
-Simulation settings (start time, steps, cooldowns, reflection times, paper-strict
-mode) are constants at the top of `src/main.py`. Reacting regenerates the plan as
+The run length (start time, steps) is at the top of `src/main.py`; the agents'
+settings (cooldowns, reflection threshold, paper-strict mode) are at the top of
+`src/agent.py`, and who each agent is lives in `data/agents/<id>/persona.json`. Reacting regenerates the plan as
 in the paper by default (`REACT_REPLANS`). `PAPER_STRICT = True` also turns off the
 cost shortcuts (the react question every step about everything perceived, no
 cooldown, the whole plan decomposed up front, an object update every step), which
@@ -103,7 +104,9 @@ Verbosity is controlled by `GA_LOG`:
 
 | File | Role |
 | --- | --- |
-| `src/main.py` | Simulation loop: perceive → decide → act → reflect |
+| `src/main.py` | World clock, step loop, and conversations between agents |
+| `src/agent.py` | One agent: perceive → decide → act/react → reflect, and its plan |
+| `src/persona.py` | Loads `data/agents/<id>/persona.json` into the agent's profile |
 | `src/memory_stream.py`, `memory.py` | The memory stream (observations, plans, reflections) |
 | `src/memory_retriever.py` | Recency + importance + relevance retrieval |
 | `src/plan.py` | Daily plan, hour/minute decomposition, reactions, agent summaries |
@@ -112,7 +115,7 @@ Verbosity is controlled by `GA_LOG`:
 | `src/world.py`, `perceive.py` | World state and what agents observe |
 | `src/project_board.py` | The shared project board: structured tasks and the actions agents take on them |
 | `src/llm.py` | The only module that talks to Ollama |
-| `src/log.py` | Logging levels and output layout |
+| `src/log.py` | Logging levels, output layout, and timings |
 
 ## Project board
 

@@ -22,6 +22,7 @@ import pytest
 
 import clock
 import llm
+import agent as ag
 import main
 import project_board as pb
 import world as world_module
@@ -34,11 +35,11 @@ from plan import Planner, future_part
 def w(world):
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
     yield copy.deepcopy(world)
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
 
 
 def _run_log_board(w):
@@ -76,7 +77,7 @@ def test_conversations_see_the_facts_and_that_talking_moves_nothing(
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    adam, eve = main.make_runtime("adam", w), main.make_runtime("eve", w)
+    adam, eve = ag.Agent.load("adam", w), ag.Agent.load("eve", w)
     run_conversation(adam, eve, "7:05 am", "Review and approve T-1 to unblock Eve's frontend tasks", w)
 
     first = prompts[0]
@@ -421,13 +422,13 @@ def test_obvious_locations(w, activity, where, expected):
 
 
 def test_apply_chunk_skips_the_location_llm_for_solo_work(fake_llm, isolated_data, w, monkeypatch):
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     rt.agent["current_location"] = "office_1"
     monkeypatch.setattr(rt.planner, "choose_location",
                         lambda *a, **k: pytest.fail("choose_location should not be called"))
     rt.chunk = {"activity": "7:45 am: Outline database models", "location": "office_1",
                 "start_time": "7:45 am", "duration": 15, "target_agent": None}
-    main.apply_chunk(rt, w)
+    ag.apply_chunk(rt, w)
     assert rt.agent["current_location"] == "office_1"
 
 

@@ -19,6 +19,7 @@ import pytest
 
 import clock
 import llm
+import agent as ag
 import main
 import project_board as pb
 from conftest import fake_generate
@@ -30,11 +31,11 @@ from world import action_to_present
 def w(world):
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
     yield copy.deepcopy(world)
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
 
 
 def _adam_with_backend_tasks(w):
@@ -146,7 +147,7 @@ def test_moving_a_review_task_to_blocked_is_still_allowed(w):
 
 # --- 4. teammates in the same room actually talk -------------------------------
 def _runtimes(w, room="office_2"):
-    adam, eve = main.make_runtime("adam", w), main.make_runtime("eve", w)
+    adam, eve = ag.Agent.load("adam", w), ag.Agent.load("eve", w)
     for rt in (adam, eve):
         rt.agent["current_location"] = room
     return adam, eve
@@ -161,10 +162,10 @@ def test_planned_collaboration_with_a_teammate_here_starts_a_conversation(
         fake_llm, isolated_data, w, monkeypatch):
     adam, _ = _runtimes(w)
     adam.last_react_step = 50                       # mid-cooldown, as at 11:25 in the log
-    monkeypatch.setattr(main, "get_chunk_lazy", lambda rt, t, world=None: _chunk(
+    monkeypatch.setattr(ag, "get_chunk_lazy", lambda rt, t, world=None: _chunk(
         "11:00 am: discuss integration requirements with Eve", target_agent="eve"))
 
-    main.decide_phase(adam, 52, "11:05 am", w)
+    adam.decide(52, "11:05 am", w)
     assert adam.decision == "2"
     assert adam.reaction == "talk with Eve Smith about: discuss integration requirements with Eve"
 
@@ -173,16 +174,16 @@ def test_planned_collaboration_waits_for_the_conversation_cooldown(
         fake_llm, isolated_data, w, monkeypatch):
     adam, eve = _runtimes(w)
     main.remember_conversation(adam, eve, "10:45 am", "integration")
-    monkeypatch.setattr(main, "get_chunk_lazy", lambda rt, t, world=None: _chunk(
+    monkeypatch.setattr(ag, "get_chunk_lazy", lambda rt, t, world=None: _chunk(
         "11:00 am: discuss integration requirements with Eve", target_agent="eve"))
 
-    main.decide_phase(adam, 52, "11:05 am", w)
+    adam.decide(52, "11:05 am", w)
     assert adam.decision == "1"
 
 
 def test_a_teammate_walking_in_is_considered_even_during_the_react_cooldown(
         fake_llm, isolated_data, w, monkeypatch):
-    monkeypatch.setattr(main, "REACT_COOLDOWN_STEPS", 6)   # the window this test is about
+    monkeypatch.setattr(ag, "REACT_COOLDOWN_STEPS", 6)   # the window this test is about
     adam, _ = _runtimes(w, room="conference_room")
     adam.last_react_step = 52                       # reacted at 11:15
     adam.prev_company = set()                       # Eve wasn't here last step
@@ -194,15 +195,15 @@ def test_a_teammate_walking_in_is_considered_even_during_the_react_cooldown(
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    monkeypatch.setattr(main, "get_chunk_lazy",
+    monkeypatch.setattr(ag, "get_chunk_lazy",
                         lambda rt, t, world=None: _chunk("11:25 am: test API endpoints"))
     adam.new_obs = ["Eve Smith is currently reporting progress on T-4."]
 
-    main.decide_phase(adam, 54, "11:25 am", w)
+    adam.decide(54, "11:25 am", w)
     assert len(asked) == 1                          # the cooldown didn't swallow it
 
     asked.clear()
-    main.decide_phase(adam, 55, "11:30 am", w)      # she's still here: cooldown applies
+    adam.decide(55, "11:30 am", w)      # she's still here: cooldown applies
     assert asked == []
 
 
@@ -218,12 +219,12 @@ def test_a_move_only_reaction_relocates_without_a_cooldown(fake_llm, isolated_da
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    monkeypatch.setattr(main, "get_chunk_lazy",
+    monkeypatch.setattr(ag, "get_chunk_lazy",
                         lambda rt, t, world=None: rt.override or _chunk(
                             "11:10 am: set up development environment"))
     adam.new_obs = ["The office_2 is currently quiet."]
 
-    main.decide_phase(adam, 52, "11:15 am", w)
+    adam.decide(52, "11:15 am", w)
     assert (adam.decision, adam.reaction) == ("1", "")
     assert adam.last_react_step < 0                 # no cooldown started
     assert adam.chunk["location"] == "office_1" and adam.chunk["pinned"]
@@ -242,7 +243,7 @@ def test_a_move_only_reaction_relocates_without_a_cooldown(fake_llm, isolated_da
 def test_relocation_target(w, reaction, expected):
     adam = w["agents"]["adam"]
     adam["current_location"] = "office_2"
-    assert main.relocation_target(reaction, adam, w) == expected
+    assert ag.relocation_target(reaction, adam, w) == expected
 
 
 # --- 5. no solo work at a teammate's desk --------------------------------------
@@ -271,14 +272,14 @@ def test_a_conversation_replan_absorbs_the_pending_board_replan(
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    rt = main.make_runtime("adam", w)
-    main.initial_planning(rt, w)
+    rt = ag.Agent.load("adam", w)
+    ag.initial_planning(rt, w)
     _adam_with_backend_tasks(w)                       # claiming marks the workload changed
     pb.assign_task(w, "eve", pb.create_task(w, "eve", "Contact endpoint", area="backend")["id"],
                    "adam", note="the form needs POST /contact")
     assert pb.workload_changed("adam")
 
-    assert main.replan_after_conversation(rt, "I will start on T-1 today", "7:05 am", w)
+    assert ag.replan_after_conversation(rt, "I will start on T-1 today", "7:05 am", w)
     assert not pb.workload_changed("adam")            # replan_after_board won't fire again
     memories = [m.description for m in rt.stream.memories]
     assert any("assigned task T-3 'Contact endpoint' to Adam Beck" in m for m in memories)

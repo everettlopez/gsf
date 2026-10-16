@@ -20,6 +20,7 @@ import copy
 import pytest
 
 import llm
+import agent as ag
 import main
 import project_board as pb
 from conftest import fake_generate
@@ -32,11 +33,11 @@ from plan import Planner
 def w(world):
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
     yield copy.deepcopy(world)
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
 
 
 def _run_board(w):
@@ -117,10 +118,10 @@ def test_finer_steps_are_held_to_the_same_rule(fake_llm, isolated_data, w, monke
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     hour = {"activity": "8:10 am: work on the backend", "location": "office_1",
             "start_time": "8:10 am", "duration": 60, "target_agent": None}
-    steps = main.expand_minutes(rt, hour, w)
+    steps = ag.expand_minutes(rt, hour, w)
     assert [s["activity"] for s in steps] == [
         "8:10 am: keep working on T-1 'Design and implement the backend API for the company website'",
         "8:25 am: Define the API routes"]
@@ -199,7 +200,7 @@ def test_the_conversation_from_the_run_leaves_adam_no_promise_about_eves_tasks(
 # --- conversations ---------------------------------------------------------------
 def test_speakers_know_whose_tasks_are_whose(fake_llm, isolated_data, w):
     _run_board(w)
-    adam, eve = main.make_runtime("adam", w), main.make_runtime("eve", w)
+    adam, eve = ag.Agent.load("adam", w), ag.Agent.load("eve", w)
     text = " ".join(_board_context(adam, eve, w, "T-2").split())
     assert "Eve Smith's tasks: T-2, T-3, T-4." in text
     assert "offering to work on one together, which Eve Smith can accept or turn down" in text
@@ -264,16 +265,16 @@ def test_seeds_say_tasks_belong_to_their_assignee():
 
 # --- reflection on the paper's trigger -----------------------------------------------
 def test_reflection_waits_for_enough_importance(fake_llm, isolated_data, w, monkeypatch):
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     calls = []
     monkeypatch.setattr(rt.reflector, "reflect", lambda: calls.append(1) or [])
-    monkeypatch.setattr(main, "REFLECTION_THRESHOLD", 150)
+    monkeypatch.setattr(ag, "REFLECTION_THRESHOLD", 150)
     rt.stream.add_observations([f"seen thing {i}" for i in range(29)])       # 29 x 5 = 145
-    main.reflect_phase(rt, "9:00 am")
+    rt.reflect("9:00 am")
     assert calls == []
     rt.stream.add_observations(["one more thing"])                           # 150
-    main.reflect_phase(rt, "9:05 am")
+    rt.reflect("9:05 am")
     assert calls == [1]
-    main.reflect_phase(rt, "9:10 am")                                       # counted: starts over
+    rt.reflect("9:10 am")                                       # counted: starts over
     assert calls == [1]
-    assert main.importance_since_reflection(rt) == 0
+    assert rt.importance_since_reflection() == 0

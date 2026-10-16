@@ -7,6 +7,8 @@ import json
 import re
 
 import llm
+import agent as ag
+import log
 import main
 from conftest import fake_generate
 
@@ -53,8 +55,8 @@ def test_reaction_becomes_conversation_commitments_and_a_meeting(
     monkeypatch.setattr(llm, "generate", scripted_generate)
     monkeypatch.setattr(llm, "embed", __import__("conftest").fake_embed)
     monkeypatch.setattr(main, "NUM_STEPS", 5)
-    monkeypatch.setattr(main, "REFLECTION_THRESHOLD", None)
-    main.timings.clear()
+    monkeypatch.setattr(ag, "REFLECTION_THRESHOLD", None)
+    log.timings.clear()
 
     main.main()
     out = capsys.readouterr().out

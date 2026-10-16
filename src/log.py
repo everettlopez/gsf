@@ -19,6 +19,8 @@ Output layout at the default level:
 
 import os
 import sys
+import time
+from contextlib import contextmanager
 
 QUIET, INFO, DEBUG = 0, 1, 2
 _LEVELS = {"quiet": QUIET, "info": INFO, "debug": DEBUG}
@@ -87,3 +89,30 @@ def reflection_header(tag, time_str):
 
 def reflection_item(text):
     _emit(f"      → {text}", QUIET)
+
+
+# ---------------------------------------------------------------------------
+# TIMING (where is the time going?)
+# ---------------------------------------------------------------------------
+timings = {}  # label -> (total_seconds, call_count)
+
+
+@contextmanager
+def timed(label):
+    """Time a block, print it, and accumulate it for the end-of-run summary."""
+    t0 = time.time()
+    try:
+        yield
+    finally:
+        dt = time.time() - t0
+        total, count = timings.get(label, (0.0, 0))
+        timings[label] = (total + dt, count + 1)
+        debug(f"timing {label}: {dt:.1f}s")
+
+
+def print_timing_summary():
+    if not timings:
+        return
+    banner("TIMING SUMMARY (slowest first)")
+    for label, (total, count) in sorted(timings.items(), key=lambda kv: -kv[1][0]):
+        info(f"  {total:7.1f}s total | {count:3d} calls | {total / count:6.1f}s avg | {label}")

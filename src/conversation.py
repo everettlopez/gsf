@@ -15,6 +15,7 @@ round trip per turn.
 """
 
 import re
+from datetime import timedelta
 
 import llm
 import log
@@ -23,6 +24,33 @@ from llm import CTX
 
 MAX_TURNS = 6          # total utterances, both speakers combined
 MAX_LINE_TOKENS = 80
+
+# The same two agents don't start another conversation within this many
+# minutes, unless the reaction names a specific task (T-3). Stops the loop of
+# meeting -> commitment "review with Eve" -> meeting again.
+CONVERSATION_COOLDOWN_MINUTES = 60
+
+_last_talk = {}          # frozenset({id_a, id_b}) -> datetime of their last conversation
+
+
+def record_talk(a_id, b_id, when):
+    _last_talk[frozenset((a_id, b_id))] = when
+
+
+def last_talk(a_id, b_id):
+    """When the two last talked today, or None."""
+    return _last_talk.get(frozenset((a_id, b_id)))
+
+
+def clear_talks():
+    """Nothing carried over from a previous run."""
+    _last_talk.clear()
+
+
+def talked_recently_ids(a_id, b_id, now):
+    last = last_talk(a_id, b_id)
+    return (last is not None and now is not None
+            and now - last < timedelta(minutes=CONVERSATION_COOLDOWN_MINUTES))
 
 
 def _context(rt, other_name, last_line=None, limit=8):

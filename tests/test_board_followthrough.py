@@ -10,7 +10,7 @@ import json
 import pytest
 
 import llm
-import main
+import agent as ag
 import project_board as pb
 from conftest import fake_generate
 from memory_stream import MemoryStream
@@ -148,12 +148,12 @@ def test_refused_actions_become_memories(fake_llm, isolated_data, w, monkeypatch
 def test_board_activity_goes_to_the_board_without_asking_the_llm(
     fake_llm, isolated_data, w, monkeypatch
 ):
-    rt = main.make_runtime("eve", w)
+    rt = ag.Agent.load("eve", w)
     monkeypatch.setattr(rt.planner, "choose_location",
                         lambda *a, **k: pytest.fail("board work should not ask the LLM"))
     rt.chunk = {"activity": "11:40 am: reviewing the project board for updates",
                 "start_time": "11:40 am", "duration": 10, "target_agent": None}
-    main.apply_chunk(rt, w)
+    ag.apply_chunk(rt, w)
     assert rt.agent["current_location"] == "conference_room"
     assert rt.agent["interacting_with"] == "project_board"
 
@@ -212,13 +212,13 @@ def _revise_returns_board_visit(prompts):
 def test_board_promise_at_the_board_is_kept_right_away(fake_llm, isolated_data, w, monkeypatch):
     prompts = []
     monkeypatch.setattr(llm, "generate", _revise_returns_board_visit(prompts))
-    rt = main.make_runtime("eve", w)
-    main.initial_planning(rt, w)
+    rt = ag.Agent.load("eve", w)
+    ag.initial_planning(rt, w)
     rt.agent["current_location"] = "conference_room"
     promise = "I will assign T-4 to Adam and note the dependencies on the project board"
 
-    main.replan_after_conversation(rt, promise, "11:35 am", w)
-    main.queue_board_visit(rt, promise, "11:35 am", w)
+    ag.replan_after_conversation(rt, promise, "11:35 am", w)
+    ag.queue_board_visit(rt, promise, "11:35 am", w)
 
     assert pb.commitments_for("eve") == [promise]
     assert "can only keep this promise at the project board" in prompts[0]
@@ -228,21 +228,21 @@ def test_board_promise_at_the_board_is_kept_right_away(fake_llm, isolated_data, 
 
 def test_no_immediate_visit_when_the_talk_was_elsewhere(fake_llm, isolated_data, w, monkeypatch):
     monkeypatch.setattr(llm, "generate", _revise_returns_board_visit([]))
-    rt = main.make_runtime("eve", w)
+    rt = ag.Agent.load("eve", w)
     rt.agent["current_location"] = "break_room"
-    main.queue_board_visit(rt, "assign T-4 to Adam", "12:30 pm", w)
+    ag.queue_board_visit(rt, "assign T-4 to Adam", "12:30 pm", w)
     assert rt.queued is None
 
 
 def test_assignee_is_notified_and_replans(fake_llm, isolated_data, w, monkeypatch):
     prompts = []
     monkeypatch.setattr(llm, "generate", _revise_returns_board_visit(prompts))
-    rt = main.make_runtime("adam", w)
-    main.initial_planning(rt, w)
+    rt = ag.Agent.load("adam", w)
+    ag.initial_planning(rt, w)
     pb.create_task(w, "eve", "Contact form backend", area="backend")
     pb.assign_task(w, "eve", "T-1", "adam")
 
-    main.replan_after_board(rt, "11:35 am", w)
+    ag.replan_after_board(rt, "11:35 am", w)
 
     notice = "Eve Smith assigned task T-1 'Contact form backend' to Adam Beck on the project board."
     assert notice in [m.description for m in rt.stream.memories]

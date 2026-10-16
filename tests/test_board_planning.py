@@ -2,7 +2,7 @@
 and the agent's own progress showing up when they're at the board."""
 
 import llm
-import main
+import agent as ag
 import project_board as pb
 from conftest import fake_generate
 from memory_retriever import MemoryRetriever
@@ -19,8 +19,8 @@ def _runtime(world, monkeypatch, prompts):
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", capture)
-    rt = main.make_runtime("adam", world)
-    main.initial_planning(rt, world)
+    rt = ag.Agent.load("adam", world)
+    ag.initial_planning(rt, world)
     return rt
 
 
@@ -33,11 +33,11 @@ def test_replans_around_tasks_after_leaving_the_board(
     pb.create_task(world, "adam", "Set up the API", area="backend", assign_to_self=True)
 
     rt.agent["interacting_with"] = pb.BOARD_OBJECT
-    main.replan_after_board(rt, "9:00 am", world)
+    ag.replan_after_board(rt, "9:00 am", world)
     assert prompts == []                              # still at the board: wait
 
     rt.agent["interacting_with"] = "computer"
-    main.replan_after_board(rt, "9:00 am", world)
+    ag.replan_after_board(rt, "9:00 am", world)
 
     [prompt] = prompts
     assert "T-1 'Set up the API' (todo)" in prompt
@@ -46,7 +46,7 @@ def test_replans_around_tasks_after_leaving_the_board(
     assert any("T-1 on the project board" in c["activity"] for c in rt.broad_chunks)
     assert not pb.workload_changed("adam")
 
-    main.replan_after_board(rt, "9:05 am", world)
+    ag.replan_after_board(rt, "9:05 am", world)
     assert len(prompts) == 1                          # one visit, one replan
 
 
@@ -55,7 +55,7 @@ def test_no_replan_without_a_workload_change(fake_llm, isolated_data, world, mon
     rt = _runtime(world, monkeypatch, prompts)
     pb.clear_workload_changed()
     pb.create_task(world, "adam", "Write docs")       # created, not taken on
-    main.replan_after_board(rt, "9:00 am", world)
+    ag.replan_after_board(rt, "9:00 am", world)
     assert prompts == []
 
 

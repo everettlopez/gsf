@@ -20,6 +20,7 @@ import copy
 import pytest
 
 import llm
+import agent as ag
 import main
 import project_board as pb
 from conftest import fake_generate
@@ -30,11 +31,11 @@ from plan import Planner
 def w(world):
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
     yield copy.deepcopy(world)
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
 
 
 def _plan(p, lines, agent, w):
@@ -90,14 +91,14 @@ def test_initial_plans_get_the_same_cleanup_as_replans(fake_llm, isolated_data, 
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    rt = main.make_runtime("eve", w)
-    main.initial_planning(rt, w)
+    rt = ag.Agent.load("eve", w)
+    ag.initial_planning(rt, w)
     board = [c for c in rt.broad_chunks if c.get("board_work")]
     assert board and all(c["duration"] <= 15 for c in board)
 
 
 def test_a_board_block_is_one_step_not_many(fake_llm, isolated_data, w, monkeypatch):
-    rt = main.make_runtime("eve", w)
+    rt = ag.Agent.load("eve", w)
     calls = []
 
     def gen(prompt, options=None, format=None):
@@ -110,8 +111,8 @@ def test_a_board_block_is_one_step_not_many(fake_llm, isolated_data, w, monkeypa
     # 80 minutes: long enough to have been split into hours, then 5-minute steps
     rt.broad_chunks = _plan(p, ["visit the project board to add frontend tasks from 7:10 am to 8:30 am"],
                             rt.agent, w)
-    first = main.get_chunk_lazy(rt, "7:10 am", w)
-    later = main.get_chunk_lazy(rt, "8:20 am", w)
+    first = ag.get_chunk_lazy(rt, "7:10 am", w)
+    later = ag.get_chunk_lazy(rt, "8:20 am", w)
     assert calls == []                                    # no decomposition LLM calls
     assert first is later and first["board_work"]         # same chunk: one board call
 
@@ -123,39 +124,39 @@ def _at_board(w, rt):
 
 
 def test_no_board_reaction_while_at_the_board(fake_llm, isolated_data, w):
-    rt = main.make_runtime("eve", w)
+    rt = ag.Agent.load("eve", w)
     _at_board(w, rt)
     rt.chunk = {"activity": "7:25 am: Add new frontend tasks", "board_work": True}
-    assert main.pointless_reaction(rt, "Move to the project_board to update tasks",
+    assert ag.pointless_reaction(rt, "Move to the project_board to update tasks",
                                    "7:35 am", w) == "already at the board"
 
 
 def test_no_board_reaction_right_after_using_the_board(fake_llm, isolated_data, w):
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     rt.chunk = {"activity": "8:30 am: Summarize key points", "board_work": False}
     rt.last_board_at = rt.planner._parse_time("8:10 am")
-    assert main.pointless_reaction(rt, "Move to the project_board to update task T-4",
+    assert ag.pointless_reaction(rt, "Move to the project_board to update task T-4",
                                    "8:35 am", w) == "used the board at 8:10 am"
-    assert main.pointless_reaction(rt, "Move to the project_board to update task T-4",
+    assert ag.pointless_reaction(rt, "Move to the project_board to update task T-4",
                                    "8:45 am", w) == ""    # 35 minutes later: fine
 
 
 def test_the_same_reaction_twice_is_ignored(fake_llm, isolated_data, w):
-    rt = main.make_runtime("eve", w)
+    rt = ag.Agent.load("eve", w)
     reaction = "Move to the project_board to update task T-2 and check on T-4's status"
     rt.chunk = {"activity": f"8:30 am: {reaction}", "is_reaction": True, "board_work": True}
-    assert main.pointless_reaction(rt, reaction, "8:35 am", w) == "already doing this"
+    assert ag.pointless_reaction(rt, reaction, "8:35 am", w) == "already doing this"
 
 
 def test_a_real_reaction_still_goes_through(fake_llm, isolated_data, w):
-    rt = main.make_runtime("adam", w)
+    rt = ag.Agent.load("adam", w)
     rt.chunk = {"activity": "9:10 am: Outline the core functionality of the API"}
-    assert main.pointless_reaction(rt, "Ask Eve which fields the contact form sends",
+    assert ag.pointless_reaction(rt, "Ask Eve which fields the contact form sends",
                                    "9:15 am", w) == ""
 
 
 def test_decide_phase_drops_a_pointless_reaction(fake_llm, isolated_data, w, monkeypatch):
-    rt = main.make_runtime("eve", w)
+    rt = ag.Agent.load("eve", w)
     _at_board(w, rt)
     rt.prev_company = set()
 
@@ -165,23 +166,23 @@ def test_decide_phase_drops_a_pointless_reaction(fake_llm, isolated_data, w, mon
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    monkeypatch.setattr(main, "get_chunk_lazy", lambda rt, t, world=None: {
+    monkeypatch.setattr(ag, "get_chunk_lazy", lambda rt, t, world=None: {
         "activity": "7:25 am: Add new frontend tasks based on current priorities",
         "location": "conference room", "start_time": "7:25 am", "duration": 15,
         "target_agent": None, "board_work": True})
     rt.new_obs = ["Task T-2 on the project board is todo and assigned to Eve Smith."]
-    main.decide_phase(rt, 8, "7:35 am", w)
+    rt.decide(8, "7:35 am", w)
     assert (rt.decision, rt.reaction) == ("1", "")
     assert rt.last_react_step < 0                         # and no cooldown started
 
 
 def test_board_use_is_remembered_only_when_using_the_board(fake_llm, isolated_data, w):
-    rt = main.make_runtime("eve", w)
+    rt = ag.Agent.load("eve", w)
     rt.agent["interacting_with"] = "desk"
-    main.note_board_use(rt, "7:05 am")
+    ag.note_board_use(rt, "7:05 am")
     assert rt.last_board_at is None
     rt.agent["interacting_with"] = pb.BOARD_OBJECT
-    main.note_board_use(rt, "7:10 am")
+    ag.note_board_use(rt, "7:10 am")
     assert rt.planner._fmt(rt.last_board_at) == "7:10 am"
 
 
@@ -201,7 +202,7 @@ def test_board_use_is_remembered_only_when_using_the_board(fake_llm, isolated_da
 def test_relocation_only_when_the_purpose_is_the_current_work(w, reaction, current, expected):
     adam = w["agents"]["adam"]
     adam["current_location"] = "office_2"
-    assert main.relocation_target(reaction, adam, w, current) == expected
+    assert ag.relocation_target(reaction, adam, w, current) == expected
 
 
 def test_project_board_with_an_underscore_is_board_work():
@@ -219,10 +220,10 @@ def test_a_reaction_replans_the_rest_of_the_day(fake_llm, isolated_data, w, monk
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    rt = main.make_runtime("adam", w)
-    main.initial_planning(rt, w)
+    rt = ag.Agent.load("adam", w)
+    ag.initial_planning(rt, w)
     rt.reaction = "Ask Eve which fields the contact form sends"
-    main.react(rt, 30, "9:15 am", w)
+    rt.react(30, "9:15 am", w)
 
     assert len(replans) == 1
     assert "it is now 9:25 am" in replans[0]              # after the 10-minute reaction
@@ -232,7 +233,7 @@ def test_a_reaction_replans_the_rest_of_the_day(fake_llm, isolated_data, w, monk
 
 
 def test_the_old_detour_is_still_available(fake_llm, isolated_data, w, monkeypatch):
-    monkeypatch.setattr(main, "REACT_REPLANS", False)
+    monkeypatch.setattr(ag, "REACT_REPLANS", False)
     calls = []
 
     def gen(prompt, options=None, format=None):
@@ -241,15 +242,15 @@ def test_the_old_detour_is_still_available(fake_llm, isolated_data, w, monkeypat
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    rt = main.make_runtime("adam", w)
-    main.initial_planning(rt, w)
+    rt = ag.Agent.load("adam", w)
+    ag.initial_planning(rt, w)
     rt.reaction = "Ask Eve which fields the contact form sends"
-    main.react(rt, 30, "9:15 am", w)
+    rt.react(30, "9:15 am", w)
     assert calls == []
 
 
 def test_cooldown_is_the_reactions_own_ten_minutes():
-    assert main.REACT_COOLDOWN_STEPS * main.STEP_MINUTES == 10
+    assert ag.REACT_COOLDOWN_STEPS * main.STEP_MINUTES == 10
 
 
 # --- 4. following a teammate only when working with them -------------------------

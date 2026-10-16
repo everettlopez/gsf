@@ -14,6 +14,7 @@ import json
 import pytest
 
 import llm
+import agent as ag
 import main
 import project_board as pb
 from conftest import fake_generate
@@ -25,11 +26,11 @@ from plan import Planner
 def w(world):
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
     yield copy.deepcopy(world)
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
 
 
 ADAM_DAY = [
@@ -51,7 +52,7 @@ STANDUP = {"location": "conference_room", "activity": "stand-up on the API and t
 
 
 def _pair(w):
-    adam, eve = main.make_runtime("adam", w), main.make_runtime("eve", w)
+    adam, eve = ag.Agent.load("adam", w), ag.Agent.load("eve", w)
     adam.broad_chunks = adam.planner.create_chunks(ADAM_DAY, adam.agent, w)
     eve.broad_chunks = eve.planner.create_chunks(EVE_DAY, eve.agent, w)
     return adam, eve
@@ -141,7 +142,7 @@ def test_a_replan_keeps_the_meeting_even_right_after_their_talk(fake_llm, isolat
     adam, eve = _pair(w)
     main.remember_conversation(adam, eve, "7:10 am", "the plan")
     main.schedule_meeting(adam, eve, STANDUP, "7:10 am")
-    assert main.replan_rest_of_day(adam, "7:15 am", "talked", w, "test")
+    assert ag.replan_rest_of_day(adam, "7:15 am", "talked", w, "test")
     meetings = [c for c in adam.broad_chunks if c.get("agreed")]
     assert [(c["start_time"], c["duration"]) for c in meetings] == [("8:00 am", 15)]
 
@@ -173,8 +174,8 @@ def test_a_meeting_is_one_step_not_broken_down(fake_llm, isolated_data, w):
     long = dict(STANDUP, minutes=60, start="10:00 am")
     main.schedule_meeting(adam, eve, long, "7:10 am")
     block = _at(adam, "10:00 am")
-    assert main.expand_hours(adam, block, w) == [block]
-    assert main.expand_minutes(adam, block, w) == [block]
+    assert ag.expand_hours(adam, block, w) == [block]
+    assert ag.expand_minutes(adam, block, w) == [block]
 
 
 # --- meeting up ----------------------------------------------------------------------
@@ -185,20 +186,20 @@ def test_they_talk_at_the_meeting_even_inside_the_cooldown_and_only_once(fake_ll
     adam.chunk = _at(adam, "8:00 am")
     for rt in (adam, eve):
         rt.agent["current_location"] = "conference_room"
-    assert main.planned_partner(adam, w, "8:00 am")["id"] == "eve"
+    assert ag.planned_partner(adam, w, "8:00 am")["id"] == "eve"
     main.remember_conversation(adam, eve, "8:00 am", "the stand-up")      # held
-    assert main.planned_partner(adam, w, "8:05 am") is None
+    assert ag.planned_partner(adam, w, "8:05 am") is None
 
 
 def test_after_the_meeting_they_go_back_to_their_own_work(fake_llm, isolated_data, w):
     adam, eve = _pair(w)
     main.schedule_meeting(adam, eve, dict(STANDUP, minutes=30), "7:10 am")
     adam.chunk = _at(adam, "8:00 am")
-    main.drop_spent_target(adam, "8:00 am", w)                            # not held yet: go
+    ag.drop_spent_target(adam, "8:00 am", w)                            # not held yet: go
     assert adam.chunk["agreed"] and adam.chunk["location"] == "conference_room"
     main.remember_conversation(adam, eve, "8:00 am", "the stand-up")
     adam.chunk = _at(adam, "8:05 am")
-    main.drop_spent_target(adam, "8:10 am", w)
+    ag.drop_spent_target(adam, "8:10 am", w)
     assert adam.chunk["location"] == "office_1" and adam.chunk["target_agent"] is None
     assert "focus on Adam Beck's own work" in adam.chunk["activity"]
 
@@ -267,7 +268,7 @@ def test_the_meeting_starts_a_talk_as_soon_as_both_are_there(fake_llm, isolated_
         rt.agent["current_location"] = "conference_room"
         rt.prev_company = {"eve" if rt is adam else "adam"}
     for rt in (adam, eve):
-        main.decide_phase(rt, 13, "8:05 am", w)
+        rt.decide(13, "8:05 am", w)
     main.resolve_conversations([adam, eve], 13, "8:05 am", w)
     assert talks == ["meet Eve Smith in conference_room about: stand-up on the API and the homepage"]
 
@@ -289,7 +290,7 @@ def test_the_talk_at_a_meeting_doesnt_schedule_it_again(isolated_data, w, monkey
         rt.status = "meeting"
         rt.prev_company = {"eve" if rt is adam else "adam"}
     for rt in (adam, eve):
-        main.decide_phase(rt, 14, "8:05 am", w)
+        rt.decide(14, "8:05 am", w)
     main.resolve_conversations([adam, eve], 14, "8:05 am", w)
     assert adam.queued is None and eve.queued is None
 
@@ -327,7 +328,7 @@ def test_a_meeting_agreed_for_right_now_goes_into_both_plans(isolated_data, w, m
     for rt in (adam, eve):
         rt.override = None
         rt.chunk = _at(rt, "7:15 am")
-    assert main.planned_partner(adam, w, "7:15 am") is None
+    assert ag.planned_partner(adam, w, "7:15 am") is None
     for rt in (adam, eve):
         rt.agent["current_location"] = "conference_room"
-    assert main.planned_partner(adam, w, "7:20 am") is eve.agent
+    assert ag.planned_partner(adam, w, "7:20 am") is eve.agent

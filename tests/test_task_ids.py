@@ -22,6 +22,8 @@ import re
 import pytest
 
 import llm
+import agent as ag
+import log
 import main
 import project_board as pb
 from conftest import fake_generate
@@ -35,11 +37,11 @@ TASK_ID = re.compile(r"\bT-\d+\b")
 def w(world):
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
     yield copy.deepcopy(world)
     pb.clear_workload_changed()
     pb.clear_commitments()
-    main._last_talk.clear()
+    main.clear_talks()
 
 
 # --- no prompt invents an id ----------------------------------------------------------
@@ -65,8 +67,8 @@ def test_no_prompt_mentions_a_task_id_while_the_board_is_empty(isolated_data, mo
     monkeypatch.setattr(llm, "generate", gen)
     monkeypatch.setattr(llm, "embed", __import__("conftest").fake_embed)
     monkeypatch.setattr(main, "NUM_STEPS", 6)
-    monkeypatch.setattr(main, "REFLECTION_THRESHOLD", None)
-    main.timings.clear()
+    monkeypatch.setattr(ag, "REFLECTION_THRESHOLD", None)
+    log.timings.clear()
     main.main()
 
     assert any("is talking with" in p for p in prompts)          # a conversation happened
@@ -97,7 +99,7 @@ def test_the_conversation_example_uses_a_real_task(fake_llm, isolated_data, w, m
     monkeypatch.setattr(llm, "generate", gen)
     pb.create_task(w, "adam", "Auth endpoints", area="backend", assign_to_self=True)
     pb.create_task(w, "eve", "Homepage", area="frontend", assign_to_self=True)
-    adam, eve = main.make_runtime("adam", w), main.make_runtime("eve", w)
+    adam, eve = ag.Agent.load("adam", w), ag.Agent.load("eve", w)
     run_conversation(eve, adam, "9:00 am", "ask Adam about the API", w)
     assert "\"I'll move T-2 to review once it works\"" in prompts[0]      # Eve's own task
 
@@ -114,7 +116,7 @@ def _talk(w, monkeypatch, replies):
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    adam, eve = main.make_runtime("adam", w), main.make_runtime("eve", w)
+    adam, eve = ag.Agent.load("adam", w), ag.Agent.load("eve", w)
     history = run_conversation(adam, eve, "7:05 am", "Greet Eve and start reviewing tasks", w)
     return history, calls, adam
 

@@ -5,14 +5,16 @@ perceiving, deciding, acting and reflection all execute for a few steps.
 
 import json
 
+import agent as ag
+import log
 import main
 from memory_stream import MemoryStream
 
 
 def _run(monkeypatch, capsys, steps, threshold):
     monkeypatch.setattr(main, "NUM_STEPS", steps)
-    monkeypatch.setattr(main, "REFLECTION_THRESHOLD", threshold)
-    main.timings.clear()
+    monkeypatch.setattr(ag, "REFLECTION_THRESHOLD", threshold)
+    log.timings.clear()
     main.main()
     return capsys.readouterr().out
 
