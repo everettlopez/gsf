@@ -28,13 +28,17 @@ class _APIError(Exception):
     pass
 
 
+USAGE = SimpleNamespace(input_tokens=1000, output_tokens=200, cache_read_input_tokens=50_000,
+                        cache_creation_input_tokens=4000)
+
+
 @pytest.fixture
 def fake_anthropic(monkeypatch):
     """A stub SDK whose beta stream returns `state["message"]` (or raises
     `state["raise"]`) and records every request."""
     state = {"requests": [], "raise": None, "message": SimpleNamespace(
         content=[SimpleNamespace(type="text", text="Done: index.html written.")],
-        stop_reason="end_turn", model="claude-opus-5-5")}
+        stop_reason="end_turn", model="claude-opus-5-5", usage=USAGE)}
 
     class Stream:
         def __enter__(self):
@@ -104,6 +108,8 @@ def test_the_executor_role_goes_to_claude_with_tools(fake_anthropic):
     assert request["fallbacks"] == "default"
     assert request["betas"] == ["server-side-fallback-2026-07-01"]
     assert request["tools"] == [{**WRITE_FILE, "eager_input_streaming": True}]
+    assert request["cache_control"] == {"type": "ephemeral"}            # each turn resends the session
+    assert reply.usage == {"input": 1000, "output": 200, "cache_read": 50_000, "cache_write": 4000}
     assert "eager_input_streaming" not in WRITE_FILE              # the caller's tool is untouched
     assert (reply.text, reply.tool_calls, reply.stop_reason) == ("Done: index.html written.", [], "end_turn")
 
@@ -113,7 +119,7 @@ def test_tool_calls_come_back_with_the_content_to_append(fake_anthropic):
                SimpleNamespace(type="tool_use", id="toolu_1", name="write_file",
                                input={"path": "index.html", "contents": "<h1>Hi</h1>"})]
     fake_anthropic["message"] = SimpleNamespace(content=content, stop_reason="tool_use",
-                                                model="claude-opus-5-5")
+                                                model="claude-opus-5-5", usage=USAGE)
     reply = llm.chat([{"role": "user", "content": "go"}], tools=[WRITE_FILE])
     assert reply.tool_calls == [llm.ToolCall("toolu_1", "write_file",
                                              {"path": "index.html", "contents": "<h1>Hi</h1>"})]
@@ -155,3 +161,11 @@ def test_a_missing_sdk_says_how_to_install_it(monkeypatch):
     monkeypatch.delenv("GA_EXECUTOR_PROVIDER", raising=False)
     with pytest.raises(llm.LLMError, match="pip install anthropic"):
         llm.chat([{"role": "user", "content": "go"}])
+
+
+def test_the_cost_estimate_prices_each_kind_of_token():
+    usage = {"input": 1_000_000, "output": 100_000, "cache_read": 2_000_000, "cache_write": 400_000}
+    # Opus 5.5: $4 in, $20 out, $0.20 cache read, cache write 1.25 x $4
+    assert round(llm.cost("claude-opus-5-5", usage), 2) == round(4 + 2 + 0.4 + 2.0, 2)
+    assert llm.cost("claude-sonnet-5-5", usage) < llm.cost("claude-opus-5-5", usage)
+    assert llm.cost("some-new-model", usage) == llm.cost("claude-opus-5-5", usage)

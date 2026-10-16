@@ -247,6 +247,9 @@ def main():
         for rt in runtimes:
             rt.stream.flush()
         print_timing_summary()
+        if budget.spent:
+            log.info(f"  executor sessions cost about ${budget.spent:.2f} this run "
+                     f"(estimate; the Anthropic console has the real bill)")
 
 
 if __name__ == "__main__":

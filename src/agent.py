@@ -155,6 +155,7 @@ class Agent:
     work_log: dict = field(default_factory=dict)       # task id -> work sessions on it
     shipped: set = field(default_factory=set)          # task ids merged into main
     reviewed: dict = field(default_factory=dict)       # teammate task id -> review round done
+    team: list = field(default_factory=list)           # (name, area) of everyone on the team
 
     # Per-step scratch space (filled in by the phases below)
     observations: list = field(default_factory=list)
@@ -183,6 +184,7 @@ class Agent:
             reflector=Reflector(agent, stream, retriever),
             executor=executor,
             workspace=workspace,
+            team=[(a["name"], a.get("area") or "general") for a in world["agents"].values()],
         )
 
     # -- PHASE 1: PERCEIVE ---------------------------------------------------
@@ -1181,15 +1183,17 @@ def work_on_task(rt, current_time, world):
                      "history": len(task["history"])})
     remember_work(rt, task, result, current_time)
 
+    from executor import short
+
     if result.blocked:
-        head_to_board(rt, f"mark {task['id']} blocked on the project board: {result.blocked_reason}",
-                      current_time, world)
+        head_to_board(rt, f"mark {task['id']} blocked on the project board: "
+                          f"{short(result.blocked_reason).rstrip('.')}", current_time, world)
     elif result.finished:
         # What the reviewer should check goes on the card with the move.
         files = ", ".join(result.files_changed[:6])
         project_board.add_commitment(
             rt.agent["id"], f"move {task['id']} to review on the project board, noting for the "
-                            f"reviewer: {result.summary.strip().rstrip('.')}. Changed: {files}. "
+                            f"reviewer: {short(result.summary).rstrip('.')}. Changed: {files}. "
                             f"Tests pass on branch task/{task['id']}.")
     return result
 
@@ -1212,8 +1216,10 @@ def _use_hands(rt, session):
 
 def remember_work(rt, task, result, current_time):
     """The session's outcome, as observations in the agent's memory stream."""
+    from executor import short
+
     name, ref = rt.agent["name"], f"{task['id']} '{task['title']}'"
-    lines = [f"{name} worked on {ref} at {current_time}: {result.summary.strip().rstrip('.')}."]
+    lines = [f"{name} worked on {ref} at {current_time}: {short(result.summary).rstrip('.')}."]
     if result.files_changed:
         shown = ", ".join(result.files_changed[:6])
         more = f" and {len(result.files_changed) - 6} more" if len(result.files_changed) > 6 else ""
@@ -1221,15 +1227,19 @@ def remember_work(rt, task, result, current_time):
     if result.tests_passed is not None:
         lines.append(f"The tests for {task['id']} {'pass' if result.tests_passed else 'fail'}.")
     if result.blocked:
-        lines.append(f"{name} is stuck on {task['id']}: {result.blocked_reason.strip().rstrip('.')}.")
+        lines.append(f"{name} is stuck on {task['id']}: {short(result.blocked_reason).rstrip('.')}.")
     rt.stream.add_observations(lines)
     for line in lines:
         log.event(f"🔧 {line}")
+    if result.cost:
+        log.event(f"💲 {rt.tag}'s session on {task['id']} cost about ${result.cost:.2f}")
 
 
 def head_to_board(rt, commitment, current_time, world, minutes=10):
     """Go to the board right after this step to do `commitment` there (the
-    board visit is where the board changes; the promise tells it what to do)."""
+    board visit is where the board changes; the promise tells it what to do).
+    In a run, Adam's report that T-1 was blocked waited behind an hour-long
+    "keep working on T-1" step, and the board never heard of it."""
     room = project_board.board_location(world)
     if room is None:
         return
@@ -1245,10 +1255,10 @@ def head_to_board(rt, commitment, current_time, world, minutes=10):
         "pinned": True,
         "board_work": True,
     }
-    if rt.override and rt.planner._parse_time(rt.override["start_time"]) <= rt.planner._parse_time(start)             < rt.planner._parse_time(rt.override["start_time"]) + timedelta(minutes=rt.override["duration"]):
-        rt.queued = visit                       # after the step already under way
-    else:
-        rt.override = visit
+    # The trip goes next, even in the middle of a long step (a whole work
+    # block, say); that step picks up again afterwards if it has time left.
+    rt.queued = rt.override or rt.queued
+    rt.override = visit
     log.event(f"{rt.tag} heads to the board to: {commitment}")
 
 
@@ -1311,19 +1321,23 @@ def review_teammate_work(rt, task, block, current_time, world):
     rt.work_log.setdefault(f"review {task['id']}", []).append(
         {"block": block, "time": current_time, "result": result, "history": len(task["history"])})
 
+    from executor import short
+
+    if result.cost:
+        log.event(f"💲 {rt.tag}'s review of {task['id']} cost about ${result.cost:.2f}")
     name, ref = rt.agent["name"], f"{owner}'s {task['id']} '{task['title']}'"
     if result.verdict == "none":
-        line = f"{name} couldn't review {ref} yet: {result.summary.strip().rstrip('.')}."
+        line = f"{name} couldn't review {ref} yet: {short(result.summary).rstrip('.')}."
         rt.stream.add_observations([line])
         log.event(f"🔍 {line}")
         return result
     rt.reviewed[task["id"]] = _review_round(task)
-    lines = [f"{name} reviewed {ref} at {current_time}: {result.summary.strip().rstrip('.')}."]
+    lines = [f"{name} reviewed {ref} at {current_time}: {short(result.summary).rstrip('.')}."]
     if result.tests_passed is not None:
         lines.append(f"The tests on {task['id']}'s branch {'pass' if result.tests_passed else 'fail'}.")
     if result.verdict == "approve":
         lines.append(f"{name} thinks {task['id']} is ready to approve.")
-        promise = f"approve {task['id']} on the project board: {result.summary.strip().rstrip('.')}"
+        promise = f"approve {task['id']} on the project board: {short(result.summary, 1).rstrip('.')}"
     else:
         asks = "; ".join(result.changes) or result.summary.strip().rstrip(".")
         lines.append(f"{name} wants changes to {task['id']}: {asks}.")

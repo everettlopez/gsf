@@ -36,6 +36,22 @@ COGNITIVE, EXECUTOR = "cognitive", "executor"
 EXECUTOR_DEFAULTS = {"provider": "anthropic", "model": "claude-opus-5-5", "effort": "high"}
 EXECUTOR_MAX_TOKENS = 64000     # streamed, so a long file write doesn't hit a timeout
 
+# $ per million tokens: (input, output, cache read). Cache writes cost 1.25x input.
+# For the run's cost estimate only; the Anthropic console has the real bill.
+PRICES = {
+    "claude-opus-5-5": (4.00, 20.00, 0.20),
+    "claude-sonnet-5-5": (2.00, 10.00, 0.20),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01),
+}
+
+
+def cost(model, usage):
+    """Estimated $ for `usage` ({input, output, cache_read, cache_write} tokens)."""
+    price_in, price_out, price_read = PRICES.get(model, PRICES["claude-opus-5-5"])
+    return (usage.get("input", 0) * price_in + usage.get("output", 0) * price_out
+            + usage.get("cache_read", 0) * price_read
+            + usage.get("cache_write", 0) * price_in * 1.25) / 1_000_000
+
 
 class LLMError(RuntimeError):
     """The executor model can't be reached or configured."""
@@ -107,6 +123,7 @@ class Reply:
     stop_reason: str = "end_turn"
     content: list = field(default_factory=list)
     model: str = ""
+    usage: dict = field(default_factory=dict)       # tokens: input, output, cache_read, cache_write
 
 
 _clients = {}
@@ -147,6 +164,9 @@ def _anthropic_chat(config, messages, system, tools, max_tokens):
         # recommended fallback model instead of coming back as a refusal.
         "betas": ["server-side-fallback-2026-07-01"],
         "fallbacks": "default",
+        # Each turn resends the whole session so far: cache it, so a turn pays
+        # full price only for what is new.
+        "cache_control": {"type": "ephemeral"},
     }
     if system:
         request["system"] = system
@@ -169,5 +189,9 @@ def _anthropic_chat(config, messages, system, tools, max_tokens):
 
     text = "".join(b.text for b in message.content if b.type == "text")
     calls = [ToolCall(b.id, b.name, b.input) for b in message.content if b.type == "tool_use"]
+    u = message.usage
+    usage = {"input": u.input_tokens or 0, "output": u.output_tokens or 0,
+             "cache_read": u.cache_read_input_tokens or 0,
+             "cache_write": u.cache_creation_input_tokens or 0}
     return Reply(text=text, tool_calls=calls, stop_reason=message.stop_reason,
-                 content=message.content, model=message.model)
+                 content=message.content, model=message.model, usage=usage)

@@ -20,8 +20,24 @@ agents at the board.
                     writes and tests files in the agent's workspace (workspace.py)
 """
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
+
+# How the tests are run, here and in the skills (skills/shared/SKILL.md).
+TEST_COMMAND = "python -m unittest discover -s tests"
+
+
+def short(text, sentences=2, limit=300):
+    """The gist of a report: its first sentence or two, as plain text. Models
+    write long markdown reports; a memory, a commit subject or a board note
+    gets this, and the full report goes in the commit body."""
+    text = (text or "").strip().split("\n\n")[0]
+    text = re.sub(r"[`*#>]+", "", text)
+    text = " ".join(text.split())
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    gist = " ".join(parts[:sentences])
+    return gist if len(gist) <= limit else gist[:limit - 1].rsplit(" ", 1)[0] + "…"
 
 
 @dataclass
@@ -31,6 +47,7 @@ class ExecResult:
     files_changed: list = field(default_factory=list)
     tests_passed: Optional[bool] = None             # None: no tests were run
     blocked_reason: str = ""                        # why the work can't go on, if it can't
+    cost: float = 0.0                               # estimated $ of the session
 
     @property
     def blocked(self):
@@ -50,6 +67,7 @@ class ReviewResult:
     summary: str
     changes: list = field(default_factory=list)     # for "changes": one concrete request each
     tests_passed: Optional[bool] = None
+    cost: float = 0.0
 
 
 class Executor:
@@ -73,6 +91,7 @@ class SessionBudget:
 
     def __init__(self, sessions=None):
         self.left = sessions
+        self.spent = 0.0                            # estimated $ so far
 
     def take(self):
         if self.left is None:
@@ -94,11 +113,15 @@ class Budgeted(Executor):
 
     def run(self, agent, task, workspace):
         self.budget.take()
-        return self.inner.run(agent, task, workspace)
+        result = self.inner.run(agent, task, workspace)
+        self.budget.spent += result.cost
+        return result
 
     def review(self, agent, task, workspace, owner_name=""):
         self.budget.take()
-        return self.inner.review(agent, task, workspace, owner_name)
+        result = self.inner.review(agent, task, workspace, owner_name)
+        self.budget.spent += result.cost
+        return result
 
 
 class FakeExecutor(Executor):
@@ -146,8 +169,7 @@ TOOLS = [
           {"path": _PATH, "contents": {"type": "string", "description": "The whole file"}}),
     _tool("run_command", "Run a shell command in the workspace root (a container with no "
           "network) and get its exit code and output.", {"command": {"type": "string"}}),
-    _tool("run_tests", "Run the task's tests with this command. Whether the task's tests pass "
-          "is taken from the last run_tests after the last file change.",
+    _tool("run_tests", "Run tests with this command, to check the work as you go.",
           {"command": {"type": "string"}}),
     _tool("report", "End this work session and report back.",
           {"summary": {"type": "string", "description": "One or two plain sentences: what is "
@@ -196,6 +218,8 @@ class _Session:
 
     def __init__(self):
         self.report = None
+        self.usage = {}              # tokens over the session
+        self.model = ""
         self.counter = 0             # tool calls so far
         self.last_change = 0         # the call that last changed files (a write or a command)
         self.tests = None            # (call, passed) of the last run_tests
@@ -204,6 +228,15 @@ class _Session:
         if self.tests is None or self.tests[0] < self.last_change:
             return None              # never run, or run before the latest change
         return self.tests[1]
+
+    def add_usage(self, reply):
+        self.model = reply.model or self.model
+        for key, value in (reply.usage or {}).items():
+            self.usage[key] = self.usage.get(key, 0) + value
+
+    def cost(self):
+        import llm
+        return llm.cost(self.model, self.usage)
 
 
 class LocalExecutor(Executor):
@@ -215,14 +248,23 @@ class LocalExecutor(Executor):
     session reads and runs a teammate's published branch and changes nothing.
     The skills for the task (skills.py) go into the system prompt.
 
-    tests_passed is not the model's word for it: it is the outcome of the last
-    run_tests, and only if nothing changed after it."""
+    tests_passed is not the model's word for it: the host runs the tests
+    itself when the session ends (TEST_COMMAND) and takes that outcome."""
 
     def __init__(self, max_turns=30, command_timeout=None):
         self.max_turns = max_turns
         self.command_timeout = command_timeout
 
     # -- prompts -------------------------------------------------------------
+    @staticmethod
+    def _team(agent):
+        team = getattr(agent, "team", None) or []
+        if not team:
+            return ""
+        people = ", ".join(f"{name} ({area})" for name, area in team)
+        return (f"The team is {people}; nobody else works at the company, so content that "
+                f"names the team names them.")
+
     @staticmethod
     def _who(agent):
         import persona
@@ -242,14 +284,24 @@ class LocalExecutor(Executor):
         return f"""You are the hands of {a['name']}, a {a.get('area') or 'software'} engineer on a \
 two-person team building the company website. {who} {style}
 
+{self._team(agent)}
+
 {a['name']} decides what to work on; you do the work on the one task you are given, in \
 {a['name']}'s own copy of the team's repository, on the task's branch. Stay inside that task \
-and {a['name']}'s area: a teammate's work is theirs to change. When the task needs something \
-from a teammate, give that as the blocked reason instead of doing their part.
+and {a['name']}'s area: a teammate's work is theirs to change.
+
+Each task is built on its own branch from main, and the teammates' halves meet only once both \
+are approved and merged. So a teammate's files missing from your branch is expected, not a \
+blocker: build and test against a small stand-in, as the conventions below say. Report \
+blocked only when this task itself can't go on without something outside it (a decision, an \
+account, a teammate's answer to a question).
 
 Commands run in a Linux container with Python 3.12 and no network, so nothing can be \
-installed: build with what is there and test with the standard library. Check the work with \
-run_tests before reporting it finished, and end the session with report.
+installed: build with what is there and test with the standard library. You don't commit \
+(there is no git in the container): when the session ends, the work is committed and, if its \
+tests pass, published for review. The tests are run again then with \
+`{TEST_COMMAND}`, and that run is what counts. End the session with report: a sentence or \
+two on what is done and what is left.
 
 {skills.load(skill_names)}"""
 
@@ -335,6 +387,19 @@ in a Linux container with Python 3.12 and no network; use show_changes for the d
         return block
 
     # -- the loop ------------------------------------------------------------
+    def _final_tests(self, workspace):
+        """The tests, run by the host at the end of the session: whether they
+        pass is this, not what the model said. None if there are none."""
+        try:
+            if not [f for f in workspace.list_files("tests") if f.endswith(".py")]:
+                return None
+        except Exception:
+            return None
+        done = workspace.run(TEST_COMMAND)
+        if "NO TESTS RAN" in done.output or "Ran 0 tests" in done.output:
+            return None
+        return done.ok
+
     def _session(self, workspace, system, brief, tools):
         """One bounded tool-use conversation. Returns (session, final text, why
         it was stopped from outside the work, or "")."""
@@ -347,6 +412,7 @@ in a Linux container with Python 3.12 and no network; use show_changes for the d
         for _ in range(self.max_turns):
             try:
                 reply = llm.chat(messages, system=system, tools=tools)
+                session.add_usage(reply)
             except llm.ToolInputError:
                 unreadable += 1                   # no tool_use to answer: send the turn again
                 if unreadable > 2:
@@ -379,9 +445,10 @@ in a Linux container with Python 3.12 and no network; use show_changes for the d
             self.brief(agent, task), TOOLS)
         report = session.report or {}
         result = ExecResult(summary=(report.get("summary") or text).strip() or "Worked on the task.",
-                            tests_passed=session.tests_passed(),
-                            blocked_reason=stopped or (report.get("blocked_reason") or "").strip())
-        workspace.commit(f"{task['id']}: {result.summary}"[:200])
+                            tests_passed=self._final_tests(workspace),
+                            blocked_reason=stopped or (report.get("blocked_reason") or "").strip(),
+                            cost=session.cost())
+        workspace.commit(f"{task['id']}: {short(result.summary, 1, 120)}", body=result.summary)
         result.files_changed = workspace.changed_files()
         if result.finished:
             workspace.publish(task["id"])
@@ -395,15 +462,16 @@ in a Linux container with Python 3.12 and no network; use show_changes for the d
                 workspace, self.review_prompt(agent),
                 self.review_brief(task, owner_name or task.get("assignee") or "a teammate"),
                 REVIEW_TOOLS)
+            tests = self._final_tests(workspace)
         finally:
             workspace.discard_changes()
         report = session.report or {}
         if stopped or not report:
             return ReviewResult("none", stopped or text or "The review didn't reach a verdict.",
-                                tests_passed=session.tests_passed())
+                                tests_passed=tests, cost=session.cost())
         changes = [c.strip(" -*") for c in (report.get("changes") or "").splitlines() if c.strip(" -*")]
         return ReviewResult(report["verdict"], report["summary"].strip(), changes,
-                            tests_passed=session.tests_passed())
+                            tests_passed=tests, cost=session.cost())
 
 
 DEFAULT_MAX_SESSIONS = 20          # per run, for real (local) hands

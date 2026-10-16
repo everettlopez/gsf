@@ -131,13 +131,16 @@ def test_a_blocked_task_sends_the_agent_to_the_board_with_the_reason(fake_llm, i
     assert f"- {promise}" in prompt                                     # the board visit knows why
 
 
-def test_a_blocked_report_waits_for_a_step_already_under_way(fake_llm, isolated_data, w):
+def test_a_blocked_report_goes_to_the_board_even_mid_block_then_the_block_resumes(
+        fake_llm, isolated_data, w):
     rt, _ = _eve_at_her_desk(w, [STUCK])
-    rt.override = {"activity": "9:00 am: Build the hero section", "location": "office_2",
-                   "start_time": "9:00 am", "duration": 15, "target_agent": None}
+    block = {"activity": "9:00 am: keep working on T-2", "location": "office_2", "pinned": True,
+             "start_time": "9:00 am", "duration": 75, "target_agent": None}
+    rt.override = dict(block)                       # a long step under way (after a talk, say)
     ag.work_on_task(rt, "9:00 am", w)
-    assert rt.override["activity"] == "9:00 am: Build the hero section"
-    assert rt.queued["board_work"]
+    visit = ag.get_chunk_lazy(rt, "9:05 am", w)
+    assert visit["board_work"] and visit["location"] == "conference_room"
+    assert ag.get_chunk_lazy(rt, "9:15 am", w) == block                 # back to work after it
 
 
 # --- the executor interface ----------------------------------------------------------
@@ -334,3 +337,22 @@ def test_a_failing_executor_stops_the_hands_and_the_agent_carries_on(fake_llm, i
     assert len(rt.stream.memories) == before and rt.work_log.get("T-2") == []
     rt.decision = "1"
     rt.act(21, "9:05 am", w)                                            # the step still runs
+
+
+def test_the_budget_adds_up_what_sessions_cost(fake_llm, isolated_data, w):
+    from executor import Budgeted, SessionBudget
+
+    budget = SessionBudget()
+    rt, fake = _eve_at_her_desk(w, [ExecResult("Built it.", ["index.html"], True, cost=0.42)])
+    rt.executor = Budgeted(fake, budget)
+    ag.work_on_task(rt, "9:00 am", w)
+    assert round(budget.spent, 2) == 0.42
+
+
+def test_a_long_report_becomes_a_short_memory(fake_llm, isolated_data, w):
+    report = "Built the template and the styles. 23 tests pass. More.\n\n**Details:** lots"
+    rt, _ = _eve_at_her_desk(w, [ExecResult(report, ["index.html"], True)])
+    ag.work_on_task(rt, "9:00 am", w)
+    assert ("Eve Smith worked on T-2 'Design and implement the home page layout' at 9:00 am: "
+            "Built the template and the styles. 23 tests pass.") in _memories(rt)
+    assert not any("Details" in m for m in _memories(rt))

@@ -31,6 +31,8 @@ MAX_OUTPUT = 20_000            # characters of command output kept
 
 DOCKER_IMAGE = "python:3.12-slim"
 
+SEED_GITIGNORE = "__pycache__/\n*.pyc\n"
+
 SEED_README = """# Company website
 
 The team's sandbox repository. Each task is built on its own branch
@@ -65,7 +67,8 @@ class LocalRunner:
     def run(self, path, command, timeout=COMMAND_TIMEOUT):
         try:
             done = subprocess.run(command, shell=True, cwd=path, capture_output=True, text=True,
-                                  timeout=timeout, errors="replace")
+                                  timeout=timeout, errors="replace",
+                                  env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
         except subprocess.TimeoutExpired:
             return CommandResult(124, f"timed out after {timeout}s")
         return CommandResult(done.returncode, _trim(done.stdout + done.stderr))
@@ -81,6 +84,7 @@ class DockerRunner:
     def command_line(self, path, command, name):
         return ["docker", "run", "--rm", "--name", name, "--network", "none",
                 "--memory", "1g", "--cpus", "1", "--pids-limit", "256",
+                "-e", "PYTHONDONTWRITEBYTECODE=1",
                 "-v", f"{Path(path).resolve()}:/work", "-w", "/work",
                 self.image, "sh", "-c", command]
 
@@ -128,7 +132,8 @@ def ensure_origin(root=None):
     shutil.rmtree(seed, ignore_errors=True)
     _git(root, "clone", str(origin), str(seed))
     (seed / "README.md").write_text(SEED_README, encoding="utf-8")
-    _git(seed, "add", "README.md")
+    (seed / ".gitignore").write_text(SEED_GITIGNORE, encoding="utf-8")
+    _git(seed, "add", "README.md", ".gitignore")
     _git(seed, "-c", "user.name=Sandbox", "-c", "user.email=sandbox@gsf.local",
          "commit", "-m", "Start the company website")
     _git(seed, "push", "origin", "HEAD:main")
@@ -224,12 +229,12 @@ class Workspace:
                    self.git("status", "--porcelain", "--untracked-files=all").splitlines()]
         return sorted({f for f in committed + pending if f})
 
-    def commit(self, message):
+    def commit(self, message, body=""):
         """Commit everything in the checkout; returns False if nothing changed."""
         self.git("add", "-A")
         if not self.git("status", "--porcelain"):
             return False
-        self.git("commit", "--quiet", "-m", message)
+        self.git("commit", "--quiet", "-m", message, *(["-m", body] if body else []))
         return True
 
     def diff(self):

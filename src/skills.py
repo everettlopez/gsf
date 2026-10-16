@@ -13,12 +13,13 @@ from pathlib import Path
 SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
 LANES = {"frontend": "frontend", "design": "frontend", "backend": "backend", "devops": "deploy"}
-_DEPLOY = re.compile(r"\b(?:deploy\w*|ship\w*|release\w*|publish\w*|dist)\b", re.IGNORECASE)
+_DEPLOY = re.compile(r"\b(?:deploy\w*|ship\w*|release\w*|publish\w*)\b", re.IGNORECASE)
 
 
 def for_task(task):
     """The skills a work session on `task` gets: the shared contract, the
-    task's lane, and deploy for anything about shipping the site."""
+    task's lane, and deploy for a task about shipping the site (not one that
+    only mentions dist/: that made a build task think it had to ship)."""
     names = ["shared"]
     lane = LANES.get(task.get("area"))
     if lane:

@@ -38,7 +38,8 @@ def root(tmp_path):
 def test_a_workspace_is_a_checkout_of_the_sandbox_repo(root):
     eve = Workspace(EVE, root, runner=Recorder())
     assert eve.path == root / "eve" and (eve.path / ".git").is_dir()
-    assert eve.list_files() == ["README.md"]
+    assert eve.list_files() == [".gitignore", "README.md"]
+    assert "__pycache__/" in eve.read_file(".gitignore")                  # no bytecode committed
     assert "sandbox repository" in eve.read_file("README.md")
     assert Workspace(ADAM, root, runner=Recorder()).origin == eve.origin   # one shared origin
 
@@ -151,3 +152,8 @@ def test_long_output_is_trimmed_in_the_middle():
     trimmed = ws._trim(text)
     assert len(trimmed) < len(text) and trimmed.startswith("a") and trimmed.endswith("b")
     assert "characters cut" in trimmed
+
+
+def test_no_bytecode_is_written_in_the_sandbox(tmp_path):
+    line = DockerRunner().command_line(tmp_path, "python -m unittest", "gsf-x")
+    assert line[line.index("-e") + 1] == "PYTHONDONTWRITEBYTECODE=1"

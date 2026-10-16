@@ -105,24 +105,51 @@ def test_the_model_gets_the_task_its_notes_and_earlier_sessions(eve, script):
     assert {t["name"] for t in request["tools"]} == {t["name"] for t in TOOLS}
 
 
-def test_tests_only_count_if_nothing_changed_after_them(eve, script):
+def test_the_hosts_final_test_run_decides_not_the_models(eve, script):
+    """The model's own run passed, then it changed the page; the run the host
+    makes when the session ends fails, so the work isn't finished."""
     rt, task = eve
+    runner = Runner(CommandResult(0, "Ran 2 tests\nOK"), CommandResult(1, "FAILED (failures=1)"))
+    rt.workspace.runner = runner
     script["replies"] = [
-        _turn(("write_file", {"path": "index.html", "contents": PAGE})),
-        _turn(("run_tests", {"command": "python -m unittest"})),
+        _turn(("write_file", {"path": "index.html", "contents": PAGE}),
+              ("write_file", {"path": "tests/test_home.py", "contents": "import unittest\n"})),
+        _turn(("run_tests", {"command": "python -m unittest discover -s tests"})),
         _turn(("write_file", {"path": "index.html", "contents": PAGE + "<p>more</p>"})),
         _turn(("report", {"summary": "Done, I think."})),
     ]
     result = LocalExecutor().run(rt, task, rt.workspace)
-    assert result.tests_passed is None and not result.finished
+    assert runner.commands[-1] == "python -m unittest discover -s tests"   # the host's own run
+    assert result.tests_passed is False and not result.finished
     assert not rt.workspace.git("ls-remote", "origin", "task/T-2")      # not published
+
+
+def test_no_tests_means_not_finished_and_no_test_run(eve, script):
+    rt, task = eve
+    script["replies"] = [_turn(("write_file", {"path": "index.html", "contents": PAGE})),
+                         _turn(("report", {"summary": "The page is up."}))]
+    result = LocalExecutor().run(rt, task, rt.workspace)
+    assert result.tests_passed is None and rt.workspace.runner.commands == []
+
+
+def test_tests_that_pass_count_even_if_the_model_never_ran_them(eve, script):
+    """Adam's second session in the first live run changed nothing and didn't
+    rerun the tests, so his finished task was never published."""
+    rt, task = eve
+    script["replies"] = [
+        _turn(("write_file", {"path": "tests/test_home.py", "contents": "import unittest\n"})),
+        _turn(("report", {"summary": "Nothing else to do."}))]
+    result = LocalExecutor().run(rt, task, rt.workspace)
+    assert result.tests_passed is True and result.finished
 
 
 def test_failing_tests_are_reported_as_failing(eve, script):
     rt, task = eve
-    rt.workspace.runner = Runner(CommandResult(1, "FAILED (failures=1)"))
+    rt.workspace.runner = Runner(CommandResult(1, "FAILED (failures=1)"),
+                                 CommandResult(1, "FAILED (failures=1)"))
     script["replies"] = [
-        _turn(("write_file", {"path": "index.html", "contents": PAGE})),
+        _turn(("write_file", {"path": "index.html", "contents": PAGE}),
+              ("write_file", {"path": "tests/test_home.py", "contents": "import unittest\n"})),
         _turn(("run_tests", {"command": "python -m unittest"})),
         _turn(("report", {"summary": "The nav test fails."})),
     ]
@@ -244,6 +271,7 @@ def adams_branch(eve, tmp_path, w):
     adam = Workspace(w["agents"]["adam"], tmp_path / "workspaces", runner=Runner())
     adam.start_task("T-1")
     adam.write_file("build.py", "print('built')\n")
+    adam.write_file("tests/test_build.py", "import unittest\n")
     adam.commit("T-1: the build")
     adam.publish("T-1")
     return rt, pb.get_task(w, "T-1")
@@ -287,3 +315,53 @@ def test_a_review_verdict_must_be_approve_or_changes(adams_branch, script):
     [answer] = _results(script["requests"][1])
     assert answer["is_error"] and "verdict must be one of approve, changes" in answer["content"]
     assert result.verdict == "approve"
+
+
+# --- lessons from the first live run ----------------------------------------------
+def test_reports_are_cut_to_their_gist():
+    from executor import short
+
+    report = ("I built the page layout (`site/template.html`) and the styles; all 23 tests pass. "
+              "The template uses only the agreed placeholders. It adds none.\n\n**The page:**\n- a header")
+    assert short(report) == ("I built the page layout (site/template.html) and the styles; all 23 "
+                             "tests pass. The template uses only the agreed placeholders.")
+    assert short("word " * 200).endswith("…") and len(short("word " * 200)) <= 300
+    assert short("Added tests/test_page.py and site_data.json.") ==         "Added tests/test_page.py and site_data.json."                    # names stay intact
+
+
+def test_the_full_report_goes_in_the_commit_body(eve, script):
+    rt, task = eve
+    report = "Built the hero section. Tests pass.\n\nDetails: the nav uses a skip link."
+    script["replies"] = [_turn(("write_file", {"path": "index.html", "contents": PAGE})),
+                         _turn(("report", {"summary": report}))]
+    LocalExecutor().run(rt, task, rt.workspace)
+    assert rt.workspace.git("log", "-1", "--format=%s") == "T-2: Built the hero section."
+    assert "the nav uses a skip link" in rt.workspace.git("log", "-1", "--format=%b")
+
+
+def test_the_prompt_names_the_team_and_what_the_hands_dont_do(eve, script):
+    rt, task = eve
+    script["replies"] = [_turn(("report", {"summary": "Started."}))]
+    LocalExecutor().run(rt, task, rt.workspace)
+    system = " ".join(script["requests"][0]["system"].split())
+    assert "The team is Adam Beck (backend), Eve Smith (frontend)" in system
+    assert "a teammate's files missing from your branch is expected, not a blocker" in system
+    assert "You don't commit" in system
+
+
+def test_mentioning_dist_doesnt_make_a_task_a_shipping_task():
+    import skills
+
+    build = {"area": "backend", "title": "Build backend to load content JSON into HTML layout",
+             "description": "fill the layout and output the final HTML to dist/"}
+    assert skills.for_task(build) == ["shared", "backend"]
+
+
+def test_session_cost_is_estimated_from_the_models_usage(eve, script):
+    rt, task = eve
+    reply = _turn(("report", {"summary": "Started."}))
+    reply.model, reply.usage = "claude-opus-5-5", {"input": 10_000, "output": 2_000,
+                                                   "cache_read": 100_000, "cache_write": 0}
+    script["replies"] = [reply]
+    result = LocalExecutor().run(rt, task, rt.workspace)
+    assert round(result.cost, 3) == round((10_000 * 4 + 2_000 * 20 + 100_000 * 0.2) / 1e6, 3)
