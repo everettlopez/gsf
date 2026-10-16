@@ -51,17 +51,32 @@ def repos(workspaces):
     return found
 
 
+def _descends(repo, newer, older):
+    """Is commit `newer` built on `older` (as seen from `repo`)?"""
+    return subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", older, newer],
+                          capture_output=True).returncode == 0
+
+
 def task_branches(workspaces):
-    """task id -> (label, repo, branch, commit time, subject) of its newest commit."""
+    """task id -> (label, repo, branch, commit, subject) of its newest commit:
+    the one built on the others, else the latest by commit time."""
     newest = {}
     for label, repo, _ in repos(workspaces):
-        for line in git(repo, "for-each-ref", "--format=%(refname:short)|%(committerdate:unix)|%(subject)",
+        for line in git(repo, "for-each-ref",
+                        "--format=%(refname:short)|%(objectname)|%(committerdate:unix)|%(subject)",
                         "refs/heads/task/").splitlines():
-            branch, when, subject = line.split("|", 2)
+            branch, sha, when, subject = line.split("|", 3)
             task_id = branch.split("/", 1)[1]
-            if task_id not in newest or int(when) > newest[task_id][3]:
-                newest[task_id] = (label, repo, branch, int(when), subject)
-    return newest
+            candidate = (label, repo, branch, sha, subject, int(when))
+            current = newest.get(task_id)
+            if current is None or current[3] == sha:
+                newest.setdefault(task_id, candidate)
+                continue
+            if _descends(repo, sha, current[3]):
+                newest[task_id] = candidate             # built on what we had
+            elif not _descends(current[1], current[3], sha) and int(when) > current[5]:
+                newest[task_id] = candidate             # unrelated: the later one
+    return {task_id: c[:5] for task_id, c in newest.items()}
 
 
 def extract(repo, ref, dest):
