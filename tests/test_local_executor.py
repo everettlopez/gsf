@@ -379,3 +379,42 @@ def test_the_next_session_gets_what_the_agent_learned_and_the_question_comes_bac
     assert "What Eve Smith remembers that bears on it:" in brief
     assert "contact_email in site.json" in brief
     assert result.question == "Adam, is the tagline optional?"
+
+
+
+# --- from the 75-step run: build on the agent's own unmerged work ----------------------
+def test_a_new_task_builds_on_the_agents_own_work_still_in_review(eve, script, w, tmp_path):
+    rt, task = eve
+    t3 = pb.create_task(w, "eve", "Styles", area="frontend", assign_to_self=True)   # T-5
+    ws = rt.workspace
+    ws.start_task("T-2")
+    ws.write_file("site/template.html", "<h1>{{company_name}}</h1>")
+    ws.commit("T-2: layout")
+    ws.publish("T-2")
+    pb.update_status(w, "eve", "T-2", "review", note="check the layout")
+
+    rt.world = w
+    script["replies"] = [_turn(("report", {"summary": "Styled it."}))]
+    LocalExecutor().run(rt, t3, ws)
+    assert "site/template.html" in ws.list_files()                      # T-2's work is here
+    assert ws.built_on == ["T-2"]
+    brief = script["requests"][0]["messages"][0]["content"]
+    assert "Eve Smith's other tasks (build on their work, don't redo it" in brief
+    assert "- T-2 'Design and implement the home page layout' (review)" in brief
+
+
+def test_a_conflicting_merge_is_left_out(tmp_path):
+    from workspace import Workspace
+
+    root = tmp_path / "workspaces"
+    ws = Workspace({"id": "adam", "name": "Adam Beck"}, root, runner=Runner())
+    ws.start_task("T-1")
+    ws.write_file("build.py", "print(1)\n")
+    ws.commit("T-1")
+    ws.publish("T-1")
+    ws.start_task("T-2")                                                  # from main, not T-1
+    ws.write_file("build.py", "print(2)\n")
+    ws.commit("T-2")
+    ws.start_task("T-2", build_on=["T-1"])                                # conflicts on build.py
+    assert ws.built_on == [] and ws.read_file("build.py") == "print(2)\n"
+    assert ws.git("status", "--porcelain") == ""                          # merge aborted cleanly

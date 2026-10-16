@@ -130,7 +130,7 @@ def ensure_origin(root=None):
     _git(origin, "init", "--bare", "--initial-branch=main")
     seed = root / ".seed"
     shutil.rmtree(seed, ignore_errors=True)
-    _git(root, "clone", str(origin), str(seed))
+    _git(root, "-c", "core.autocrlf=false", "clone", str(origin), str(seed))
     (seed / "README.md").write_text(SEED_README, encoding="utf-8")
     (seed / ".gitignore").write_text(SEED_GITIGNORE, encoding="utf-8")
     _git(seed, "add", "README.md", ".gitignore")
@@ -152,7 +152,10 @@ class Workspace:
         self.path = self.root / self.agent_id
         self.runner = runner if runner is not None else default_runner()
         if not (self.path / ".git").exists():
-            _git(self.root, "clone", str(self.origin), str(self.path))
+            # Files exactly as written: the sandbox is Linux, and Windows git
+            # otherwise turns them into CRLF on every checkout.
+            _git(self.root, "-c", "core.autocrlf=false", "clone", str(self.origin), str(self.path))
+            _git(self.path, "config", "core.autocrlf", "false")
 
     def __repr__(self):
         return f"Workspace({self.path})"
@@ -209,9 +212,15 @@ class Workspace:
     def branch(task_id):
         return f"task/{task_id}"
 
-    def start_task(self, task_id):
+    def start_task(self, task_id, build_on=()):
         """Check out the task's branch: the existing one if work already began
-        (here or published), else a new one from the latest main."""
+        (here or published), else a new one from the latest main.
+
+        `build_on`: the agent's own other tasks whose published work isn't on
+        main yet (in review, say). Their branches are merged in, so this task
+        builds on that work instead of redoing it: Adam's T-1 and T-2 both
+        wrote build.py from scratch, and T-1 then conflicted with main. A merge
+        that conflicts is left out. Returns the branch."""
         self.git("fetch", "--quiet", "origin")
         branch = self.branch(task_id)
         if self.git("rev-parse", "--verify", "--quiet", branch, check=False):
@@ -220,6 +229,19 @@ class Workspace:
             self.git("checkout", "--quiet", "-b", branch, f"origin/{branch}")
         else:
             self.git("checkout", "--quiet", "-b", branch, "origin/main")
+        self.built_on = []
+        for other in build_on:
+            ref = f"origin/{self.branch(other)}"
+            if other == task_id or not self.git("rev-parse", "--verify", "--quiet", ref, check=False):
+                continue
+            if subprocess.run(["git", "merge-base", "--is-ancestor", ref, "HEAD"],
+                              cwd=self.path, capture_output=True).returncode == 0:
+                continue                                    # already in
+            try:
+                self.git("merge", "--quiet", "--no-edit", ref)
+                self.built_on.append(other)
+            except WorkspaceError:
+                self.git("merge", "--abort", check=False)
         return branch
 
     def changed_files(self):

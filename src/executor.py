@@ -356,6 +356,15 @@ in a Linux container with Python 3.12 and no network; use show_changes for the d
 
     def brief(self, agent, task):
         lines = self._task_lines(task)
+        others = self._own_other_tasks(agent, task)
+        if others:
+            lines.append(f"{agent.agent['name']}'s other tasks (build on their work, don't redo it; "
+                         f"any of it that is finished is already on this branch):")
+            for t in others:
+                state = t["status"].replace("_", " ")
+                if t["status"] == "review" and t.get("approved_by"):
+                    state += ", approved"
+                lines.append(f"- {t['id']} '{t['title']}' ({state})")
         before = [s["result"].summary for s in agent.work_log.get(task["id"], [])]
         if before:
             lines.append("Earlier work sessions on this task (their files are on the branch):")
@@ -462,10 +471,20 @@ in a Linux container with Python 3.12 and no network; use show_changes for the d
                 return session, "", ""
         return session, "The session ran out of turns before it was finished.", ""
 
+    @staticmethod
+    def _own_other_tasks(agent, task):
+        world = getattr(agent, "world", None)
+        if not world or "project" not in world:
+            return []
+        return [t for t in world["project"]["tasks"]
+                if t["assignee"] == agent.agent["id"] and t["id"] != task["id"]]
+
     def run(self, agent, task, workspace):
         import skills
 
-        workspace.start_task(task["id"])
+        others = self._own_other_tasks(agent, task)
+        workspace.start_task(task["id"], build_on=[t["id"] for t in others
+                                                    if t["status"] in ("review", "blocked", "done")])
         session, text, stopped = self._session(
             workspace, self.system_prompt(agent, skills.for_task(task)),
             self.brief(agent, task), TOOLS)
