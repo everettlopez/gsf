@@ -11,10 +11,9 @@ import re
 import pytest
 
 import agent as ag
-import clock
 import llm
 import project_board as pb
-from conftest import fake_generate
+from conftest import board_api_and_pages, board_api_pages_and_db, board_pages_wait_on_api, fake_generate
 from memory_retriever import MemoryRetriever
 from memory_stream import MemoryStream
 from perceive import build_observations
@@ -29,53 +28,12 @@ def _adam(w):
     return w["agents"]["adam"]
 
 
-def _board_api_pages_and_db(w):
-    """The board at 8:00 in the run."""
-    pb.get_project(w)["tasks"].clear()
-    pb.create_task(w, "adam", "Design and implement the API for the company website",
-                   area="backend", priority="high", assign_to_self=True)            # T-1
-    for title in ("Design and implement the homepage layout",                      # T-2
-                  "Design and implement the about page layout",                    # T-3
-                  "Design and implement the contact form"):                        # T-4
-        pb.create_task(w, "eve", title, area="frontend", priority="high", assign_to_self=True)
-    pb.create_task(w, "adam", "Set up database for contact form", area="backend",
-                   priority="high", assign_to_self=True)                           # T-5
-    pb.update_status(w, "adam", "T-1", "in_progress")
-    pb.update_status(w, "eve", "T-2", "in_progress")
-
-
-def _board_pages_wait_on_api(w):
-    """The board as it stood from 7:10 on: Adam's T-1 in progress, Eve's three
-    pages all waiting on it."""
-    clock.set_time("7:00 am")
-    pb.create_task(w, "adam", "Set up backend API for company website", area="backend",
-                   assign_to_self=True)
-    for title in ("Design and implement homepage layout", "Design and implement about page layout",
-                  "Implement contact form with validation"):
-        pb.create_task(w, "eve", title, area="frontend", depends_on=["T-1"], assign_to_self=True)
-    clock.set_time("7:10 am")
-    pb.update_status(w, "adam", "T-1", "in_progress")
-
-
 TASK_ID = re.compile(r"\bT-\d+\b")
 
 
 def _adam_with_backend_tasks(w):
     for title in ("Backend API", "Database schema"):
         pb.create_task(w, "adam", title, area="backend", assign_to_self=True)
-
-
-def _board_api_and_pages(w):
-    """The board at 7:20 in the run."""
-    pb.get_project(w)["tasks"].clear()
-    pb.create_task(w, "adam", "Design and implement the backend API for the company website",
-                   area="backend", priority="high", assign_to_self=True)            # T-1
-    for title in ("Design and implement the home page layout",                     # T-2
-                  "Design and implement the about page layout",                    # T-3
-                  "Design and implement the contact form"):                        # T-4
-        pb.create_task(w, "eve", title, area="frontend", priority="high", assign_to_self=True)
-    pb.update_status(w, "adam", "T-1", "in_progress")
-    pb.update_status(w, "eve", "T-2", "in_progress")
 
 
 # 8. T-5 went from todo straight to review at 9:20 while T-2 sat "in progress".
@@ -149,7 +107,7 @@ def test_empty_board_status(w):
 
 
 def test_frontend_only_board_tells_adam_backend_is_missing(w):
-    # The run from 7:00 am: Eve adds and takes four frontend tasks, Adam none.
+    # Eve adds and takes four frontend tasks, Adam none.
     for title in ("Home page", "About page", "Contact form", "Accessibility pass"):
         pb.create_task(w, "eve", title, area="frontend", assign_to_self=True)
     adam = pb.status_for_agent(w, "adam")
@@ -179,12 +137,12 @@ def test_status_shows_reviews_dependencies_and_unassigned_work(w):
 
 
 def test_the_board_shows_who_has_how_much(w):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     assert "Open tasks per person: Adam Beck 2, Eve Smith 3." in pb.status_for_agent(w, "adam")
 
 
 def test_eve_is_told_plainly_that_nothing_can_start_and_how_to_unblock(w):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     lines = pb.status_for_agent(w, "eve")
     assert "Eve Smith's T-2 waits on T-1, which is not done yet, so it can't start." in lines
     assert lines[-1] == (
@@ -194,7 +152,7 @@ def test_eve_is_told_plainly_that_nothing_can_start_and_how_to_unblock(w):
 
 
 def test_task_facts_spell_out_what_in_progress_means(w):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     assert pb.task_facts(w, ["T-2"]) == [
         "T-2 'Design and implement homepage layout' (Eve Smith's) is todo: not started. "
         "It can't start until T-1 is done.",
@@ -212,7 +170,7 @@ def test_the_task_id_line_lists_only_real_ids(w):
 
 
 def test_a_short_title_is_left_alone(w):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     assert pb.fix_task_refs(w, "work on T-2 'homepage layout'") == "work on T-2 'homepage layout'"
 
 
@@ -259,7 +217,7 @@ def test_start_step_that_is_still_valid_is_left_alone(w):
 
 
 def test_a_start_step_for_a_waiting_task_says_why_it_cant_start(w):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     out = pb.reconcile_activity(
         w, "eve", "start T-2 (move it to in progress) on the project board from 7:20 am to 7:30 am")
     assert out.startswith("check on T-2: it waits on T-1, which isn't done, so it can't start yet")
@@ -267,14 +225,14 @@ def test_a_start_step_for_a_waiting_task_says_why_it_cant_start(w):
 
 
 def test_a_teammates_start_step_is_turned_into_a_check(w):
-    _board_api_and_pages(w)
+    board_api_and_pages(w)
     step = "start T-3 (move it to in progress) on the project board from 8:00 am to 8:10 am"
     assert pb.reconcile_activity(w, "adam", step).startswith(
         "check on T-3 (Eve Smith's task: only they move it on the board)")
 
 
 def test_approving_a_task_not_in_review_becomes_a_check(w):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     step = "review and approve T-1 'Backend data structure' with Adam Beck on the project board"
     assert pb.reconcile_activity(w, "eve", step) == (
         "check on T-1 (it is in progress, not in review, so there is nothing to approve yet) "
@@ -322,7 +280,7 @@ def test_promises_without_a_task_or_about_started_tasks_add_nothing(w):
 
 
 def test_promise_guidance_respects_dependencies(w):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     steps = pb.promised_task_steps(w, w["agents"]["eve"], ["I will start with T-2 next"])
     assert steps == [
         "T-2 waits on T-1, which is not done, so T-2 can't start yet. If T-2 doesn't really "
@@ -435,7 +393,7 @@ def test_promises_reach_the_board_prompt_and_settle_when_acted_on(
 
 
 def test_agents_create_tasks_at_the_board_without_done_when(fake_llm, isolated_data, w, monkeypatch):
-    """The 7:05 board visit from the run, where every create_task was refused."""
+    """A first board visit whose tasks have no done_when are all created."""
     def gen(prompt, options=None, format=None):
         if isinstance(format, dict) and "actions" in format["properties"]:
             return json.dumps({"actions": [

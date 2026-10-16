@@ -11,39 +11,12 @@ import re
 import pytest
 
 import agent as ag
-import clock
 import llm
 import main
 import project_board as pb
-from conftest import fake_generate
+from conftest import board_api_and_pages, board_pages_wait_on_api, fake_generate
 from conversation import _board_context, claims_promised_work, run_conversation
 from plan import Planner, future_part
-
-
-def _board_pages_wait_on_api(w):
-    """The board as it stood from 7:10 on: Adam's T-1 in progress, Eve's three
-    pages all waiting on it."""
-    clock.set_time("7:00 am")
-    pb.create_task(w, "adam", "Set up backend API for company website", area="backend",
-                   assign_to_self=True)
-    for title in ("Design and implement homepage layout", "Design and implement about page layout",
-                  "Implement contact form with validation"):
-        pb.create_task(w, "eve", title, area="frontend", depends_on=["T-1"], assign_to_self=True)
-    clock.set_time("7:10 am")
-    pb.update_status(w, "adam", "T-1", "in_progress")
-
-
-def _board_api_and_pages(w):
-    """The board at 7:20 in the run."""
-    pb.get_project(w)["tasks"].clear()
-    pb.create_task(w, "adam", "Design and implement the backend API for the company website",
-                   area="backend", priority="high", assign_to_self=True)            # T-1
-    for title in ("Design and implement the home page layout",                     # T-2
-                  "Design and implement the about page layout",                    # T-3
-                  "Design and implement the contact form"):                        # T-4
-        pb.create_task(w, "eve", title, area="frontend", priority="high", assign_to_self=True)
-    pb.update_status(w, "adam", "T-1", "in_progress")
-    pb.update_status(w, "eve", "T-2", "in_progress")
 
 
 def _talk(w, monkeypatch, replies):
@@ -71,7 +44,7 @@ def _eves_tasks(w):
         pb.create_task(w, "eve", title, area="frontend", assign_to_self=True)
 
 
-RUN_LINES = [   # the 7:20 conversation in the run, in order
+RUN_LINES = [   # a talk where each line restates the one before in new words
     "Adam, I need to unblock T-3 and T-4 so I can continue working on the about page and "
     "contact form. Let me know if you need help with T-1 or if there's anything else I can assist with.",
     "I'll move T-1 to review once it's complete so you can proceed with T-3 and T-4. Let me know "
@@ -110,7 +83,7 @@ def test_conversation_sees_both_agents_tasks(fake_llm, isolated_data, w, monkeyp
 
 def test_conversations_see_the_facts_and_that_talking_moves_nothing(
         fake_llm, isolated_data, w, monkeypatch):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     prompts = []
 
     def gen(prompt, options=None, format=None):
@@ -131,7 +104,7 @@ def test_conversations_see_the_facts_and_that_talking_moves_nothing(
 
 
 def test_speakers_know_whose_tasks_are_whose(fake_llm, isolated_data, w):
-    _board_api_and_pages(w)
+    board_api_and_pages(w)
     adam, eve = ag.Agent.load("adam", w), ag.Agent.load("eve", w)
     text = " ".join(_board_context(adam, eve, w, "T-2").split())
     assert "Eve Smith's tasks: T-2, T-3, T-4." in text
@@ -192,7 +165,7 @@ def test_a_conversation_that_starts_repeating_ends(fake_llm, isolated_data, w, m
     _eves_tasks(w)                                                                   # T-2..T-4
     eve, adam = ag.Agent.load("eve", w), ag.Agent.load("adam", w)
     history = run_conversation(eve, adam, "7:20 am", "talk with Adam about T-3 and T-4", w)
-    assert [who for who, _ in history] == ["Eve Smith", "Adam Beck", "Eve Smith"]   # was 6 turns
+    assert [who for who, _ in history] == ["Eve Smith", "Adam Beck", "Eve Smith"]   # not 6 turns
 
 
 def test_a_conversation_with_new_content_runs_on(fake_llm, isolated_data, w, monkeypatch):
@@ -223,7 +196,7 @@ def test_claiming_promised_work_mid_talk_is_caught():
 
 
 def test_the_made_up_line_ends_the_talk_unremembered(fake_llm, isolated_data, w, monkeypatch):
-    # The 7:05 conversation from the run, word for word.
+    # Adam promises to outline the API, then claims two lines later to have done it.
     lines = iter([
         "Adam, let me check the time clock with you—should I add the frontend tasks to the "
         "board now, or do you want to finalize the plan first?",
@@ -291,7 +264,7 @@ def test_extract_outcomes_drops_claimed_actions(fake_llm, isolated_data, w, monk
         return fake_generate(prompt, options, format)
 
     monkeypatch.setattr(llm, "generate", gen)
-    _board_pages_wait_on_api(w)                                   # T-2 exists, so it's kept
+    board_pages_wait_on_api(w)                                   # T-2 exists, so it's kept
     adam, eve = w["agents"]["adam"], w["agents"]["eve"]
     out = Planner(adam).extract_outcomes("Adam: ...\nEve: ...", adam, eve, w)
     assert out["commitments"] == {"Eve Smith": "I will start on T-2"}
@@ -322,21 +295,21 @@ def test_commitments_lose_made_up_ids(fake_llm, isolated_data, w, monkeypatch):
     ("I will move T-1 to review and check on T-2", "I will move T-1 to review"),
     ("I will finish T-1", "I will finish T-1"),
     # Cutting just the id out left "I will ensure is properly set up" and
-    # "keep T-6 in todo until is in review" in the run log.
+    # "keep T-6 in todo until is in review".
     ("I will make sure T-2 is properly set up so we can move it to in progress, "
      "and I'll check in on T-1 later today", "I'll check in on T-1 later today"),
     ("I will start T-1 as soon as T-2 moves to review", "I will start T-1 as soon as T-2 moves to review"),
     ("I will keep T-1 in todo until T-2 is in review", "I will keep T-1 in todo until T-2 is in review"),
 ])
 def test_promises_about_a_teammates_task(w, commitment, kept):
-    _board_api_and_pages(w)
+    board_api_and_pages(w)
     adam = w["agents"]["adam"]
     assert Planner(adam).own_commitment(commitment, adam, w) == kept
 
 
-def test_the_conversation_from_the_run_leaves_adam_no_promise_about_eves_tasks(
+def test_outcomes_drop_promises_about_a_teammates_tasks(
         fake_llm, isolated_data, w, monkeypatch):
-    _board_api_and_pages(w)
+    board_api_and_pages(w)
     prompts = []
 
     def gen(prompt, options=None, format=None):

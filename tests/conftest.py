@@ -164,3 +164,48 @@ def seed_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# --- board states several test files start from -------------------------------
+def board_api_and_pages(w):
+    """Adam's API (T-1) and Eve's three pages (T-2..T-4), each started on one:
+    T-1 and T-2 in progress."""
+    project_board.get_project(w)["tasks"].clear()
+    project_board.create_task(w, "adam", "Design and implement the backend API for the company website",
+                              area="backend", priority="high", assign_to_self=True)            # T-1
+    for title in ("Design and implement the home page layout",                                # T-2
+                  "Design and implement the about page layout",                               # T-3
+                  "Design and implement the contact form"):                                   # T-4
+        project_board.create_task(w, "eve", title, area="frontend", priority="high", assign_to_self=True)
+    project_board.update_status(w, "adam", "T-1", "in_progress")
+    project_board.update_status(w, "eve", "T-2", "in_progress")
+
+
+def board_api_pages_and_db(w):
+    """As board_api_and_pages, plus a second backend task for Adam (T-5,
+    todo): Eve has three open tasks, Adam two."""
+    project_board.get_project(w)["tasks"].clear()
+    project_board.create_task(w, "adam", "Design and implement the API for the company website",
+                              area="backend", priority="high", assign_to_self=True)            # T-1
+    for title in ("Design and implement the homepage layout",                                 # T-2
+                  "Design and implement the about page layout",                               # T-3
+                  "Design and implement the contact form"):                                   # T-4
+        project_board.create_task(w, "eve", title, area="frontend", priority="high", assign_to_self=True)
+    project_board.create_task(w, "adam", "Set up database for contact form", area="backend",
+                              priority="high", assign_to_self=True)                           # T-5
+    project_board.update_status(w, "adam", "T-1", "in_progress")
+    project_board.update_status(w, "eve", "T-2", "in_progress")
+
+
+def board_pages_wait_on_api(w):
+    """Adam's T-1 in progress since 7:10 am, and Eve's three pages (T-2..T-4)
+    all waiting on it, so she can start nothing."""
+    clock.set_time("7:00 am")
+    project_board.create_task(w, "adam", "Set up backend API for company website", area="backend",
+                              assign_to_self=True)
+    for title in ("Design and implement homepage layout", "Design and implement about page layout",
+                  "Implement contact form with validation"):
+        project_board.create_task(w, "eve", title, area="frontend", depends_on=["T-1"],
+                                  assign_to_self=True)
+    clock.set_time("7:10 am")
+    project_board.update_status(w, "adam", "T-1", "in_progress")

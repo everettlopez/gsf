@@ -11,26 +11,11 @@ import pytest
 import llm
 import project_board as pb
 import world as world_module
-from conftest import fake_generate
+from conftest import board_api_pages_and_db, fake_generate
 from memory_stream import MemoryStream
 from perceive import build_observations
 from plan import Planner
 from world import action_to_present, generate_interactions, mentions_board, refresh_room_states
-
-
-def _board_api_pages_and_db(w):
-    """The board at 8:00 in the run."""
-    pb.get_project(w)["tasks"].clear()
-    pb.create_task(w, "adam", "Design and implement the API for the company website",
-                   area="backend", priority="high", assign_to_self=True)            # T-1
-    for title in ("Design and implement the homepage layout",                      # T-2
-                  "Design and implement the about page layout",                    # T-3
-                  "Design and implement the contact form"):                        # T-4
-        pb.create_task(w, "eve", title, area="frontend", priority="high", assign_to_self=True)
-    pb.create_task(w, "adam", "Set up database for contact form", area="backend",
-                   priority="high", assign_to_self=True)                           # T-5
-    pb.update_status(w, "adam", "T-1", "in_progress")
-    pb.update_status(w, "eve", "T-2", "in_progress")
 
 
 def _adam(w):
@@ -86,7 +71,7 @@ def test_a_shown_action_keeps_text_after_a_colon(w):
 
 
 def test_the_shown_action_follows_the_reconciled_board_step(fake_llm, isolated_data, w):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     eve = w["agents"]["eve"]
     chunk = {"activity": "start T-2 (move it to in progress) on the project board from 8:00 am to 8:10 am",
              "location": "conference room", "start_time": "8:00 am", "duration": 10,

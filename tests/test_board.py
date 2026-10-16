@@ -9,39 +9,12 @@ import pytest
 
 import clock
 import project_board as pb
+from conftest import board_api_and_pages, board_api_pages_and_db, board_pages_wait_on_api
 
 
 TASK_FIELDS = {"id", "title", "description", "area", "priority", "status", "assignee",
                "created_by", "depends_on", "done_when", "approved_by", "created_at",
                "updated_at", "history"}
-
-
-def _board_api_and_pages(w):
-    """The board at 7:20 in the run."""
-    pb.get_project(w)["tasks"].clear()
-    pb.create_task(w, "adam", "Design and implement the backend API for the company website",
-                   area="backend", priority="high", assign_to_self=True)            # T-1
-    for title in ("Design and implement the home page layout",                     # T-2
-                  "Design and implement the about page layout",                    # T-3
-                  "Design and implement the contact form"):                        # T-4
-        pb.create_task(w, "eve", title, area="frontend", priority="high", assign_to_self=True)
-    pb.update_status(w, "adam", "T-1", "in_progress")
-    pb.update_status(w, "eve", "T-2", "in_progress")
-
-
-def _board_api_pages_and_db(w):
-    """The board at 8:00 in the run."""
-    pb.get_project(w)["tasks"].clear()
-    pb.create_task(w, "adam", "Design and implement the API for the company website",
-                   area="backend", priority="high", assign_to_self=True)            # T-1
-    for title in ("Design and implement the homepage layout",                      # T-2
-                  "Design and implement the about page layout",                    # T-3
-                  "Design and implement the contact form"):                        # T-4
-        pb.create_task(w, "eve", title, area="frontend", priority="high", assign_to_self=True)
-    pb.create_task(w, "adam", "Set up database for contact form", area="backend",
-                   priority="high", assign_to_self=True)                           # T-5
-    pb.update_status(w, "adam", "T-1", "in_progress")
-    pb.update_status(w, "eve", "T-2", "in_progress")
 
 
 def finish(w, task_id, owner="adam", reviewer="eve", note=""):
@@ -63,19 +36,6 @@ def _eves_tasks(w):
     for title in ("Design and implement homepage layout", "Design and implement about page layout",
                   "Design and implement contact form"):
         pb.create_task(w, "eve", title, area="frontend", assign_to_self=True)
-
-
-def _board_pages_wait_on_api(w):
-    """The board as it stood from 7:10 on: Adam's T-1 in progress, Eve's three
-    pages all waiting on it."""
-    clock.set_time("7:00 am")
-    pb.create_task(w, "adam", "Set up backend API for company website", area="backend",
-                   assign_to_self=True)
-    for title in ("Design and implement homepage layout", "Design and implement about page layout",
-                  "Implement contact form with validation"):
-        pb.create_task(w, "eve", title, area="frontend", depends_on=["T-1"], assign_to_self=True)
-    clock.set_time("7:10 am")
-    pb.update_status(w, "adam", "T-1", "in_progress")
 
 
 def _eve(w):
@@ -119,7 +79,6 @@ def test_create_task_is_fully_structured_and_numbered(w):
     assert pb.get_project(w)["status"] == "in_progress"
 
 
-
 def test_duplicate_titles_are_refused(w):
     pb.create_task(w, "adam", "Set up the API")
     with pytest.raises(pb.BoardError, match="already on the board"):
@@ -139,7 +98,7 @@ def test_task_titles_lose_a_copied_task_id(w):
 
 def test_a_new_task_does_not_need_done_when(w):
     """done_when is optional: requiring it stopped every task from being created
-    (18:48 run: "couldn't create_task: needs done_when" at every board visit)."""
+    ("couldn't create_task: needs done_when" at every board visit)."""
     done, refused = pb.apply_actions(w, w["agents"]["adam"], [
         {"action": "create_task", "title": "Auth endpoints", "area": "backend",
          "assign_to_self": True}])
@@ -272,7 +231,7 @@ def test_assign_and_edit_actions(w):
 
 
 def test_a_task_in_another_area_is_left_for_its_owner(w):
-    _board_api_and_pages(w)
+    board_api_and_pages(w)
     adam = w["agents"]["adam"]
     line = pb.apply_action(w, adam, {"action": "create_task", "title": "Footer", "area": "frontend",
                                      "assign_to_self": True})
@@ -285,7 +244,7 @@ def test_a_task_in_another_area_is_left_for_its_owner(w):
 
 
 def test_work_is_handed_only_to_its_areas_owner(w):
-    _board_api_and_pages(w)
+    board_api_and_pages(w)
     pb.create_task(w, "adam", "Deploy the API", area="backend")                   # T-5
     adam = w["agents"]["adam"]
     with pytest.raises(pb.BoardError, match="backend work isn't Eve Smith's area"):
@@ -296,14 +255,14 @@ def test_work_is_handed_only_to_its_areas_owner(w):
 
 
 def test_general_work_is_anyones(w):
-    _board_api_and_pages(w)
+    board_api_and_pages(w)
     line = pb.apply_action(w, w["agents"]["adam"], {"action": "create_task", "title": "Write the README",
                                                     "area": "general", "assign_to_self": True})
     assert "took it on" in line
 
 
 def test_a_fourth_task_is_left_unassigned(w):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     eve = w["agents"]["eve"]                                  # T-2, T-3, T-4
     line = pb.apply_action(w, eve, {"action": "create_task", "title": "Footer", "area": "frontend",
                                     "assign_to_self": True})
@@ -417,7 +376,7 @@ def test_waiting_is_expressed_with_a_dependency(w):
 
 
 def test_dropping_an_unneeded_dependency_unblocks_the_task(w):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     eve = w["agents"]["eve"]
     done, refused = pb.apply_actions(w, eve, [
         {"action": "edit_task", "task_id": "T-2", "depends_on": []},
@@ -433,7 +392,7 @@ def test_dropping_an_unneeded_dependency_unblocks_the_task(w):
     ("Check on T-2 progress", ""),                  # not starting anything
 ])
 def test_a_reaction_cannot_start_a_second_task(w, reaction, why):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     assert pb.start_conflict(w, "adam", reaction).startswith(why) if why \
         else pb.start_conflict(w, "adam", reaction) == ""
 
@@ -599,7 +558,7 @@ def test_note_without_a_task_goes_on_the_board(w):
     ("The homepage needs the API's /pages endpoint before it can show real content", True),
 ])
 def test_notes_that_only_narrate_are_refused(w, note, ok):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     action = {"action": "add_note", "task_id": "T-2", "note": note}
     if ok:
         pb.apply_action(w, w["agents"]["eve"], action)
@@ -615,7 +574,7 @@ def test_notes_that_only_narrate_are_refused(w, note, ok):
     "T-1 is in review now",
 ])
 def test_notes_that_misstate_the_board_are_refused(w, note):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     done, refused = pb.apply_actions(w, w["agents"]["adam"], [
         {"action": "add_note", "task_id": "T-2", "note": note}])
     assert done == []
@@ -629,14 +588,14 @@ def test_notes_that_misstate_the_board_are_refused(w, note):
     "T-2 needs the /contact endpoint from T-1",
 ])
 def test_ordinary_notes_still_go_through(w, note):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     done, refused = pb.apply_actions(w, w["agents"]["adam"], [
         {"action": "add_note", "task_id": "T-2", "note": note}])
     assert refused == [] and len(done) == 1
 
 
 def test_a_true_claim_is_fine(w):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     clock.set_time("10:00 am")
     pb.update_status(w, "adam", "T-1", "review", note="check the endpoints")
     pb.approve_task(w, "eve", "T-1")
@@ -687,14 +646,14 @@ def test_malformed_actions_are_refused_not_raised(w):
 
 
 def test_three_approvals_of_tasks_not_in_review_are_one_refusal(w):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     done, refused = pb.apply_actions(w, w["agents"]["adam"], [
         {"action": "approve_task", "task_id": t} for t in ("T-2", "T-3", "T-4")])
     assert refused == ["approve_task: T-2 is not in review (same for T-3, T-4)"]
 
 
 def test_different_mistakes_stay_separate(w):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     _, refused = pb.apply_actions(w, w["agents"]["eve"], [
         {"action": "approve_task", "task_id": "T-2"},
         {"action": "update_status", "task_id": "T-3", "status": "in_progress"}])
@@ -747,7 +706,6 @@ def test_open_tasks_for_skips_done_and_other_peoples_tasks(w):
 ])
 def test_board_promises_need_a_board_action(promise, board):
     assert pb.is_board_commitment(promise) is board
-
 
 
 def test_promises_are_dropped_after_visits_without_acting(w):

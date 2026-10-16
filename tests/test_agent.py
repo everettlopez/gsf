@@ -12,7 +12,7 @@ import llm
 import main
 import project_board as pb
 import world as world_module
-from conftest import fake_generate
+from conftest import board_api_and_pages, board_api_pages_and_db, fake_generate
 
 
 def short_hours(prompt, options=None, format=None):
@@ -21,7 +21,7 @@ def short_hours(prompt, options=None, format=None):
     return fake_generate(prompt, options, format)
 
 
-EVE_INITIAL = [   # Eve's initial plan in the run
+EVE_INITIAL = [   # a model-written day: clock-in with no end, long board blocks
     "clock in and start work at 7:00 am",
     "attend the daily stand-up with the whole team from 8:00 am to 8:15 am",
     "check the project board in the conference room from 8:15 am to 9:00 am",
@@ -33,34 +33,6 @@ EVE_INITIAL = [   # Eve's initial plan in the run
 
 def _plan(p, lines, agent, w):
     return p.create_chunks(lines, agent, w)
-
-
-def _board_api_pages_and_db(w):
-    """The board at 8:00 in the run."""
-    pb.get_project(w)["tasks"].clear()
-    pb.create_task(w, "adam", "Design and implement the API for the company website",
-                   area="backend", priority="high", assign_to_self=True)            # T-1
-    for title in ("Design and implement the homepage layout",                      # T-2
-                  "Design and implement the about page layout",                    # T-3
-                  "Design and implement the contact form"):                        # T-4
-        pb.create_task(w, "eve", title, area="frontend", priority="high", assign_to_self=True)
-    pb.create_task(w, "adam", "Set up database for contact form", area="backend",
-                   priority="high", assign_to_self=True)                           # T-5
-    pb.update_status(w, "adam", "T-1", "in_progress")
-    pb.update_status(w, "eve", "T-2", "in_progress")
-
-
-def _board_api_and_pages(w):
-    """The board at 7:20 in the run."""
-    pb.get_project(w)["tasks"].clear()
-    pb.create_task(w, "adam", "Design and implement the backend API for the company website",
-                   area="backend", priority="high", assign_to_self=True)            # T-1
-    for title in ("Design and implement the home page layout",                     # T-2
-                  "Design and implement the about page layout",                    # T-3
-                  "Design and implement the contact form"):                        # T-4
-        pb.create_task(w, "eve", title, area="frontend", priority="high", assign_to_self=True)
-    pb.update_status(w, "adam", "T-1", "in_progress")
-    pb.update_status(w, "eve", "T-2", "in_progress")
 
 
 def _at_board(w, rt):
@@ -94,7 +66,7 @@ def _replan_eve(w, monkeypatch, prompts=None):
     return rt
 
 
-# Eve's replan in the run: no stand-up, no 10:15 work with Adam.
+# A replan that dropped both plans with Adam (the stand-up and the 10:15 block).
 EVE_REPLAN = ("1. work on the website's homepage layout from 7:25 am to 10:00 am\n"
               "2. work on styling and accessibility improvements for the about page from 10:00 am to 1:00 pm\n"
               "3. take a lunch break in the break room from 1:00 pm to 2:00 pm\n"
@@ -251,7 +223,7 @@ def test_short_chunks_are_not_sent_for_minute_decomposition(fake_llm, isolated_d
 
 
 def test_decomposition_knows_the_task_and_drops_board_steps(fake_llm, isolated_data, w, monkeypatch):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     prompts = []
 
     def gen(prompt, options=None, format=None):
@@ -277,7 +249,7 @@ def test_decomposition_knows_the_task_and_drops_board_steps(fake_llm, isolated_d
 
 
 def test_finer_steps_are_held_to_the_same_rule(fake_llm, isolated_data, w, monkeypatch):
-    _board_api_and_pages(w)
+    board_api_and_pages(w)
 
     def gen(prompt, options=None, format=None):
         if "Break it into actions" in prompt:
@@ -429,8 +401,8 @@ def test_no_replan_for_a_reaction_that_is_the_plan(fake_llm, isolated_data, w, m
     assert rt.decision == "1" and replans == []
 
 
-def test_the_start_reaction_from_the_run_is_ignored(fake_llm, isolated_data, w, monkeypatch):
-    _board_api_pages_and_db(w)
+def test_a_reaction_that_starts_a_second_task_is_ignored(fake_llm, isolated_data, w, monkeypatch):
+    board_api_pages_and_db(w)
 
     def gen(prompt, options=None, format=None):
         if "DECISION" in prompt:
@@ -470,7 +442,7 @@ def test_no_conversation_about_the_time_clock(fake_llm, isolated_data, w, monkey
 
 
 def test_a_reaction_about_a_teammates_task_goes_to_them(fake_llm, isolated_data, w, monkeypatch):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
 
     def gen(prompt, options=None, format=None):
         if "DECISION" in prompt:
@@ -496,7 +468,7 @@ def test_a_reaction_about_a_teammates_task_goes_to_them(fake_llm, isolated_data,
     "keep working on T-1",                             # own task
 ])
 def test_other_reactions_are_left_alone(w, reaction):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
 
     class RT:
         agent = w["agents"]["adam"]
@@ -507,7 +479,7 @@ def test_other_reactions_are_left_alone(w, reaction):
 def test_planned_collaboration_with_a_teammate_here_starts_a_conversation(
         fake_llm, isolated_data, w, monkeypatch):
     adam, _ = _runtimes(w)
-    adam.last_react_step = 50                       # mid-cooldown, as at 11:25 in the log
+    adam.last_react_step = 50                       # mid-cooldown
     monkeypatch.setattr(ag, "get_chunk_lazy", lambda rt, t, world=None: _office_chunk(
         "11:00 am: discuss integration requirements with Eve", target_agent="eve"))
 
@@ -586,7 +558,7 @@ def test_after_talking_a_planned_collaboration_step_happens_in_your_own_office(
 
 
 def test_after_the_planned_talk_the_agent_goes_back_to_their_task(fake_llm, isolated_data, w, monkeypatch):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     eve, adam = ag.Agent.load("eve", w), ag.Agent.load("adam", w)
     main.remember_conversation(eve, adam, "8:05 am", "the stand-up")
     monkeypatch.setattr(ag, "get_chunk_lazy", lambda rt, t, world=None: {
@@ -674,7 +646,7 @@ def test_apply_chunk_skips_the_location_llm_for_solo_work(fake_llm, isolated_dat
 
 
 def test_the_second_step_of_a_board_visit_shows_what_happened(fake_llm, isolated_data, w):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     rt = ag.Agent.load("eve", w)
     rt.chunk = rt.last_chunk = {
         "activity": "start T-2 (move it to in progress) on the project board from 7:25 am to 7:35 am",

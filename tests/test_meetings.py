@@ -1,11 +1,9 @@
 """
-Meetings two agents agree on in conversation go into both their days.
-
-In the run behind this, each agent wrote its own "collaborate with ..." blocks:
-Adam planned 11:15-12:00 with Eve (her lunch was 11:00-12:00), Eve planned
-3:30-4:30 with Adam (not in his plan), the 8:00 stand-up was dropped, and they
-were alone in their offices from 7:35 to 9:30. In the paper, agents agree on a
-time and place in conversation (Isabella's party) and both plan around it.
+Meetings two agents agree on in conversation (paper: Isabella's party, where
+agents agree on a time and place and both plan around it). When the meeting
+starts, both plans get the same pinned block; replans keep it; the two talk
+when both are there, even inside the conversation cooldown, and only once;
+afterwards each goes back to their own work.
 """
 
 import json
@@ -87,7 +85,7 @@ def test_extraction_asks_for_later_meetings_and_keeps_the_time(fake_llm, isolate
 
 
 @pytest.mark.parametrize("activity,said,start", [
-    ("check-in at 8:00 am", "now", "8:00 am"),     # the run: agreed at 7:45, put at 7:50
+    ("check-in at 8:00 am", "now", "8:00 am"),     # not 7:50, right after a 7:45 talk
     ("check-in at 7:00 am", "now", None),          # already past: right afterwards
     ("check-in", "now", None),
     ("check-in", "9:30 am", "9:30 am"),

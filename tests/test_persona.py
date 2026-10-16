@@ -1,7 +1,8 @@
 """
 Personas live in data/agents/<id>/persona.json. Their work and communication
 styles have to reach the prompts that decide what an agent does (react or not,
-what to do at the board, what to say), not only the planning profile.
+what to do at the board, what to say), not only the planning profile. The
+profile and the seeded memories both say a task belongs to its assignee.
 """
 
 import pytest

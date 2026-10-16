@@ -10,10 +10,9 @@ import re
 import pytest
 
 import agent as ag
-import clock
 import llm
 import project_board as pb
-from conftest import fake_generate
+from conftest import board_api_and_pages, board_api_pages_and_db, board_pages_wait_on_api, fake_generate
 from memory_stream import MemoryStream
 from plan import Planner
 
@@ -29,26 +28,11 @@ def adam(world):
     return world["agents"]["adam"]
 
 
-def _board_api_pages_and_db(w):
-    """The board at 8:00 in the run."""
-    pb.get_project(w)["tasks"].clear()
-    pb.create_task(w, "adam", "Design and implement the API for the company website",
-                   area="backend", priority="high", assign_to_self=True)            # T-1
-    for title in ("Design and implement the homepage layout",                      # T-2
-                  "Design and implement the about page layout",                    # T-3
-                  "Design and implement the contact form"):                        # T-4
-        pb.create_task(w, "eve", title, area="frontend", priority="high", assign_to_self=True)
-    pb.create_task(w, "adam", "Set up database for contact form", area="backend",
-                   priority="high", assign_to_self=True)                           # T-5
-    pb.update_status(w, "adam", "T-1", "in_progress")
-    pb.update_status(w, "eve", "T-2", "in_progress")
-
-
 def _plan(p, lines, agent, w):
     return p.create_chunks(lines, agent, w)
 
 
-EVE_INITIAL = [   # Eve's initial plan in the run
+EVE_INITIAL = [   # a model-written day: clock-in with no end, long board blocks
     "clock in and start work at 7:00 am",
     "attend the daily stand-up with the whole team from 8:00 am to 8:15 am",
     "check the project board in the conference room from 8:15 am to 9:00 am",
@@ -58,7 +42,7 @@ EVE_INITIAL = [   # Eve's initial plan in the run
 ]
 
 
-ADAM_INITIAL = [   # from the 18:37 run
+ADAM_INITIAL = [   # the first board check written as two blocks
     "clock in at reception from 7:00 am to 7:05 am",
     "check the project board in the conference room from 7:05 am to 7:20 am",
     "review any new backend tasks that need to be added to the project board from 7:20 am to 7:35 am",
@@ -66,20 +50,7 @@ ADAM_INITIAL = [   # from the 18:37 run
 ]
 
 
-def _board_pages_wait_on_api(w):
-    """The board as it stood from 7:10 on: Adam's T-1 in progress, Eve's three
-    pages all waiting on it."""
-    clock.set_time("7:00 am")
-    pb.create_task(w, "adam", "Set up backend API for company website", area="backend",
-                   assign_to_self=True)
-    for title in ("Design and implement homepage layout", "Design and implement about page layout",
-                  "Implement contact form with validation"):
-        pb.create_task(w, "eve", title, area="frontend", depends_on=["T-1"], assign_to_self=True)
-    clock.set_time("7:10 am")
-    pb.update_status(w, "adam", "T-1", "in_progress")
-
-
-EVE_910 = [   # Eve's 9:10 am replan in run.log, before checkpoints
+EVE_910 = [   # a replan with a board visit around every block, before checkpoints
     "update the project board in the conference room from 9:10 am to 9:20 am",
     "work on T-2 'Design and implement homepage layout' from 9:20 am to 9:30 am",
     "update the project board in the conference room from 9:30 am to 9:40 am",
@@ -106,19 +77,6 @@ EVE_910 = [   # Eve's 9:10 am replan in run.log, before checkpoints
 def _work_block(activity, start, minutes, **extra):
     return {"activity": activity, "location": "office_1", "start_time": start,
             "duration": minutes, "target_agent": None, "board_work": False, **extra}
-
-
-def _board_api_and_pages(w):
-    """The board at 7:20 in the run."""
-    pb.get_project(w)["tasks"].clear()
-    pb.create_task(w, "adam", "Design and implement the backend API for the company website",
-                   area="backend", priority="high", assign_to_self=True)            # T-1
-    for title in ("Design and implement the home page layout",                     # T-2
-                  "Design and implement the about page layout",                    # T-3
-                  "Design and implement the contact form"):                        # T-4
-        pb.create_task(w, "eve", title, area="frontend", priority="high", assign_to_self=True)
-    pb.update_status(w, "adam", "T-1", "in_progress")
-    pb.update_status(w, "eve", "T-2", "in_progress")
 
 
 def _adam(w):
@@ -265,7 +223,7 @@ def test_agent_summary_is_cached_and_invalidated(planner, adam, monkeypatch):
 
 
 def test_breaks_and_board_visits_get_no_task_focus(fake_llm, isolated_data, w):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     p = Planner(w["agents"]["eve"])
     focus = p.work_focus(w["agents"]["eve"], w)
     assert p._focus_text({"activity": "take a lunch break in the break room"}, focus) == ""
@@ -328,8 +286,8 @@ def test_a_dropped_visit_does_not_stretch_clock_out(w):
     assert clock_out["duration"] == 5
 
 
-def test_eves_replan_keeps_the_useful_board_visits_only(w):
-    _board_pages_wait_on_api(w)
+def test_thinning_keeps_only_board_visits_with_a_purpose(w):
+    board_pages_wait_on_api(w)
     eve = w["agents"]["eve"]
     p = Planner(eve)
     chunks = p.thin_board_visits(_plan(p, EVE_910, eve, w))
@@ -365,7 +323,7 @@ def test_dropped_visit_time_goes_to_the_work_before_it_not_to_a_break(w):
 
 
 def test_the_same_step_for_the_same_task_twice_in_a_row_is_dropped(w):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     eve = w["agents"]["eve"]
     p = Planner(eve)
     chunks = p.thin_board_visits(_plan(p, [
@@ -492,21 +450,21 @@ def test_a_teammate_block_the_replan_kept_is_not_doubled(fake_llm, isolated_data
      "from 10:00 am to 11:00 am"),
 ])
 def test_plans_only_work_on_own_tasks(w, block, expected):
-    _board_api_and_pages(w)
+    board_api_and_pages(w)
     adam = w["agents"]["adam"]
     assert Planner(adam).own_tasks_only(block, adam, w) == expected
 
 
 def test_the_owner_plans_her_own_task_as_usual(w):
-    _board_api_and_pages(w)
+    board_api_and_pages(w)
     eve = w["agents"]["eve"]
     block = "work on T-2 'Design and implement the home page layout' from 8:10 am to 9:30 am"
     assert Planner(eve).own_tasks_only(block, eve, w) == block
 
 
-def test_adams_replan_from_the_run(w):
+def test_a_replan_loses_blocks_on_a_teammates_task(w):
     """The 7:25 replan from the log, through create_chunks: no T-2 left in it."""
-    _board_api_and_pages(w)
+    board_api_and_pages(w)
     adam = w["agents"]["adam"]
     chunks = Planner(adam).create_chunks([
         "review and update any pending backend tasks from 7:25 am to 8:00 am",
@@ -527,7 +485,7 @@ def test_adams_replan_from_the_run(w):
      "work on T-1 'Set up backend API' from 7:30 am to 8:50 am"),
 ])
 def test_made_up_task_ids_are_removed_from_plans(w, activity, expected):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     assert Planner.drop_unknown_task_ids(activity, w) == expected
     chunk = Planner(w["agents"]["adam"]).create_chunks([activity], w["agents"]["adam"], w)[0]
     assert chunk["activity"] == expected
@@ -536,7 +494,7 @@ def test_made_up_task_ids_are_removed_from_plans(w, activity, expected):
 def test_a_wrong_title_in_a_plan_drops_the_id(w):
     """The id is what's wrong, not the title: putting T-1's title there would
     point the agent at different work than the plan described."""
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     eve = w["agents"]["eve"]
     chunk = Planner(eve).create_chunks(
         ["review and approve T-1 'Backend data structure' with Adam Beck from 11:30 am to 11:45 am"],
@@ -651,7 +609,7 @@ def test_replan_guidance_reflects_the_board_even_without_own_tasks(fake_llm, iso
 
 
 def test_planning_guidance_names_the_real_tasks(w):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     guidance = " ".join(Planner(w["agents"]["adam"]).task_guidance(w["agents"]["adam"], w).split())
     assert "The only tasks on the board are T-1, T-2, T-3, T-4;" in guidance
     assert "Don't plan work on a task that can't start yet because it waits on another" in guidance
@@ -663,15 +621,15 @@ def test_planning_guidance_with_an_empty_board_names_no_ids(w):
     assert "T-3" not in guidance                       # the old example made one up
 
 
-def test_eves_example_work_block_is_a_task_she_can_start(w):
-    _board_pages_wait_on_api(w)
+def test_the_plan_example_is_a_task_the_agent_can_start(w):
+    board_pages_wait_on_api(w)
     pb.create_task(w, "eve", "Navigation bar", area="frontend", assign_to_self=True)
     guidance = Planner(w["agents"]["eve"]).task_guidance(w["agents"]["eve"], w)
     assert "work on T-5 'Navigation bar'" in guidance  # not T-2, which waits on T-1
 
 
 def test_the_planning_prompt_says_whose_tasks_are_whose(fake_llm, isolated_data, w):
-    _board_api_and_pages(w)
+    board_api_and_pages(w)
     adam = w["agents"]["adam"]
     guidance = " ".join(Planner(adam).task_guidance(adam, w).split())
     assert "Adam Beck's own tasks: T-1." in guidance
@@ -686,7 +644,7 @@ def test_the_plan_example_is_in_the_agents_own_area(fake_llm, isolated_data, w):
 
 
 def test_the_react_prompt_has_the_facts_about_the_tasks_in_play(fake_llm, isolated_data, w, monkeypatch):
-    _board_pages_wait_on_api(w)
+    board_pages_wait_on_api(w)
     prompts = []
 
     def gen(prompt, options=None, format=None):
@@ -705,7 +663,7 @@ def test_the_react_prompt_has_the_facts_about_the_tasks_in_play(fake_llm, isolat
 
 
 def test_the_react_rules_say_what_waits_for_the_task_in_progress(fake_llm, isolated_data, w):
-    _board_api_pages_and_db(w)
+    board_api_pages_and_db(w)
     adam = w["agents"]["adam"]
     rules = " ".join(Planner(adam)._board_rules(adam, w).split())
     assert "T-1 is in progress, so Adam Beck's other tasks wait until it goes to review" in rules
