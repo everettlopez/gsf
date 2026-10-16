@@ -116,14 +116,15 @@ def _git(cwd, *args, check=True):
     return done.stdout.strip()
 
 
-def ensure_origin(root=WORKSPACES):
+def ensure_origin(root=None):
     """The sandbox repository: a bare repo with a main branch to start from."""
-    origin = Path(root) / "origin.git"
+    root = Path(root or WORKSPACES)
+    origin = root / "origin.git"
     if (origin / "HEAD").exists():
         return origin
     origin.mkdir(parents=True, exist_ok=True)
     _git(origin, "init", "--bare", "--initial-branch=main")
-    seed = Path(root) / ".seed"
+    seed = root / ".seed"
     shutil.rmtree(seed, ignore_errors=True)
     _git(root, "clone", str(origin), str(seed))
     (seed / "README.md").write_text(SEED_README, encoding="utf-8")
@@ -138,10 +139,10 @@ def ensure_origin(root=WORKSPACES):
 class Workspace:
     """One agent's checkout of the sandbox repository."""
 
-    def __init__(self, agent, root=WORKSPACES, runner=None):
+    def __init__(self, agent, root=None, runner=None):
         self.agent_id = agent["id"]
         self.author = (agent["name"], f"{agent['id']}@gsf.local")
-        self.root = Path(root)
+        self.root = Path(root or WORKSPACES)
         self.origin = ensure_origin(self.root)
         self.path = self.root / self.agent_id
         self.runner = runner if runner is not None else default_runner()

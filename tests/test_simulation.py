@@ -10,6 +10,7 @@ import agent as ag
 import llm
 import log
 import main
+import project_board as pb
 import world as world_module
 from conftest import fake_generate, seed_module
 from memory_stream import MemoryStream
@@ -174,3 +175,35 @@ def test_reset_clears_board_notes_and_puts_everyone_back_at_reception(isolated_d
     after = world_module.load_world()
     assert after["project"]["notes"] == [] and after["project"]["tasks"] == []
     assert {a["current_location"] for a in after["agents"].values()} == {"reception"}
+
+
+# --- the hands in the loop -------------------------------------------------------
+def test_with_fake_hands_work_steps_reach_the_executor_and_come_back_as_memories(
+        fake_llm, isolated_data, monkeypatch, capsys):
+    """GA_EXECUTOR=fake: a dry run of the whole flow. Each agent starts with a
+    task of their own in progress, so their work blocks go to the executor."""
+    import executor
+    import world as world_module
+
+    data = world_module.load_world()
+    for agent_id, title in (("adam", "Contact endpoint"), ("eve", "Home page")):
+        task = pb.create_task(data, agent_id, title, area=data["agents"][agent_id]["area"],
+                              assign_to_self=True)
+        pb.update_status(data, agent_id, task["id"], "in_progress")
+    world_module.save_world(data)
+
+    fakes = {}
+
+    def fake_hands(agent):
+        fakes[agent["id"]] = executor.FakeExecutor(
+            [executor.ExecResult("Wrote a first version.", ["index.html"])])
+        return fakes[agent["id"]], None
+
+    monkeypatch.setattr(main, "hands_for", fake_hands)
+    _run(monkeypatch, capsys, steps=12, threshold=None)
+
+    worked = {agent_id: [t for _, t, _ in fake.calls] for agent_id, fake in fakes.items()}
+    assert worked["adam"] and set(worked["adam"]) == {"T-1"}      # only their own task
+    assert worked["eve"] and set(worked["eve"]) == {"T-2"}
+    memories = [m.description for m in MemoryStream("eve").memories]
+    assert any(m.startswith("Eve Smith worked on T-2 'Home page'") for m in memories)

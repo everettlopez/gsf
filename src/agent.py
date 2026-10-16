@@ -153,6 +153,7 @@ class Agent:
     executor: Optional[object] = None
     workspace: Optional[object] = None
     work_log: dict = field(default_factory=dict)       # task id -> work sessions on it
+    shipped: set = field(default_factory=set)          # task ids merged into main
 
     # Per-step scratch space (filled in by the phases below)
     observations: list = field(default_factory=list)
@@ -286,11 +287,13 @@ class Agent:
     # -- PHASE 3: ACT (and REACT) --------------------------------------------
     def act(self, step, current_time, world):
         """Carry out the step (or the reaction), then, if the step is work on a
-        task of the agent's own, let the hands do that work (see work_on_task)."""
+        task of the agent's own, let the hands do that work (see work_on_task),
+        and merge any of their tasks the board now shows as done."""
         if self.decision == "3":
             return
         self._carry_out(step, current_time, world)
         work_on_task(self, current_time, world)
+        ship_approved_work(self, world)
 
     def _carry_out(self, step, current_time, world):
 
@@ -1206,3 +1209,27 @@ def head_to_board(rt, commitment, current_time, world, minutes=10):
     else:
         rt.override = visit
     log.event(f"{rt.tag} heads to the board to: {commitment}")
+
+
+def ship_approved_work(rt, world):
+    """A task of the agent's own that is done on the board (a teammate
+    approved it in review, then its owner moved it to done) has its branch
+    merged into the sandbox's main, so every task started after it builds on
+    it. A merge that fails is remembered, not retried."""
+    if rt.workspace is None or not hasattr(rt.workspace, "integrate") or "project" not in world:
+        return
+    from workspace import WorkspaceError
+
+    name = rt.agent["name"]
+    for task in project_board.get_project(world)["tasks"]:
+        if (task["assignee"] != rt.agent["id"] or task["status"] != "done"
+                or task["id"] not in rt.work_log or task["id"] in rt.shipped):
+            continue
+        rt.shipped.add(task["id"])
+        try:
+            rt.workspace.integrate(task["id"])
+            line = f"{name} merged {task['id']} '{task['title']}' into the website's main branch."
+        except WorkspaceError as e:
+            line = f"{name} couldn't merge {task['id']} into the website's main branch: {e}"
+        rt.stream.add_observations([line])
+        log.event(f"🚢 {line}")

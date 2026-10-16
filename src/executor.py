@@ -276,3 +276,23 @@ finished, and end the session with report."""
         if result.finished:
             workspace.publish(task["id"])
         return result
+
+
+def hands_for(agent):
+    """The executor and workspace for one agent, from GA_EXECUTOR:
+
+        none   (default) no hands: the agents plan, talk and keep the board, as in the paper
+        fake   FakeExecutor, no workspace: a dry run of the whole flow, no model, no files
+        local  LocalExecutor in workspaces/<agent>/ (commands in Docker, see workspace.py)
+    """
+    import os
+
+    choice = os.environ.get("GA_EXECUTOR", "none")
+    if choice == "none":
+        return None, None
+    if choice == "fake":
+        return FakeExecutor(), None
+    if choice == "local":
+        from workspace import Workspace
+        return LocalExecutor(), Workspace(agent)
+    raise ValueError(f"unknown GA_EXECUTOR {choice!r} (none, fake or local)")

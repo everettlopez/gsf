@@ -76,6 +76,25 @@ write and test code for a board task) run on a hosted model with tools, Claude O
 by default. The executor reads `GA_EXECUTOR_MODEL`, `GA_EXECUTOR_EFFORT` (default `high`)
 and the usual Anthropic credentials (`ANTHROPIC_API_KEY` or an `ant auth login` profile).
 
+The hands are off by default (`GA_EXECUTOR=none`: the agents plan, talk and keep the board,
+as in the paper). `GA_EXECUTOR=fake` dry-runs the whole flow with scripted results;
+`GA_EXECUTOR=local` does real work:
+
+```bash
+GA_EXECUTOR=local python src/main.py    # commands run in Docker (GA_SANDBOX=docker)
+```
+
+When an agent's step is work on a task it owns and has in progress, at its own desk, its
+executor works on that task once per plan block, in `workspaces/<agent>/` (a git checkout
+of the local sandbox repo `workspaces/origin.git`, branch `task/T-n`). The clock waits.
+What happened comes back as memories ("Eve Smith worked on T-2 ...", "The tests for T-2
+pass."). Finished work becomes a promise to move the task to review at the next board
+visit; a blocked task sends the agent to the board to mark it blocked, with the reason.
+Review and approval stay at the board; once a task is done there, its branch is merged
+into the sandbox's main. Commands the model asks for run in a throwaway container with
+no network (`GA_SANDBOX_IMAGE`, default `python:3.12-slim`); without Docker they are
+refused unless `GA_SANDBOX=local`.
+
 The run length (start time, steps) is at the top of `src/main.py`; the agents'
 settings (cooldowns, reflection threshold, paper-strict mode) are at the top of
 `src/agent.py`, and who each agent is lives in `data/agents/<id>/persona.json`. Reacting regenerates the plan as
@@ -112,6 +131,8 @@ Verbosity is controlled by `GA_LOG`:
 | --- | --- |
 | `src/main.py` | World clock, step loop, and conversations between agents |
 | `src/agent.py` | One agent: perceive → decide → act/react → reflect, and its plan |
+| `src/executor.py` | The hands: `ExecResult`, `FakeExecutor`, `LocalExecutor` (tool loop on the executor model) |
+| `src/workspace.py` | Each agent's git checkout of the sandbox repo, and the Docker/local command runners |
 | `src/persona.py` | Loads `data/agents/<id>/persona.json` into the agent's profile |
 | `src/memory_stream.py`, `memory.py` | The memory stream (observations, plans, reflections) |
 | `src/memory_retriever.py` | Recency + importance + relevance retrieval |

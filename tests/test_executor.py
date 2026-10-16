@@ -163,3 +163,58 @@ def test_many_changed_files_are_summarized(fake_llm, isolated_data, w):
     ag.work_on_task(rt, "9:00 am", w)
     assert ("Eve Smith changed page0.html, page1.html, page2.html, page3.html, page4.html, "
             "page5.html and 3 more for T-2.") in _memories(rt)
+
+
+# --- choosing the hands, and shipping approved work ------------------------------
+def test_the_environment_chooses_the_hands(monkeypatch, tmp_path):
+    import executor
+    import workspace
+
+    monkeypatch.delenv("GA_EXECUTOR", raising=False)
+    assert executor.hands_for({"id": "eve"}) == (None, None)            # the paper's agents
+    monkeypatch.setenv("GA_EXECUTOR", "fake")
+    hands, place = executor.hands_for({"id": "eve"})
+    assert isinstance(hands, FakeExecutor) and place is None
+    monkeypatch.setenv("GA_EXECUTOR", "local")
+    monkeypatch.setenv("GA_SANDBOX", "local")
+    monkeypatch.setattr(workspace, "WORKSPACES", tmp_path)
+    hands, place = executor.hands_for({"id": "eve", "name": "Eve Smith"})
+    assert isinstance(hands, executor.LocalExecutor) and place.path == tmp_path / "eve"
+    monkeypatch.setenv("GA_EXECUTOR", "robot")
+    with pytest.raises(ValueError, match="unknown GA_EXECUTOR"):
+        executor.hands_for({"id": "eve"})
+
+
+def test_a_done_task_is_merged_into_main_once(fake_llm, isolated_data, w, tmp_path):
+    from workspace import Workspace
+
+    rt, _ = _eve_at_her_desk(w, [DONE])
+    rt.workspace = Workspace(rt.agent, tmp_path / "workspaces", runner=object())
+    rt.workspace.start_task("T-2")
+    rt.workspace.write_file("index.html", "<h1>Welcome</h1>")
+    rt.workspace.commit("T-2: home page")
+    rt.workspace.publish("T-2")
+    rt.work_log["T-2"] = [{"block": "9:00 am", "result": DONE, "history": 0}]
+
+    ag.ship_approved_work(rt, w)                                         # still in progress
+    assert rt.shipped == set()
+
+    pb.get_task(w, "T-2")["status"] = "done"
+    ag.ship_approved_work(rt, w)
+    ag.ship_approved_work(rt, w)
+    assert rt.shipped == {"T-2"}
+    assert "index.html" in rt.workspace.git("ls-tree", "--name-only", "origin/main").split()
+    merged = [m for m in _memories(rt) if "merged T-2" in m]
+    assert merged == ["Eve Smith merged T-2 'Design and implement the home page layout' "
+                      "into the website's main branch."]
+
+
+def test_a_failed_merge_is_remembered(fake_llm, isolated_data, w, tmp_path):
+    from workspace import Workspace
+
+    rt, _ = _eve_at_her_desk(w, [DONE])
+    rt.workspace = Workspace(rt.agent, tmp_path / "workspaces", runner=object())
+    rt.work_log["T-2"] = [{"block": "9:00 am", "result": DONE, "history": 0}]
+    pb.get_task(w, "T-2")["status"] = "done"                             # but never published
+    ag.ship_approved_work(rt, w)
+    assert any(m.startswith("Eve Smith couldn't merge T-2") for m in _memories(rt))
