@@ -95,6 +95,15 @@ into the sandbox's main. Commands the model asks for run in a throwaway containe
 no network (`GA_SANDBOX_IMAGE`, default `python:3.12-slim`); without Docker they are
 refused unless `GA_SANDBOX=local`.
 
+Reviews are grounded in the code: at a desk-work step, a teammate's task waiting in review
+comes first. The reviewer's hands check out the teammate's published branch, read the diff
+and run the tests, and the verdict becomes a memory and a promise for the board (approve,
+or leave a note asking for changes); approving still happens at the board. The hands work
+from the lane skills in `skills/` (a shared contract, frontend, backend, deploy, review),
+picked by the task's area. A run spends at most `GA_EXECUTOR_MAX_SESSIONS` executor sessions
+(default 20 with local hands), shared by both agents. The GitHub version of this flow is
+designed, not built: see [docs/github-integration.md](docs/github-integration.md).
+
 The run length (start time, steps) is at the top of `src/main.py`; the agents'
 settings (cooldowns, reflection threshold, paper-strict mode) are at the top of
 `src/agent.py`, and who each agent is lives in `data/agents/<id>/persona.json`. Reacting regenerates the plan as
@@ -132,6 +141,7 @@ Verbosity is controlled by `GA_LOG`:
 | `src/main.py` | World clock, step loop, and conversations between agents |
 | `src/agent.py` | One agent: perceive → decide → act/react → reflect, and its plan |
 | `src/executor.py` | The hands: `ExecResult`, `FakeExecutor`, `LocalExecutor` (tool loop on the executor model) |
+| `src/skills.py`, `skills/` | Lane skills (SKILL.md) loaded into the executor by task area |
 | `src/workspace.py` | Each agent's git checkout of the sandbox repo, and the Docker/local command runners |
 | `src/persona.py` | Loads `data/agents/<id>/persona.json` into the agent's profile |
 | `src/memory_stream.py`, `memory.py` | The memory stream (observations, plans, reflections) |
