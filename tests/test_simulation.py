@@ -194,7 +194,7 @@ def test_with_fake_hands_work_steps_reach_the_executor_and_come_back_as_memories
 
     fakes = {}
 
-    def fake_hands(agent):
+    def fake_hands(agent, budget=None):
         fakes[agent["id"]] = executor.FakeExecutor(
             [executor.ExecResult("Wrote a first version.", ["index.html"])])
         return fakes[agent["id"]], None

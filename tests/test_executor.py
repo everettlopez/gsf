@@ -175,12 +175,12 @@ def test_the_environment_chooses_the_hands(monkeypatch, tmp_path):
     assert executor.hands_for({"id": "eve"}) == (None, None)            # the paper's agents
     monkeypatch.setenv("GA_EXECUTOR", "fake")
     hands, place = executor.hands_for({"id": "eve"})
-    assert isinstance(hands, FakeExecutor) and place is None
+    assert isinstance(hands.inner, FakeExecutor) and place is None
     monkeypatch.setenv("GA_EXECUTOR", "local")
     monkeypatch.setenv("GA_SANDBOX", "local")
     monkeypatch.setattr(workspace, "WORKSPACES", tmp_path)
     hands, place = executor.hands_for({"id": "eve", "name": "Eve Smith"})
-    assert isinstance(hands, executor.LocalExecutor) and place.path == tmp_path / "eve"
+    assert isinstance(hands.inner, executor.LocalExecutor) and place.path == tmp_path / "eve"
     monkeypatch.setenv("GA_EXECUTOR", "robot")
     with pytest.raises(ValueError, match="unknown GA_EXECUTOR"):
         executor.hands_for({"id": "eve"})
@@ -293,3 +293,29 @@ def test_an_unpublished_branch_is_retried_later(fake_llm, isolated_data, w):
     ag.work_on_task(rt, "9:00 am", w)
     assert "Eve Smith couldn't review Adam Beck's T-1" in _memories(rt)[-1]
     assert pb.commitments_for("eve") == [] and ag.review_at_hand(rt, w) is not None
+
+
+# --- the run's session budget -------------------------------------------------------
+def test_the_agents_share_one_session_budget(fake_llm, isolated_data, w):
+    from executor import Budgeted, SessionBudget
+
+    budget = SessionBudget(1)
+    rt, fake = _eve_at_her_desk(w, [PROGRESS])
+    rt.executor = Budgeted(fake, budget)
+    adam = ag.Agent.load("adam", w, executor=Budgeted(FakeExecutor(), budget))
+    assert ag.work_on_task(rt, "9:00 am", w) is PROGRESS
+    assert not adam.executor.available()                                # Eve spent it
+    rt.broad_chunks[0]["start_time"] = "11:00 am"
+    assert ag.work_on_task(rt, "11:00 am", w) is None and len(fake.calls) == 1
+
+
+def test_the_budget_comes_from_the_environment(monkeypatch):
+    import executor
+
+    monkeypatch.delenv("GA_EXECUTOR_MAX_SESSIONS", raising=False)
+    monkeypatch.setenv("GA_EXECUTOR", "fake")
+    assert executor.run_budget().left is None                           # fake: no limit
+    monkeypatch.setenv("GA_EXECUTOR", "local")
+    assert executor.run_budget().left == executor.DEFAULT_MAX_SESSIONS  # real hands: capped
+    monkeypatch.setenv("GA_EXECUTOR_MAX_SESSIONS", "5")
+    assert executor.run_budget().left == 5

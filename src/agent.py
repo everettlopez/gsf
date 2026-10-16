@@ -1152,6 +1152,11 @@ def work_on_task(rt, current_time, world):
     review, say). Returns the ExecResult, or None if there was no work to do."""
     if rt.executor is None:
         return None
+    if not rt.executor.available():
+        if not getattr(rt.executor, "_said_spent", False):
+            rt.executor._said_spent = True
+            log.event(f"{rt.tag}'s hands are done for this run: the executor session budget is spent")
+        return None
     block = _work_block(rt, current_time)
     if any(s["block"] == block for log_ in rt.work_log.values() for s in log_):
         return None                                     # this block's session already ran

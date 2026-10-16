@@ -29,7 +29,7 @@ import project_board
 from agent import (TASK_ID, Agent, initial_planning, meeting_pending, note_board_use, queue_board_visit,
                    replan_after_board, replan_after_conversation, settle_after_conversation)
 from clock import STEP_MINUTES, step_time
-from executor import hands_for
+from executor import hands_for, run_budget
 from conversation import clear_talks, record_talk, run_conversation, talked_recently_ids
 from log import print_timing_summary, timed
 from world import load_world, save_world
@@ -177,7 +177,8 @@ def schedule_meeting(rt, other, meeting, current_time):
 # ---------------------------------------------------------------------------
 def main():
     world = load_world()
-    runtimes = [Agent.load(agent_id, world, *hands_for(world["agents"][agent_id]))
+    budget = run_budget()                       # one cap on executor sessions for the run
+    runtimes = [Agent.load(agent_id, world, *hands_for(world["agents"][agent_id], budget))
                 for agent_id in ("adam", "eve")]
 
     log.banner(f"Generative Agents · {START_TIME} · {NUM_STEPS} steps x {STEP_MINUTES} min")

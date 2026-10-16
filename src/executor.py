@@ -62,6 +62,44 @@ class Executor:
     def review(self, agent, task, workspace, owner_name=""):
         raise NotImplementedError
 
+    def available(self):
+        """Can this executor take another session? (See Budgeted.)"""
+        return True
+
+
+class SessionBudget:
+    """How many executor sessions (work or review) one run may spend, shared
+    by every agent. None means no limit."""
+
+    def __init__(self, sessions=None):
+        self.left = sessions
+
+    def take(self):
+        if self.left is None:
+            return True
+        if self.left <= 0:
+            return False
+        self.left -= 1
+        return True
+
+
+class Budgeted(Executor):
+    """An executor that stops taking sessions when the run's budget is spent."""
+
+    def __init__(self, inner, budget):
+        self.inner, self.budget = inner, budget
+
+    def available(self):
+        return self.budget.left is None or self.budget.left > 0
+
+    def run(self, agent, task, workspace):
+        self.budget.take()
+        return self.inner.run(agent, task, workspace)
+
+    def review(self, agent, task, workspace, owner_name=""):
+        self.budget.take()
+        return self.inner.review(agent, task, workspace, owner_name)
+
 
 class FakeExecutor(Executor):
     """Returns scripted results and remembers what it was asked to do.
@@ -368,21 +406,38 @@ in a Linux container with Python 3.12 and no network; use show_changes for the d
                             tests_passed=session.tests_passed())
 
 
-def hands_for(agent):
+DEFAULT_MAX_SESSIONS = 20          # per run, for real (local) hands
+
+
+def run_budget():
+    """The session budget for one run: GA_EXECUTOR_MAX_SESSIONS, or 20 for
+    local hands (each session is a paid model conversation), no limit for fake."""
+    import os
+
+    value = os.environ.get("GA_EXECUTOR_MAX_SESSIONS")
+    if value:
+        return SessionBudget(int(value))
+    local = os.environ.get("GA_EXECUTOR") == "local"
+    return SessionBudget(DEFAULT_MAX_SESSIONS if local else None)
+
+
+def hands_for(agent, budget=None):
     """The executor and workspace for one agent, from GA_EXECUTOR:
 
         none   (default) no hands: the agents plan, talk and keep the board, as in the paper
         fake   FakeExecutor, no workspace: a dry run of the whole flow, no model, no files
         local  LocalExecutor in workspaces/<agent>/ (commands in Docker, see workspace.py)
-    """
+
+    Pass the run's budget (run_budget()) so the agents share one cap."""
     import os
 
+    budget = budget or SessionBudget()
     choice = os.environ.get("GA_EXECUTOR", "none")
     if choice == "none":
         return None, None
     if choice == "fake":
-        return FakeExecutor(), None
+        return Budgeted(FakeExecutor(), budget), None
     if choice == "local":
         from workspace import Workspace
-        return LocalExecutor(), Workspace(agent)
+        return Budgeted(LocalExecutor(), budget), Workspace(agent)
     raise ValueError(f"unknown GA_EXECUTOR {choice!r} (none, fake or local)")
