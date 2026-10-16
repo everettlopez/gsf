@@ -24,7 +24,8 @@ import main
 import project_board as pb
 from conftest import fake_generate
 from conversation import _board_context
-from plan import AGENT_PROFILES, Planner
+import persona
+from plan import Planner
 
 
 @pytest.fixture
@@ -246,7 +247,7 @@ def test_general_work_is_anyones(w):
 # --- the seeded identity -----------------------------------------------------------
 @pytest.mark.parametrize("agent_id", ["adam", "eve"])
 def test_profiles_say_tasks_belong_to_their_assignee(agent_id):
-    profile = " ".join(AGENT_PROFILES[agent_id].split())
+    profile = " ".join(persona.profile(agent_id).split())
     assert "update their status" not in profile           # "anyone can ... update their status"
     assert "A task belongs to the person it is assigned to" in profile
     assert "offers to work on it together with" in profile

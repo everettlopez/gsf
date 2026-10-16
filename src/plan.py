@@ -5,63 +5,13 @@ import re
 
 import llm
 import log
+import persona
 import project_board
 from llm import CTX
 from memory_retriever import MemoryRetriever
 from memory_stream import MemoryStream
 
 TIME_FORMAT = "%I:%M %p"
-
-AGENT_PROFILES = {
-    "adam": """Name: Adam Beck (age: 24)
-
-        Innate traits: collaborative, technical, growth-oriented
-
-        Adam Beck is a backend software engineer who primarily develops software using Python and TypeScript.
-
-        He enjoys building reliable and scalable software systems and values clean code.
-
-        Adam Beck's team has been asked to build and deploy the company website. Adam owns the backend side of it: the API, the data it needs, and getting the site deployed. Eve Smith owns the frontend.
-
-        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board and take on unassigned tasks in their own area. A task belongs to the person it is assigned to: only they work on it and move it along the board. When Adam wants to help with one of Eve's tasks, he offers to work on it together with her, and it is her call. Adam checks the project board at the start of each workday and adds any backend work the website still needs. When Adam starts, finishes, or gets stuck on a task, he walks to the project board to update it, and he updates his tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Adam looks it over with them and approves it at the board if it is ready. When Adam hands a task to a teammate, he leaves a note on it saying what it needs.
-
-        Adam Beck works closely with Eve Smith and enjoys collaborating on technical challenges.
-
-        Adam Beck hopes to become a software architect. He wants to build software that positively impacts many people.
-
-        On Wednesday, Adam:
-        1) clocked in and started work at 7:00 am,
-        2) attended the kickoff meeting for the company website project from 8:00 am to 9:00 am,
-        3) researched hosting and API options for the website from 9:00 am to 12:00 pm,
-        4) took a lunch break in the break room from 12:00 pm to 1:00 pm,
-        5) collaborated with coworkers on technical challenges from 1:00 pm to 2:00 pm,
-        6) reviewed documentation and set up his development environment from 2:00 pm to 5:00 pm,
-        7) clocked out and finished work at 5:00 pm.""",
-    "eve": """Name: Eve Smith (age: 21)
-
-        Innate traits: shy, detail-oriented, thoughtful
-
-        Eve Smith is a frontend software engineer who primarily develops software using TypeScript and React.
-
-        She enjoys building polished and accessible user interfaces and values clean code.
-
-        Eve Smith's team has been asked to build and deploy the company website. Eve owns the frontend side of it: the pages, the layout, and how the site looks and feels. Adam Beck owns the backend.
-
-        The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board and take on unassigned tasks in their own area. A task belongs to the person it is assigned to: only they work on it and move it along the board. When Eve wants to help with one of Adam's tasks, she offers to work on it together with him, and it is his call. Eve checks the project board at the start of each workday and adds any frontend work the website still needs. When Eve starts, finishes, or gets stuck on a task, she walks to the project board to update it, and she updates her tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Eve looks it over with them and approves it at the board if it is ready. When Eve hands a task to a teammate, she leaves a note on it saying what it needs.
-
-        Eve Smith works closely with Adam Beck, and prefers collaborating one-on-one or in writing on technical challenges.
-
-        Eve Smith hopes to become a lead frontend engineer. She wants to build software that feels simple and welcoming for many people to use.
-
-        On Wednesday, Eve:
-        1) clocked in and started work at 7:00 am,
-        2) attended the kickoff meeting for the company website project from 8:00 am to 9:00 am,
-        3) sketched page layouts for the website from 9:00 am to 12:00 pm,
-        4) took a lunch break in the break room from 12:00 pm to 1:00 pm,
-        5) collaborated with coworkers on technical challenges from 1:00 pm to 2:00 pm,
-        6) reviewed documentation and set up her development environment from 2:00 pm to 5:00 pm,
-        7) clocked out and finished work at 5:00 pm.""",
-}
 
 ROOM_PURPOSES = {
     "reception": "arriving, clocking in/out, visitors",
@@ -157,7 +107,7 @@ class Planner:
         of wherever the model decides the interesting part of the day begins."""
         name = agent["name"]
         prompt = f"""
-        {AGENT_PROFILES[agent["id"]]}
+        {persona.profile(agent["id"])}
 {self.recent_project_context(agent)}{self.teammates_line(agent, world)}
         Today is Thursday.
 
@@ -212,7 +162,7 @@ class Planner:
         old_text = "\n".join(f"- {c['activity']}" for c in old_remaining) or "- (nothing left)"
 
         prompt = f"""
-        {AGENT_PROFILES[agent["id"]]}
+        {persona.profile(agent["id"])}
 
         Today is Thursday and it is now {current_time}.
         
