@@ -104,6 +104,20 @@ picked by the task's area. A run spends at most `GA_EXECUTOR_MAX_SESSIONS` execu
 (default 20 with local hands), shared by both agents. The GitHub version of this flow is
 designed, not built: see [docs/github-integration.md](docs/github-integration.md).
 
+What the hands find changes what the agent does next: finished work (the tests pass when
+the host reruns them) sends the agent straight to the board to move the task to review,
+without the usual two-hour wait; a question only a teammate can answer sends it to ask
+them, and the next session on the task gets the answer; a review verdict sends it to the
+board to approve or leave the note. Each session's cost is estimated in the log, with a
+total at the end. `GA_STEPS` sets the run's length (default 30 steps of 5 minutes).
+
+To see the site the agents have built so far, combined from every task branch and built
+and tested in the sandbox:
+
+```bash
+python scripts/preview_site.py          # writes preview/ and opens the page
+```
+
 The run length (start time, steps) is at the top of `src/main.py`; the agents'
 settings (cooldowns, reflection threshold, paper-strict mode) are at the top of
 `src/agent.py`, and who each agent is lives in `data/agents/<id>/persona.json`. Reacting regenerates the plan as
