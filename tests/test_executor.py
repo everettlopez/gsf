@@ -104,7 +104,8 @@ def test_a_finished_task_becomes_a_promise_to_move_it_to_review(fake_llm, isolat
     ag.work_on_task(rt, "9:00 am", w)
     assert "The tests for T-2 pass." in _memories(rt)
     assert pb.commitments_for("eve") == [
-        "move T-2 to review on the project board: The home page is complete."]
+        "move T-2 to review on the project board, noting for the reviewer: The home page is "
+        "complete. Changed: index.html. Tests pass on branch task/T-2."]
     assert pb.is_board_commitment(pb.commitments_for("eve")[0])
 
     rt.broad_chunks[0]["start_time"] = "11:00 am"                      # a later block
@@ -218,3 +219,77 @@ def test_a_failed_merge_is_remembered(fake_llm, isolated_data, w, tmp_path):
     pb.get_task(w, "T-2")["status"] = "done"                             # but never published
     ag.ship_approved_work(rt, w)
     assert any(m.startswith("Eve Smith couldn't merge T-2") for m in _memories(rt))
+
+
+# --- reviewing a teammate's task ----------------------------------------------------
+def _adams_task_in_review(w):
+    """T-1 (Adam's) sent to review once."""
+    pb.update_status(w, "adam", "T-1", "review", note="the content file and build are ready")
+    return pb.get_task(w, "T-1")
+
+
+def test_a_teammates_task_in_review_is_reviewed_before_own_work(fake_llm, isolated_data, w):
+    from executor import ReviewResult
+
+    rt, executor = _eve_at_her_desk(w, [PROGRESS])
+    _adams_task_in_review(w)
+    result = ag.work_on_task(rt, "9:00 am", w)
+    assert isinstance(result, ReviewResult) and executor.review_calls == [("eve", "T-1")]
+    assert executor.calls == []                                         # her own work waits
+    memories = _memories(rt)
+    assert any(m.startswith("Eve Smith reviewed Adam Beck's T-1") for m in memories)
+    assert "Eve Smith thinks T-1 is ready to approve." in memories
+    assert pb.commitments_for("eve") == [
+        "approve T-1 on the project board: The branch does what the task says"]
+    assert pb.is_board_commitment(pb.commitments_for("eve")[0])
+
+    rt.broad_chunks[0]["start_time"] = "11:00 am"                       # next block: her own work
+    ag.work_on_task(rt, "11:00 am", w)
+    assert executor.review_calls == [("eve", "T-1")] and len(executor.calls) == 1
+
+
+def test_changes_requested_become_a_note_promise_and_a_new_round_is_reviewed_again(
+        fake_llm, isolated_data, w):
+    from executor import ReviewResult
+
+    rt, executor = _eve_at_her_desk(w, [PROGRESS])
+    executor.reviews = [ReviewResult("changes", "The build works but misses a check.",
+                                     ["build.py doesn't escape the tagline",
+                                      "no test for a missing key"], tests_passed=True)]
+    task = _adams_task_in_review(w)
+    ag.work_on_task(rt, "9:00 am", w)
+    promise = pb.commitments_for("eve")[0]
+    assert promise == ("leave a note on T-1 on the project board asking Adam Beck for changes: "
+                       "build.py doesn't escape the tagline; no test for a missing key")
+    assert pb.is_board_commitment(promise)
+
+    pb.add_note(w, "eve", "T-1", "build.py doesn't escape the tagline")  # at the board
+    pb.update_status(w, "adam", "T-1", "in_progress")                    # Adam reopens it
+    pb.update_status(w, "adam", "T-1", "review", note="fixed")            # second round
+    assert task["status"] == "review"
+    rt.broad_chunks[0]["start_time"] = "1:00 pm"
+    ag.work_on_task(rt, "1:00 pm", w)
+    assert len(executor.review_calls) == 2
+
+
+def test_no_review_away_from_the_desk_or_of_an_approved_task(fake_llm, isolated_data, w):
+    rt, executor = _eve_at_her_desk(w, [PROGRESS])
+    task = _adams_task_in_review(w)
+    rt.chunk = dict(rt.chunk, board_work=True, activity="9:00 am: approve T-1 on the project board")
+    assert ag.review_at_hand(rt, w) is None
+    rt.chunk = dict(rt.chunk, board_work=False, activity="9:00 am: Build the hero section")
+    pb.approve_task(w, "eve", "T-1")
+    assert ag.review_at_hand(rt, w) is None                              # she already approved it
+    task["approved_by"].clear()
+    assert ag.review_at_hand(rt, w) is task
+
+
+def test_an_unpublished_branch_is_retried_later(fake_llm, isolated_data, w):
+    from executor import ReviewResult
+
+    rt, executor = _eve_at_her_desk(w, [PROGRESS])
+    executor.reviews = [ReviewResult("none", "T-1 has no published branch to review yet.")]
+    _adams_task_in_review(w)
+    ag.work_on_task(rt, "9:00 am", w)
+    assert "Eve Smith couldn't review Adam Beck's T-1" in _memories(rt)[-1]
+    assert pb.commitments_for("eve") == [] and ag.review_at_hand(rt, w) is not None

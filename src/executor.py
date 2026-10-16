@@ -43,10 +43,23 @@ class ExecResult:
         return bool(self.tests_passed) and not self.blocked
 
 
+@dataclass
+class ReviewResult:
+    """What a review of a teammate's task found."""
+    verdict: str                                    # approve | changes | none (couldn't review)
+    summary: str
+    changes: list = field(default_factory=list)     # for "changes": one concrete request each
+    tests_passed: Optional[bool] = None
+
+
 class Executor:
-    """Does the work on one task for one agent, then returns an ExecResult."""
+    """Does the work on one task for one agent (run), or reviews a teammate's
+    task (review)."""
 
     def run(self, agent, task, workspace):
+        raise NotImplementedError
+
+    def review(self, agent, task, workspace, owner_name=""):
         raise NotImplementedError
 
 
@@ -56,10 +69,17 @@ class FakeExecutor(Executor):
     `results` is a list of ExecResult (used in order, the last one repeating)
     or a function (agent, task, workspace) -> ExecResult."""
 
-    def __init__(self, results=None):
+    def __init__(self, results=None, reviews=None):
         self.results = results if results is not None else [
             ExecResult("Made progress on the task.", tests_passed=None)]
+        self.reviews = reviews if reviews is not None else [
+            ReviewResult("approve", "The branch does what the task says.", tests_passed=True)]
         self.calls = []                                 # (agent id, task id, workspace)
+        self.review_calls = []                          # (agent id, task id)
+
+    def review(self, agent, task, workspace, owner_name=""):
+        self.review_calls.append((agent.agent["id"], task["id"]))
+        return self.reviews[min(len(self.review_calls), len(self.reviews)) - 1]
 
     def run(self, agent, task, workspace):
         self.calls.append((agent.agent["id"], task["id"], workspace))
@@ -99,13 +119,24 @@ TOOLS = [
                               "account, a decision): what that is"}},
           required=["summary"]),
 ]
-_SCHEMAS = {t["name"]: t["input_schema"] for t in TOOLS}
+REVIEW_TOOLS = [t for t in TOOLS if t["name"] in ("list_files", "read_file", "run_command",
+                                                  "run_tests")] + [
+    _tool("show_changes", "Show what the branch changes against main (git diff).", {}),
+    _tool("review_report", "End the review with a verdict.",
+          {"verdict": {"type": "string", "enum": ["approve", "changes"]},
+           "summary": {"type": "string", "description": "One or two plain sentences: what the "
+                       "branch does and how it holds up"},
+           "changes": {"type": "string", "description": "For a changes verdict: each change "
+                       "needed on its own line, most important first"}},
+          required=["verdict", "summary"]),
+]
 
 
-def _invalid_input(name, given):
+def _invalid_input(name, given, schemas=None):
     """Why a tool input doesn't match its schema, or "". Streamed tool inputs
     aren't validated by the API, so they are checked here before running."""
-    schema = _SCHEMAS.get(name)
+    schemas = schemas or {t["name"]: t["input_schema"] for t in TOOLS}
+    schema = schemas.get(name)
     if schema is None:
         return f"there is no tool {name!r}"
     if not isinstance(given, dict):
@@ -113,9 +144,12 @@ def _invalid_input(name, given):
     missing = [k for k in schema["required"] if k not in given]
     extra = [k for k in given if k not in schema["properties"]]
     wrong = [k for k, v in given.items() if k in schema["properties"] and not isinstance(v, str)]
+    off = [f"{k} must be one of {', '.join(schema['properties'][k]['enum'])}"
+           for k, v in given.items() if k in schema["properties"]
+           and "enum" in schema["properties"][k] and v not in schema["properties"][k]["enum"]]
     problems = ([f"missing {', '.join(missing)}"] if missing else []) + \
                ([f"unknown {', '.join(extra)}"] if extra else []) + \
-               ([f"{', '.join(wrong)} must be text"] if wrong else [])
+               ([f"{', '.join(wrong)} must be text"] if wrong else []) + off
     return "; ".join(problems)
 
 
@@ -135,10 +169,13 @@ class _Session:
 
 
 class LocalExecutor(Executor):
-    """Works on a task with the executor model (llm.chat) and the tools above,
-    in the agent's workspace, on the task's branch. One run is one bounded work
-    session; the next one picks up from the branch, the task's notes and the
-    summaries of earlier sessions.
+    """Works on a task, or reviews a teammate's, with the executor model
+    (llm.chat) and the tools above, in the agent's workspace.
+
+    A work session runs on the task's branch; the next one picks up from the
+    branch, the task's notes and the summaries of earlier sessions. A review
+    session reads and runs a teammate's published branch and changes nothing.
+    The skills for the task (skills.py) go into the system prompt.
 
     tests_passed is not the model's word for it: it is the outcome of the last
     run_tests, and only if nothing changed after it."""
@@ -148,16 +185,22 @@ class LocalExecutor(Executor):
         self.command_timeout = command_timeout
 
     # -- prompts -------------------------------------------------------------
-    def system_prompt(self, agent):
+    @staticmethod
+    def _who(agent):
         import persona
 
         a = agent.agent
         try:
             p = persona.load(a["id"])
-            who = " ".join(p["occupation"][:2])
-            style = " ".join(p.get("work_style", []))
+            return " ".join(p["occupation"][:2]), " ".join(p.get("work_style", []))
         except FileNotFoundError:
-            who, style = f"{a['name']} is a software engineer.", ""
+            return f"{a['name']} is a software engineer.", ""
+
+    def system_prompt(self, agent, skill_names):
+        import skills
+
+        a = agent.agent
+        who, style = self._who(agent)
         return f"""You are the hands of {a['name']}, a {a.get('area') or 'software'} engineer on a \
 two-person team building the company website. {who} {style}
 
@@ -167,11 +210,27 @@ and {a['name']}'s area: a teammate's work is theirs to change. When the task nee
 from a teammate, give that as the blocked reason instead of doing their part.
 
 Commands run in a Linux container with Python 3.12 and no network, so nothing can be \
-installed: build with what is there and test with the standard library (for a web page, \
-html.parser and unittest are enough). Check the work with run_tests before reporting it \
-finished, and end the session with report."""
+installed: build with what is there and test with the standard library. Check the work with \
+run_tests before reporting it finished, and end the session with report.
 
-    def brief(self, agent, task):
+{skills.load(skill_names)}"""
+
+    def review_prompt(self, agent):
+        import skills
+
+        a = agent.agent
+        who, _ = self._who(agent)
+        return f"""You are the hands of {a['name']}, reviewing a teammate's task on a two-person \
+team building the company website. {who}
+
+The teammate's branch is checked out in {a['name']}'s copy of the repository. Read it, run it, \
+and end with review_report. Change nothing: anything written here is thrown away. Commands run \
+in a Linux container with Python 3.12 and no network; use show_changes for the diff.
+
+{skills.load(skills.for_review())}"""
+
+    @staticmethod
+    def _task_lines(task):
         lines = [f"Task {task['id']}: {task['title']}"]
         if task.get("description"):
             lines.append(f"What it is: {task['description']}")
@@ -181,6 +240,10 @@ finished, and end the session with report."""
         if notes:
             lines.append("Notes on the task, oldest first:")
             lines += [f"- {e['agent']} at {e['time']}: {e['note']}" for e in notes]
+        return lines
+
+    def brief(self, agent, task):
+        lines = self._task_lines(task)
         before = [s["result"].summary for s in agent.work_log.get(task["id"], [])]
         if before:
             lines.append("Earlier work sessions on this task (their files are on the branch):")
@@ -188,12 +251,16 @@ finished, and end the session with report."""
         lines.append("Work on it now.")
         return "\n".join(lines)
 
+    def review_brief(self, task, owner_name):
+        return "\n".join([f"Review {owner_name}'s task, now in review.", *self._task_lines(task),
+                          "Review it now."])
+
     # -- tools ---------------------------------------------------------------
-    def _call(self, session, workspace, call):
+    def _call(self, session, workspace, call, schemas):
         from workspace import WorkspaceError
 
         session.counter += 1
-        problem = _invalid_input(call.name, call.input)
+        problem = _invalid_input(call.name, call.input, schemas)
         if problem:
             return self._result(call, f"Invalid input: {problem}", error=True)
         args = call.input
@@ -207,6 +274,8 @@ finished, and end the session with report."""
                 workspace.write_file(args["path"], args["contents"])
                 session.last_change = session.counter
                 return self._result(call, f"Wrote {args['path']}.")
+            if call.name == "show_changes":
+                return self._result(call, workspace.diff() or "(no changes against main)")
             if call.name in ("run_command", "run_tests"):
                 timeout = {"timeout": self.command_timeout} if self.command_timeout else {}
                 done = workspace.run(args["command"], **timeout)
@@ -215,7 +284,7 @@ finished, and end the session with report."""
                 else:
                     session.last_change = session.counter     # a command can change files
                 return self._result(call, f"exit code {done.exit_code}\n{done.output}")
-            session.report = args                             # report
+            session.report = args                             # report / review_report
             return self._result(call, "Reported.")
         except WorkspaceError as e:
             return self._result(call, str(e), error=True)
@@ -228,27 +297,25 @@ finished, and end the session with report."""
         return block
 
     # -- the loop ------------------------------------------------------------
-    def run(self, agent, task, workspace):
+    def _session(self, workspace, system, brief, tools):
+        """One bounded tool-use conversation. Returns (session, final text, why
+        it was stopped from outside the work, or "")."""
         import llm
 
-        workspace.start_task(task["id"])
+        schemas = {t["name"]: t["input_schema"] for t in tools}
         session = _Session()
-        messages = [{"role": "user", "content": self.brief(agent, task)}]
-        system = self.system_prompt(agent)
-        summary, blocked, unreadable = "", "", 0
-
+        messages = [{"role": "user", "content": brief}]
+        unreadable = 0
         for _ in range(self.max_turns):
             try:
-                reply = llm.chat(messages, system=system, tools=TOOLS)
+                reply = llm.chat(messages, system=system, tools=tools)
             except llm.ToolInputError:
                 unreadable += 1                   # no tool_use to answer: send the turn again
                 if unreadable > 2:
-                    blocked = "the executor model kept sending tool input that couldn't be read"
-                    break
+                    return session, "", "the executor model kept sending tool input that couldn't be read"
                 continue
             if reply.stop_reason == "refusal":
-                blocked = "the executor model declined to work on this task"
-                break
+                return session, "", "the executor model declined to work on this task"
             messages.append({"role": "assistant", "content": reply.content})
             if reply.stop_reason == "max_tokens":
                 # A cut-off turn may hold a half-written tool call: none of it runs.
@@ -258,24 +325,47 @@ finished, and end the session with report."""
                                  "You were cut off at the output limit. Continue in smaller pieces."})
                 continue
             if not reply.tool_calls:
-                summary = reply.text.strip()
-                break
+                return session, reply.text.strip(), ""
             messages.append({"role": "user", "content": [
-                self._call(session, workspace, call) for call in reply.tool_calls]})
+                self._call(session, workspace, call, schemas) for call in reply.tool_calls]})
             if session.report:
-                summary = session.report.get("summary", "").strip()
-                blocked = (session.report.get("blocked_reason") or "").strip()
-                break
-        else:
-            summary = "The work session ran out of turns before the task was finished."
+                return session, "", ""
+        return session, "The session ran out of turns before it was finished.", ""
 
-        result = ExecResult(summary=summary or "Worked on the task.",
-                            tests_passed=session.tests_passed(), blocked_reason=blocked)
+    def run(self, agent, task, workspace):
+        import skills
+
+        workspace.start_task(task["id"])
+        session, text, stopped = self._session(
+            workspace, self.system_prompt(agent, skills.for_task(task)),
+            self.brief(agent, task), TOOLS)
+        report = session.report or {}
+        result = ExecResult(summary=(report.get("summary") or text).strip() or "Worked on the task.",
+                            tests_passed=session.tests_passed(),
+                            blocked_reason=stopped or (report.get("blocked_reason") or "").strip())
         workspace.commit(f"{task['id']}: {result.summary}"[:200])
         result.files_changed = workspace.changed_files()
         if result.finished:
             workspace.publish(task["id"])
         return result
+
+    def review(self, agent, task, workspace, owner_name=""):
+        if not workspace.checkout_review(task["id"]):
+            return ReviewResult("none", f"{task['id']} has no published branch to review yet.")
+        try:
+            session, text, stopped = self._session(
+                workspace, self.review_prompt(agent),
+                self.review_brief(task, owner_name or task.get("assignee") or "a teammate"),
+                REVIEW_TOOLS)
+        finally:
+            workspace.discard_changes()
+        report = session.report or {}
+        if stopped or not report:
+            return ReviewResult("none", stopped or text or "The review didn't reach a verdict.",
+                                tests_passed=session.tests_passed())
+        changes = [c.strip(" -*") for c in (report.get("changes") or "").splitlines() if c.strip(" -*")]
+        return ReviewResult(report["verdict"], report["summary"].strip(), changes,
+                            tests_passed=session.tests_passed())
 
 
 def hands_for(agent):

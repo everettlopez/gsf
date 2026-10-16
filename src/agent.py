@@ -154,6 +154,7 @@ class Agent:
     workspace: Optional[object] = None
     work_log: dict = field(default_factory=dict)       # task id -> work sessions on it
     shipped: set = field(default_factory=set)          # task ids merged into main
+    reviewed: dict = field(default_factory=dict)       # teammate task id -> review round done
 
     # Per-step scratch space (filled in by the phases below)
     observations: list = field(default_factory=list)
@@ -1101,6 +1102,18 @@ def refresh_board_step_text(rt, world):
 # ---------------------------------------------------------------------------
 # THE HANDS: work on a task (executor.py)
 # ---------------------------------------------------------------------------
+def at_desk_work(rt, world):
+    """Is the current step work at the agent's own desk: not a break, a board
+    visit, a talk, or time with a teammate?"""
+    chunk = rt.chunk
+    activity = (chunk or {}).get("activity") or ""
+    return not (not chunk or "project" not in world or chunk.get("board_work")
+                or chunk.get("target_agent")
+                or rt.agent["current_location"] != rt.agent.get("office")
+                or rt.planner._BREAK.search(activity)
+                or project_board.mentions_board_explicitly(activity))
+
+
 def task_at_hand(rt, world):
     """The task the agent's current step is work on, or None.
 
@@ -1108,13 +1121,9 @@ def task_at_hand(rt, world):
     desk: not a break, a board visit, a talk, or time with a teammate. Helping
     a teammate means working on their task together with them, which is a
     conversation, never the hands taking it over (lanes)."""
-    chunk = rt.chunk
-    activity = (chunk or {}).get("activity") or ""
-    if (not chunk or "project" not in world or chunk.get("board_work") or chunk.get("target_agent")
-            or rt.agent["current_location"] != rt.agent.get("office")
-            or rt.planner._BREAK.search(activity)
-            or project_board.mentions_board_explicitly(activity)):
+    if not at_desk_work(rt, world):
         return None
+    activity = rt.chunk.get("activity") or ""
     tasks = {t["id"]: t for t in project_board.get_project(world)["tasks"]}
     named = [tasks[i] for i in project_board.task_ids_in(activity) if i in tasks]
     if any(t["assignee"] != rt.agent["id"] for t in named):
@@ -1143,11 +1152,16 @@ def work_on_task(rt, current_time, world):
     review, say). Returns the ExecResult, or None if there was no work to do."""
     if rt.executor is None:
         return None
+    block = _work_block(rt, current_time)
+    if any(s["block"] == block for log_ in rt.work_log.values() for s in log_):
+        return None                                     # this block's session already ran
+    review = review_at_hand(rt, world)
+    if review is not None:
+        return review_teammate_work(rt, review, block, current_time, world)
     task = task_at_hand(rt, world)
     if task is None:
         return None
     sessions = rt.work_log.setdefault(task["id"], [])
-    block = _work_block(rt, current_time)
     if sessions and sessions[-1]["block"] == block:
         return None                                     # this block's session already ran
     if sessions and sessions[-1]["result"].finished and sessions[-1]["history"] == len(task["history"]):
@@ -1164,8 +1178,12 @@ def work_on_task(rt, current_time, world):
         head_to_board(rt, f"mark {task['id']} blocked on the project board: {result.blocked_reason}",
                       current_time, world)
     elif result.finished:
+        # What the reviewer should check goes on the card with the move.
+        files = ", ".join(result.files_changed[:6])
         project_board.add_commitment(
-            rt.agent["id"], f"move {task['id']} to review on the project board: {result.summary}")
+            rt.agent["id"], f"move {task['id']} to review on the project board, noting for the "
+                            f"reviewer: {result.summary.strip().rstrip('.')}. Changed: {files}. "
+                            f"Tests pass on branch task/{task['id']}.")
     return result
 
 
@@ -1233,3 +1251,60 @@ def ship_approved_work(rt, world):
             line = f"{name} couldn't merge {task['id']} into the website's main branch: {e}"
         rt.stream.add_observations([line])
         log.event(f"🚢 {line}")
+
+
+# ---------------------------------------------------------------------------
+# THE HANDS: review a teammate's task
+# ---------------------------------------------------------------------------
+def _review_round(task):
+    """How many times the task has gone to review: a new round needs a new review."""
+    return sum(1 for e in task["history"] if e.get("event", "").endswith("-> review"))
+
+
+def review_at_hand(rt, world):
+    """A teammate's task waiting in review that the agent hasn't reviewed this
+    round, if the step is desk work. One named in the step comes first."""
+    if not at_desk_work(rt, world):
+        return None
+    waiting = [t for t in project_board.get_project(world)["tasks"]
+               if t["status"] == "review" and t["assignee"] and t["assignee"] != rt.agent["id"]
+               and rt.agent["id"] not in t["approved_by"]
+               and rt.reviewed.get(t["id"]) != _review_round(t)]
+    named = set(project_board.task_ids_in(rt.chunk.get("activity") or ""))
+    waiting.sort(key=lambda t: t["id"] not in named)
+    return waiting[0] if waiting else None
+
+
+def review_teammate_work(rt, task, block, current_time, world):
+    """The hands read and run the teammate's published branch. The verdict is
+    remembered and becomes a promise for the board: approve the task there, or
+    leave a note asking for the changes. Approving stays a board action."""
+    owner = world["agents"][task["assignee"]]["name"]
+    log.event(f"🔍 {rt.tag} reviews {owner}'s {task['id']} '{task['title']}'")
+    with timed(f"{rt.tag} executor review of {task['id']}"):
+        result = rt.executor.review(rt, task, rt.workspace, owner_name=owner)
+    rt.work_log.setdefault(f"review {task['id']}", []).append(
+        {"block": block, "time": current_time, "result": result, "history": len(task["history"])})
+
+    name, ref = rt.agent["name"], f"{owner}'s {task['id']} '{task['title']}'"
+    if result.verdict == "none":
+        line = f"{name} couldn't review {ref} yet: {result.summary.strip().rstrip('.')}."
+        rt.stream.add_observations([line])
+        log.event(f"🔍 {line}")
+        return result
+    rt.reviewed[task["id"]] = _review_round(task)
+    lines = [f"{name} reviewed {ref} at {current_time}: {result.summary.strip().rstrip('.')}."]
+    if result.tests_passed is not None:
+        lines.append(f"The tests on {task['id']}'s branch {'pass' if result.tests_passed else 'fail'}.")
+    if result.verdict == "approve":
+        lines.append(f"{name} thinks {task['id']} is ready to approve.")
+        promise = f"approve {task['id']} on the project board: {result.summary.strip().rstrip('.')}"
+    else:
+        asks = "; ".join(result.changes) or result.summary.strip().rstrip(".")
+        lines.append(f"{name} wants changes to {task['id']}: {asks}.")
+        promise = f"leave a note on {task['id']} on the project board asking {owner} for changes: {asks}"
+    rt.stream.add_observations(lines)
+    project_board.add_commitment(rt.agent["id"], promise)
+    for line in lines:
+        log.event(f"🔍 {line}")
+    return result

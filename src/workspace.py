@@ -232,6 +232,27 @@ class Workspace:
         self.git("commit", "--quiet", "-m", message)
         return True
 
+    def diff(self):
+        """What the checked-out branch changes against main: the summary, then
+        the full diff (trimmed like command output)."""
+        stat = self.git("diff", "--stat", "origin/main...HEAD")
+        return _trim(f"{stat}\n\n{self.git('diff', 'origin/main...HEAD')}" if stat else "")
+
+    def checkout_review(self, task_id):
+        """Check out a teammate's published task branch to review it (detached:
+        nothing done here goes anywhere). False if it isn't published."""
+        self.git("fetch", "--quiet", "origin")
+        remote = f"origin/{self.branch(task_id)}"
+        if not self.git("rev-parse", "--verify", "--quiet", remote, check=False):
+            return False
+        self.git("checkout", "--quiet", "--detach", remote)
+        return True
+
+    def discard_changes(self):
+        """Throw away anything changed in the checkout since the last commit."""
+        self.git("reset", "--quiet", "--hard")
+        self.git("clean", "-fdq")
+
     def publish(self, task_id):
         """Push the task's branch to the sandbox repository for review."""
         self.git("push", "--quiet", "--force-with-lease", "origin", self.branch(task_id))

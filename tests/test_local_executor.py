@@ -184,7 +184,7 @@ def test_a_session_has_a_turn_limit(eve, script):
     rt, task = eve
     script["replies"] = [_turn(("list_files", {}))] * 3
     result = LocalExecutor(max_turns=3).run(rt, task, rt.workspace)
-    assert result.summary == "The work session ran out of turns before the task was finished."
+    assert result.summary == "The session ran out of turns before it was finished."
     assert not result.blocked and result.tests_passed is None
 
 
@@ -200,3 +200,90 @@ def test_the_tool_schemas_reject_what_they_should():
     assert _invalid_input("report", {"summary": "x", "blocked_reason": "y"}) == ""
     assert _invalid_input("report", "summary") == "the input must be an object"
     assert all(t["input_schema"]["additionalProperties"] is False for t in TOOLS)
+
+
+# --- skills ---------------------------------------------------------------------
+@pytest.mark.parametrize("task,names", [
+    ({"area": "frontend", "title": "Page layout"}, ["shared", "frontend"]),
+    ({"area": "backend", "title": "Content file and build script"}, ["shared", "backend"]),
+    ({"area": "backend", "title": "Ship the site", "description": "build dist/"},
+     ["shared", "backend", "deploy"]),
+    ({"area": "devops", "title": "Deploy the site"}, ["shared", "deploy"]),
+    ({"area": "general", "title": "Write the README"}, ["shared"]),
+])
+def test_a_task_gets_the_shared_contract_its_lane_and_deploy_when_shipping(task, names):
+    import skills
+
+    assert skills.for_task(task) == names
+    assert skills.for_review() == ["shared", "review"]
+
+
+def test_skills_load_without_their_front_matter():
+    import skills
+
+    text = skills.load(["shared", "frontend", "no-such-skill"])
+    assert not text.startswith("---") and "name: shared" not in text
+    assert "{{placeholders}}" in text and "# Frontend" in text
+
+
+def test_the_work_session_carries_the_tasks_skills(eve, script):
+    rt, task = eve
+    script["replies"] = [_turn(("report", {"summary": "Started."}))]
+    LocalExecutor().run(rt, task, rt.workspace)
+    system = script["requests"][0]["system"]
+    assert "# Frontend: the layout and the styles" in system             # T-2 is frontend
+    assert "The contract between template and content" in system
+    assert "# Backend" not in system
+
+
+# --- review sessions ------------------------------------------------------------------
+@pytest.fixture
+def adams_branch(eve, tmp_path, w):
+    """Adam's T-1 published from his own workspace, ready for Eve to review."""
+    rt, _ = eve
+    adam = Workspace(w["agents"]["adam"], tmp_path / "workspaces", runner=Runner())
+    adam.start_task("T-1")
+    adam.write_file("build.py", "print('built')\n")
+    adam.commit("T-1: the build")
+    adam.publish("T-1")
+    return rt, pb.get_task(w, "T-1")
+
+
+def test_a_review_reads_and_runs_the_branch_and_returns_a_verdict(adams_branch, script):
+    rt, task = adams_branch
+    rt.workspace.runner = Runner(CommandResult(0, "Ran 3 tests\nOK"))
+    script["replies"] = [
+        _turn(("show_changes", {})),
+        _turn(("run_command", {"command": "echo junk > scratch.txt"}),
+              ("run_tests", {"command": "python -m unittest discover -s tests -v"})),
+        _turn(("review_report", {"verdict": "changes", "summary": "The build runs but checks nothing.",
+                                 "changes": "- build.py should fail on a missing key\n- add tests"})),
+    ]
+    result = LocalExecutor().review(rt, task, rt.workspace, owner_name="Adam Beck")
+
+    assert (result.verdict, result.tests_passed) == ("changes", True)
+    assert result.changes == ["build.py should fail on a missing key", "add tests"]
+    diff = _results(script["requests"][1])[0]["content"]
+    assert "build.py" in diff and "print('built')" in diff
+    first = script["requests"][0]
+    assert first["messages"][0]["content"].startswith("Review Adam Beck's task, now in review.")
+    assert "# Review: a teammate's task" in first["system"]
+    assert {t["name"] for t in first["tools"]} == {"list_files", "read_file", "run_command",
+                                                   "run_tests", "show_changes", "review_report"}
+    assert rt.workspace.git("status", "--porcelain") == ""             # nothing left behind
+
+
+def test_a_review_needs_a_published_branch_and_a_real_verdict(eve, script, w):
+    rt, _ = eve
+    result = LocalExecutor().review(rt, pb.get_task(w, "T-1"), rt.workspace)
+    assert result.verdict == "none" and script["requests"] == []        # no model call
+
+
+def test_a_review_verdict_must_be_approve_or_changes(adams_branch, script):
+    rt, task = adams_branch
+    script["replies"] = [_turn(("review_report", {"verdict": "lgtm", "summary": "fine"})),
+                         _turn(("review_report", {"verdict": "approve", "summary": "Fine."}))]
+    result = LocalExecutor().review(rt, task, rt.workspace)
+    [answer] = _results(script["requests"][1])
+    assert answer["is_error"] and "verdict must be one of approve, changes" in answer["content"]
+    assert result.verdict == "approve"
