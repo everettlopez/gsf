@@ -1,0 +1,165 @@
+"""
+executor.py and the hands in agent.py: when an agent's step is work on a task
+it owns and has in progress, the executor does the work (once per plan block),
+and the outcome comes back as memories. A finished task becomes a promise to
+move it to review; a blocked one sends the agent to the board to say so. The
+executor never works on a teammate's task, at the board, in a talk or on a break.
+"""
+
+import pytest
+
+import agent as ag
+import project_board as pb
+from conftest import board_api_and_pages
+from executor import ExecResult, FakeExecutor
+
+PROGRESS = ExecResult("Built the hero section and the nav bar.", ["index.html", "styles.css"], None)
+DONE = ExecResult("The home page is complete.", ["index.html"], tests_passed=True)
+STUCK = ExecResult("Couldn't wire the contact form.", [], tests_passed=False,
+                   blocked_reason="the /contact endpoint doesn't exist yet")
+
+
+def _eve_at_her_desk(w, results, activity="9:00 am: Build the hero section"):
+    """Eve, with T-2 in progress, in office_2, on a work step of a 9-11 block."""
+    board_api_and_pages(w)
+    executor = FakeExecutor(results)
+    rt = ag.Agent.load("eve", w, executor=executor, workspace="workspaces/eve")
+    rt.agent["current_location"] = "office_2"
+    rt.broad_chunks = [{"activity": "work on T-2 'Design and implement the home page layout' "
+                                    "from 9:00 am to 11:00 am", "location": "office_2",
+                        "start_time": "9:00 am", "duration": 120, "target_agent": None}]
+    rt.chunk = {"activity": activity, "location": "office_2", "start_time": "9:00 am",
+                "duration": 15, "target_agent": None}
+    return rt, executor
+
+
+def _memories(rt):
+    return [m.description for m in rt.stream.memories]
+
+
+# --- when the hands work ---------------------------------------------------------
+def test_work_on_an_own_task_in_progress_goes_to_the_executor(fake_llm, isolated_data, w):
+    rt, executor = _eve_at_her_desk(w, [PROGRESS])
+    assert ag.work_on_task(rt, "9:00 am", w) is PROGRESS
+    assert executor.calls == [("eve", "T-2", "workspaces/eve")]
+    memories = _memories(rt)
+    assert ("Eve Smith worked on T-2 'Design and implement the home page layout' at 9:00 am: "
+            "Built the hero section and the nav bar.") in memories
+    assert "Eve Smith changed index.html, styles.css for T-2." in memories
+    assert not any("tests for T-2" in m for m in memories)            # none were run
+
+
+def test_one_session_per_plan_block(fake_llm, isolated_data, w):
+    rt, executor = _eve_at_her_desk(w, [PROGRESS])
+    ag.work_on_task(rt, "9:00 am", w)
+    rt.chunk = dict(rt.chunk, activity="9:15 am: Style the hero section", start_time="9:15 am")
+    assert ag.work_on_task(rt, "9:15 am", w) is None                  # same 9-11 block
+    rt.broad_chunks.append({"activity": "work on T-2 from 11:00 am to 12:00 pm", "location": "office_2",
+                            "start_time": "11:00 am", "duration": 60, "target_agent": None})
+    rt.chunk = dict(rt.chunk, activity="11:00 am: Add the footer", start_time="11:00 am")
+    ag.work_on_task(rt, "11:00 am", w)
+    assert len(executor.calls) == 2
+
+
+@pytest.mark.parametrize("change", [
+    {"activity": "9:00 am: Review T-1's API responses"},                      # Adam's task
+    {"activity": "9:00 am: take a coffee break"},
+    {"activity": "9:00 am: move T-2 to review on the project board", "board_work": True},
+    {"activity": "9:00 am: pair with Adam Beck on the API", "target_agent": "adam"},
+    {"location": "conference_room"},                                           # not at her desk
+])
+def test_the_hands_stay_in_their_lane(fake_llm, isolated_data, w, change):
+    rt, executor = _eve_at_her_desk(w, [PROGRESS])
+    if change.get("location"):
+        rt.agent["current_location"] = change["location"]
+    rt.chunk = {**rt.chunk, **{k: v for k, v in change.items() if k != "location"}}
+    assert ag.work_on_task(rt, "9:00 am", w) is None
+    assert executor.calls == []
+
+
+def test_only_a_task_in_progress_is_worked_on(fake_llm, isolated_data, w):
+    rt, executor = _eve_at_her_desk(w, [PROGRESS], activity="9:00 am: work on T-3")
+    assert pb.get_task(w, "T-3")["status"] == "todo"                   # not started at the board
+    assert ag.work_on_task(rt, "9:00 am", w) is None
+    rt.executor = None
+    rt.chunk["activity"] = "9:00 am: work on T-2"
+    assert ag.work_on_task(rt, "9:00 am", w) is None                   # no hands: the paper's agents
+    assert executor.calls == []
+
+
+def test_acting_on_a_work_step_uses_the_hands_but_talking_does_not(fake_llm, isolated_data, w):
+    rt, executor = _eve_at_her_desk(w, [PROGRESS])
+    rt.decision = "1"
+    rt.act(20, "9:00 am", w)
+    assert len(executor.calls) == 1
+    rt.decision = "3"                                                  # in a conversation
+    rt.chunk = dict(rt.chunk, start_time="11:00 am")
+    rt.act(21, "11:00 am", w)
+    assert len(executor.calls) == 1
+
+
+# --- what comes of it ---------------------------------------------------------------
+def test_a_finished_task_becomes_a_promise_to_move_it_to_review(fake_llm, isolated_data, w):
+    rt, executor = _eve_at_her_desk(w, [DONE])
+    ag.work_on_task(rt, "9:00 am", w)
+    assert "The tests for T-2 pass." in _memories(rt)
+    assert pb.commitments_for("eve") == [
+        "move T-2 to review on the project board: The home page is complete."]
+    assert pb.is_board_commitment(pb.commitments_for("eve")[0])
+
+    rt.broad_chunks[0]["start_time"] = "11:00 am"                      # a later block
+    assert ag.work_on_task(rt, "11:00 am", w) is None                  # nothing new to do
+    pb.add_note(w, "adam", "T-2", "The hero image is missing alt text")
+    ag.work_on_task(rt, "11:00 am", w)                                 # the board changed
+    assert len(executor.calls) == 2
+
+
+def test_a_blocked_task_sends_the_agent_to_the_board_with_the_reason(fake_llm, isolated_data, w):
+    rt, _ = _eve_at_her_desk(w, [STUCK])
+    ag.work_on_task(rt, "9:00 am", w)
+    assert "Eve Smith is stuck on T-2: the /contact endpoint doesn't exist yet." in _memories(rt)
+    assert "The tests for T-2 fail." in _memories(rt)
+    promise = "mark T-2 blocked on the project board: the /contact endpoint doesn't exist yet"
+    assert pb.commitments_for("eve") == [promise]
+
+    visit = ag.get_chunk_lazy(rt, "9:05 am", w)                         # the very next step
+    assert visit["board_work"] and visit["location"] == "conference_room"
+    assert visit["activity"] == f"9:05 am: {promise}"
+    prompt = pb.build_prompt(rt.agent, w, visit["activity"], "summary", "",
+                             commitments=pb.commitments_for("eve"))
+    assert f"- {promise}" in prompt                                     # the board visit knows why
+
+
+def test_a_blocked_report_waits_for_a_step_already_under_way(fake_llm, isolated_data, w):
+    rt, _ = _eve_at_her_desk(w, [STUCK])
+    rt.override = {"activity": "9:00 am: Build the hero section", "location": "office_2",
+                   "start_time": "9:00 am", "duration": 15, "target_agent": None}
+    ag.work_on_task(rt, "9:00 am", w)
+    assert rt.override["activity"] == "9:00 am: Build the hero section"
+    assert rt.queued["board_work"]
+
+
+# --- the executor interface ----------------------------------------------------------
+def test_the_fake_executor_plays_its_script_and_repeats_the_last_result():
+    class A:
+        agent = {"id": "eve"}
+
+    fake = FakeExecutor([PROGRESS, DONE])
+    task = {"id": "T-2"}
+    assert [fake.run(A, task, None) for _ in range(3)] == [PROGRESS, DONE, DONE]
+    assert FakeExecutor(lambda a, t, ws: STUCK).run(A, task, None) is STUCK
+
+
+def test_a_result_is_finished_only_when_tests_pass_and_nothing_blocks_it():
+    assert DONE.finished and not DONE.blocked
+    assert not PROGRESS.finished                                        # no tests run
+    assert STUCK.blocked and not STUCK.finished
+    assert not ExecResult("x", tests_passed=True, blocked_reason="no key").finished
+
+
+def test_many_changed_files_are_summarized(fake_llm, isolated_data, w):
+    files = [f"page{i}.html" for i in range(9)]
+    rt, _ = _eve_at_her_desk(w, [ExecResult("Added pages.", files)])
+    ag.work_on_task(rt, "9:00 am", w)
+    assert ("Eve Smith changed page0.html, page1.html, page2.html, page3.html, page4.html, "
+            "page5.html and 3 more for T-2.") in _memories(rt)

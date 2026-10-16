@@ -148,6 +148,12 @@ class Agent:
     queued: Optional[dict] = None
     commitments: list = field(default_factory=list)   # promises already planned around
 
+    # The hands (executor.py): who does the work on a task, and where. None
+    # means the agent only plans and talks, as in the paper.
+    executor: Optional[object] = None
+    workspace: Optional[object] = None
+    work_log: dict = field(default_factory=dict)       # task id -> work sessions on it
+
     # Per-step scratch space (filled in by the phases below)
     observations: list = field(default_factory=list)
     new_obs: list = field(default_factory=list)
@@ -161,7 +167,7 @@ class Agent:
         return self.agent["id"].upper()
 
     @classmethod
-    def load(cls, agent_id, world):
+    def load(cls, agent_id, world, executor=None, workspace=None):
         # Use the agent dict that lives inside world so there is a single source of
         # truth (previously load_agent() and load_world() gave two diverging copies).
         agent = world["agents"][agent_id]
@@ -173,6 +179,8 @@ class Agent:
             retriever=retriever,
             planner=Planner(agent, stream, retriever),
             reflector=Reflector(agent, stream, retriever),
+            executor=executor,
+            workspace=workspace,
         )
 
     # -- PHASE 1: PERCEIVE ---------------------------------------------------
@@ -277,9 +285,14 @@ class Agent:
 
     # -- PHASE 3: ACT (and REACT) --------------------------------------------
     def act(self, step, current_time, world):
-
+        """Carry out the step (or the reaction), then, if the step is work on a
+        task of the agent's own, let the hands do that work (see work_on_task)."""
         if self.decision == "3":
             return
+        self._carry_out(step, current_time, world)
+        work_on_task(self, current_time, world)
+
+    def _carry_out(self, step, current_time, world):
 
         if self.decision == "1":
             if self.chunk is None:
@@ -1081,3 +1094,115 @@ def refresh_board_step_text(rt, world):
         update_agent_state(rt.agent, {**rt.chunk, "activity": current}, world,
                            location=rt.agent["current_location"])
 
+
+# ---------------------------------------------------------------------------
+# THE HANDS: work on a task (executor.py)
+# ---------------------------------------------------------------------------
+def task_at_hand(rt, world):
+    """The task the agent's current step is work on, or None.
+
+    Only a task the agent owns and has in progress, worked on at their own
+    desk: not a break, a board visit, a talk, or time with a teammate. Helping
+    a teammate means working on their task together with them, which is a
+    conversation, never the hands taking it over (lanes)."""
+    chunk = rt.chunk
+    activity = (chunk or {}).get("activity") or ""
+    if (not chunk or "project" not in world or chunk.get("board_work") or chunk.get("target_agent")
+            or rt.agent["current_location"] != rt.agent.get("office")
+            or rt.planner._BREAK.search(activity)
+            or project_board.mentions_board_explicitly(activity)):
+        return None
+    tasks = {t["id"]: t for t in project_board.get_project(world)["tasks"]}
+    named = [tasks[i] for i in project_board.task_ids_in(activity) if i in tasks]
+    if any(t["assignee"] != rt.agent["id"] for t in named):
+        return None                                     # a teammate's task
+    candidates = named or project_board.open_tasks_for(world, rt.agent["id"])
+    working = [t for t in candidates if t["status"] == "in_progress"]
+    return working[0] if working else None
+
+
+def _work_block(rt, current_time):
+    """The plan block the step belongs to: one work session per block."""
+    if rt.override:
+        return rt.override.get("start_time")
+    broad = rt.planner.get_current_minute_chunk(current_time, rt.broad_chunks)
+    return broad.get("start_time") if broad else current_time
+
+
+def work_on_task(rt, current_time, world):
+    """Hand the task at hand to the executor, once per plan block, and remember
+    what came of it. The clock waits while the hands work.
+
+    A finished session (tests pass) becomes a promise to move the task to
+    review at the next board visit; a blocked one sends the agent to the board
+    to mark it blocked, with the reason. A task already finished isn't worked
+    on again until something on the board changes it (a teammate's note in
+    review, say). Returns the ExecResult, or None if there was no work to do."""
+    if rt.executor is None:
+        return None
+    task = task_at_hand(rt, world)
+    if task is None:
+        return None
+    sessions = rt.work_log.setdefault(task["id"], [])
+    block = _work_block(rt, current_time)
+    if sessions and sessions[-1]["block"] == block:
+        return None                                     # this block's session already ran
+    if sessions and sessions[-1]["result"].finished and sessions[-1]["history"] == len(task["history"]):
+        return None                                     # finished, and nothing new since
+
+    log.event(f"🔧 {rt.tag} works on {task['id']} '{task['title']}'")
+    with timed(f"{rt.tag} executor on {task['id']}"):
+        result = rt.executor.run(rt, task, rt.workspace)
+    sessions.append({"block": block, "time": current_time, "result": result,
+                     "history": len(task["history"])})
+    remember_work(rt, task, result, current_time)
+
+    if result.blocked:
+        head_to_board(rt, f"mark {task['id']} blocked on the project board: {result.blocked_reason}",
+                      current_time, world)
+    elif result.finished:
+        project_board.add_commitment(
+            rt.agent["id"], f"move {task['id']} to review on the project board: {result.summary}")
+    return result
+
+
+def remember_work(rt, task, result, current_time):
+    """The session's outcome, as observations in the agent's memory stream."""
+    name, ref = rt.agent["name"], f"{task['id']} '{task['title']}'"
+    lines = [f"{name} worked on {ref} at {current_time}: {result.summary.strip().rstrip('.')}."]
+    if result.files_changed:
+        shown = ", ".join(result.files_changed[:6])
+        more = f" and {len(result.files_changed) - 6} more" if len(result.files_changed) > 6 else ""
+        lines.append(f"{name} changed {shown}{more} for {task['id']}.")
+    if result.tests_passed is not None:
+        lines.append(f"The tests for {task['id']} {'pass' if result.tests_passed else 'fail'}.")
+    if result.blocked:
+        lines.append(f"{name} is stuck on {task['id']}: {result.blocked_reason.strip().rstrip('.')}.")
+    rt.stream.add_observations(lines)
+    for line in lines:
+        log.event(f"🔧 {line}")
+
+
+def head_to_board(rt, commitment, current_time, world, minutes=10):
+    """Go to the board right after this step to do `commitment` there (the
+    board visit is where the board changes; the promise tells it what to do)."""
+    room = project_board.board_location(world)
+    if room is None:
+        return
+    project_board.add_commitment(rt.agent["id"], commitment)
+    start = step_time(current_time)
+    visit = {
+        "activity": f"{start}: {commitment}",
+        "location": room,
+        "start_time": start,
+        "duration": minutes,
+        "target_agent": None,
+        "is_reaction": True,
+        "pinned": True,
+        "board_work": True,
+    }
+    if rt.override and rt.planner._parse_time(rt.override["start_time"]) <= rt.planner._parse_time(start)             < rt.planner._parse_time(rt.override["start_time"]) + timedelta(minutes=rt.override["duration"]):
+        rt.queued = visit                       # after the step already under way
+    else:
+        rt.override = visit
+    log.event(f"{rt.tag} heads to the board to: {commitment}")
