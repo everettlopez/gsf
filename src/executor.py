@@ -81,18 +81,34 @@ class Executor:
     def review(self, agent, task, workspace, owner_name=""):
         raise NotImplementedError
 
-    def available(self):
-        """Can this executor take another session? (See Budgeted.)"""
+    def available(self, kind="work"):
+        """Can this executor take another session of this kind, "work" or
+        "review"? (See Budgeted.)"""
         return True
+
+
+REVIEW_RESERVE = 2                  # sessions only reviews may spend
 
 
 class SessionBudget:
     """How many executor sessions (work or review) one run may spend, shared
-    by every agent. None means no limit."""
+    by every agent. None means no limit.
 
-    def __init__(self, sessions=None):
+    The last few are kept for reviews: work that has nobody to review it
+    waits in review all day. In the 75-step run the last session finished
+    Eve's T-3, and it sat in review from 9:45 until the run ended."""
+
+    def __init__(self, sessions=None, reserve=None):
         self.left = sessions
         self.spent = 0.0                            # estimated $ so far
+        if reserve is None:
+            reserve = 0 if sessions is None else min(REVIEW_RESERVE, sessions // 4)
+        self.reserve = reserve
+
+    def allows(self, kind="work"):
+        if self.left is None:
+            return True
+        return self.left > (self.reserve if kind == "work" else 0)
 
     def take(self):
         if self.left is None:
@@ -109,8 +125,8 @@ class Budgeted(Executor):
     def __init__(self, inner, budget):
         self.inner, self.budget = inner, budget
 
-    def available(self):
-        return self.budget.left is None or self.budget.left > 0
+    def available(self, kind="work"):
+        return self.budget.allows(kind)
 
     def run(self, agent, task, workspace):
         self.budget.take()

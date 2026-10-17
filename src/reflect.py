@@ -12,6 +12,7 @@ When it runs (see main.py, REFLECTION_THRESHOLD) an agent:
 """
 
 import re
+from datetime import datetime
 
 import llm
 import log
@@ -91,6 +92,14 @@ def parse_insights(text, valid_ids, agent_name, limit=NUM_INSIGHTS):
     return insights[:limit]
 
 
+def _time_of(memory):
+    """'2026-10-17T08:15:00' -> '8:15 am', the sim's own way of writing a time."""
+    try:
+        return datetime.fromisoformat(memory.created_at).strftime("%I:%M %p").lstrip("0").lower()
+    except (TypeError, ValueError):
+        return "earlier"
+
+
 def _normalize_pronoun(line, name):
     """Reflections are stored as third-person statements about the agent."""
     for pronoun, replacement in (("He is ", f"{name} is "), ("She is ", f"{name} is "),
@@ -152,10 +161,16 @@ Given only the information above, what are {NUM_QUESTIONS} most salient high-lev
         return parse_questions(llm.generate(prompt, options=llm.CTX))
 
     def generate_insights(self, memories):
-        memory_text = "\n".join(f"{m.id}. {m.description}" for m in memories)
+        # In time order, each with its time: the board is seen again every visit,
+        # so "T-5 is todo" and, later, "T-5 is review" are both in the stream.
+        # Without the times the 75-step run's reflections took that for "a
+        # history of inconsistent status updates" on the board.
+        memories = sorted(memories, key=lambda m: m.created_at)
+        memory_text = "\n".join(f"{m.id}. ({_time_of(m)}) {m.description}" for m in memories)
 
         prompt = f"""
-Statements about {self.name}
+Statements about {self.name}, oldest first. A later statement about the same thing \
+replaces an earlier one (a task moves from todo to in progress to review to done).
 
 {memory_text}
 

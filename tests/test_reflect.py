@@ -60,3 +60,21 @@ def test_insights_with_a_leading_citation_or_a_heading():
         ("The team reviews each other's work.", [3]),
         ("Adam Beck owns the build", [2]),
     ]
+
+
+def test_insights_see_the_statements_in_time_order_with_their_times(fake_llm, isolated_data,
+                                                                     monkeypatch):
+    import clock
+    import llm
+
+    reflector, stream = _reflector()
+    clock.set_time("8:40 am")
+    later = stream.add_observations(["Task T-5 on the project board is review."])[0]
+    clock.set_time("7:40 am")
+    earlier = stream.add_observations(["Task T-5 on the project board is todo."])[0]
+    prompts = []
+    monkeypatch.setattr(llm, "generate", lambda prompt, **_: prompts.append(prompt) or "")
+    reflector.generate_insights([later, earlier])
+    assert (f"{earlier.id}. (7:40 am) Task T-5 on the project board is todo.\n"
+            f"{later.id}. (8:40 am) Task T-5 on the project board is review.") in prompts[0]
+    assert "A later statement about the same thing replaces an earlier one" in prompts[0]

@@ -85,6 +85,22 @@ def test_duplicate_titles_are_refused(w):
         pb.create_task(w, "eve", "set up the API!")
 
 
+def test_a_title_a_word_away_from_one_on_the_board_is_a_duplicate(w):
+    pb.create_task(w, "eve", "Integrate content from JSON file into layout", area="frontend")
+    with pytest.raises(pb.BoardError, match="T-1 .* is already on the board"):
+        pb.create_task(w, "adam", "Integrate content from JSON into layout", area="frontend")
+
+
+@pytest.mark.parametrize("first, second", [
+    ("Design and implement the home page layout", "Design and implement the about page layout"),
+    ("Task 0", "Task 1"),
+    ("Build the contact section", "Test the contact section"),
+])
+def test_sibling_tasks_are_not_duplicates(w, first, second):
+    pb.create_task(w, "eve", first)
+    assert pb.create_task(w, "eve", second)["id"] == "T-2"
+
+
 def test_bad_fields_fall_back_to_safe_values(w):
     t = pb.create_task(w, "adam", "Thing", area="marketing", priority="urgent",
                        depends_on=["T-99"])

@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACES = ROOT / "workspaces"
@@ -169,6 +169,10 @@ class Workspace:
     def resolve(self, relative):
         """The path inside the checkout, or WorkspaceError for anything outside
         it (absolute paths, .., links out) or inside .git."""
+        # A drive or root ("C:/...", "\\\\server\\...") is absolute on Windows; on
+        # Linux it would quietly become a folder named "C:" in the checkout.
+        if PureWindowsPath(relative or ".").anchor:
+            raise WorkspaceError(f"{relative!r} is outside the workspace")
         target = (self.path / (relative or ".")).resolve()
         base = self.path.resolve()
         if target != base and base not in target.parents:

@@ -453,3 +453,86 @@ def test_a_promise_about_later_doesnt_send_anyone_to_the_board_now(fake_llm, iso
     assert rt.queued is None
     ag.queue_board_visit(rt, "I'll move T-2 to review now", "9:00 am", w)
     assert rt.queued["board_work"]
+
+
+# --- reviews when the budget runs low or out ------------------------------------------
+def test_the_last_sessions_are_kept_for_reviews():
+    from executor import Budgeted, SessionBudget
+
+    budget = SessionBudget(8)
+    hands = Budgeted(FakeExecutor(), budget)
+    assert budget.reserve == 2
+    for _ in range(6):
+        assert hands.available("work")
+        budget.take()
+    assert not hands.available("work") and hands.available("review")
+    budget.take()
+    budget.take()
+    assert not hands.available("review")
+    assert SessionBudget(3).reserve == 0 and SessionBudget().allows("work")   # small or no cap
+
+
+def test_with_only_the_reserve_left_the_hands_review_but_dont_work(fake_llm, isolated_data, w):
+    from executor import Budgeted, ReviewResult, SessionBudget
+
+    rt, fake = _eve_at_her_desk(w, [PROGRESS])
+    rt.executor = Budgeted(fake, SessionBudget(1, reserve=1))
+    assert ag.work_on_task(rt, "9:00 am", w) is None and fake.calls == []    # her own work waits
+    _adams_task_in_review(w)
+    assert isinstance(ag.work_on_task(rt, "9:00 am", w), ReviewResult)
+    assert fake.review_calls == [("eve", "T-1")]
+
+
+def test_with_the_hands_done_a_teammates_task_is_reviewed_at_the_board(fake_llm, isolated_data, w):
+    from executor import Budgeted, SessionBudget
+
+    rt, fake = _eve_at_her_desk(w, [PROGRESS])
+    rt.executor = Budgeted(fake, SessionBudget(0))
+    task = _adams_task_in_review(w)
+    assert ag.work_on_task(rt, "9:00 am", w) is None
+    assert rt.executor is None and rt.hands_out and fake.review_calls == []
+    promise = pb.commitments_for("eve")[0]
+    assert promise.startswith("review Adam Beck's T-1 on the project board: approve T-1 if")
+    assert pb.is_board_commitment(promise)
+    assert rt.override["board_work"]
+
+    rt.broad_chunks[0]["start_time"] = "11:00 am"
+    assert ag.work_on_task(rt, "11:00 am", w) is None                   # once per review round
+    assert len(pb.commitments_for("eve")) == 1
+    pb.apply_action(w, w["agents"]["eve"], {"action": "approve_task", "task_id": "T-1"})
+    assert task["approved_by"] == ["eve"]                               # the card is enough now
+
+
+def test_an_agent_without_hands_never_reviews_at_the_board_for_them(fake_llm, isolated_data, w):
+    rt, _ = _eve_at_her_desk(w, [PROGRESS])
+    rt.executor = None                                                  # GA_EXECUTOR=none
+    _adams_task_in_review(w)
+    assert ag.work_on_task(rt, "9:00 am", w) is None
+    assert pb.commitments_for("eve") == []
+
+
+def test_with_hands_an_approval_needs_their_review_first(fake_llm, isolated_data, w):
+    from executor import ReviewResult
+
+    rt, executor = _eve_at_her_desk(w, [PROGRESS])
+    executor.reviews = [ReviewResult("changes", "The build misses a check.", ["test a missing key"]),
+                        ReviewResult("approve", "The branch does what the task says")]
+    task = _adams_task_in_review(w)
+    approve = {"action": "approve_task", "task_id": "T-1"}
+    eve = w["agents"]["eve"]
+    rt.chunk = dict(rt.chunk, board_work=True)                          # at the board first
+    ag.work_on_task(rt, "9:00 am", w)
+    with pytest.raises(pb.BoardError, match="hasn't been reviewed yet"):
+        pb.apply_action(w, eve, approve)
+
+    rt.chunk = dict(rt.chunk, board_work=False)
+    ag.work_on_task(rt, "9:00 am", w)                                   # verdict: changes
+    with pytest.raises(pb.BoardError, match="hasn't been reviewed yet"):
+        pb.apply_action(w, eve, approve)
+
+    pb.update_status(w, "adam", "T-1", "in_progress")
+    pb.update_status(w, "adam", "T-1", "review", note="added the test")  # second round
+    rt.broad_chunks[0]["start_time"] = "11:00 am"
+    ag.work_on_task(rt, "11:00 am", w)                                  # verdict: approve
+    pb.apply_action(w, eve, approve)
+    assert task["approved_by"] == ["eve"]

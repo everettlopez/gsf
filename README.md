@@ -98,10 +98,14 @@ refused unless `GA_SANDBOX=local`.
 Reviews are grounded in the code: at a desk-work step, a teammate's task waiting in review
 comes first. The reviewer's hands check out the teammate's published branch, read the diff
 and run the tests, and the verdict becomes a memory and a promise for the board (approve,
-or leave a note asking for changes); approving still happens at the board. The hands work
-from the lane skills in `skills/` (a shared contract, frontend, backend, deploy, review),
-picked by the task's area. A run spends at most `GA_EXECUTOR_MAX_SESSIONS` executor sessions
-(default 20 with local hands), shared by both agents. The GitHub version of this flow is
+or leave a note asking for changes); approving still happens at the board, and while the
+reviewer's hands can still review, the board only takes an approval they backed. The hands
+work from the lane skills in `skills/` (a shared contract, the company's facts, frontend,
+backend, deploy, review), picked by the task's area. A run spends at most
+`GA_EXECUTOR_MAX_SESSIONS` executor sessions (default 20 with local hands), shared by both
+agents; the last two (a quarter, for a small budget) are kept for reviews. Once the budget is
+spent, a teammate's task in review is reviewed at the board from its card, as in the paper,
+so finished work never waits there for the rest of the day. The GitHub version of this flow is
 designed, not built: see [docs/github-integration.md](docs/github-integration.md).
 
 What the hands find changes what the agent does next: finished work (the tests pass when

@@ -155,6 +155,8 @@ class Agent:
     work_log: dict = field(default_factory=dict)       # task id -> work sessions on it
     shipped: set = field(default_factory=set)          # task ids merged into main
     reviewed: dict = field(default_factory=dict)       # teammate task id -> review round done
+    hands_out: bool = False                            # had hands, done for this run
+    saved_for_reviews: bool = False                    # told the budget left is for reviews
     team: list = field(default_factory=list)           # (name, area) of everyone on the team
     world: Optional[dict] = None                       # the world the agent lives in
     done_trips: set = field(default_factory=set)       # approved task ids already headed to done
@@ -1164,12 +1166,12 @@ def work_on_task(rt, current_time, world):
     to mark it blocked, with the reason. A task already finished isn't worked
     on again until something on the board changes it (a teammate's note in
     review, say). Returns the ExecResult, or None if there was no work to do."""
+    if rt.executor is not None and not rt.executor.available("review"):
+        _hands_done(rt, "the executor session budget is spent")
+    project_board.set_can_review(rt.agent["id"], rt.executor is not None)
     if rt.executor is None:
-        return None
-    if not rt.executor.available():
-        if not getattr(rt.executor, "_said_spent", False):
-            rt.executor._said_spent = True
-            log.event(f"{rt.tag}'s hands are done for this run: the executor session budget is spent")
+        if rt.hands_out:
+            review_at_the_board(rt, current_time, world)
         return None
     block = _work_block(rt, current_time)
     if any(s["block"] == block for log_ in rt.work_log.values() for s in log_):
@@ -1179,6 +1181,12 @@ def work_on_task(rt, current_time, world):
         return review_teammate_work(rt, review, block, current_time, world)
     task = task_at_hand(rt, world)
     if task is None:
+        return None
+    if not rt.executor.available("work"):
+        if not rt.saved_for_reviews:
+            rt.saved_for_reviews = True
+            log.event(f"{rt.tag}'s hands only review from now on: the rest of the session "
+                      f"budget is kept for reviews")
         return None
     sessions = rt.work_log.setdefault(task["id"], [])
     if sessions and sessions[-1]["block"] == block:
@@ -1255,8 +1263,18 @@ def _use_hands(rt, session):
         return session()
     except (LLMError, WorkspaceError) as e:
         log.warn(f"{rt.tag}'s hands stop for this run: {e}")
-        rt.executor = None
+        rt.executor, rt.hands_out = None, True
+        project_board.set_can_review(rt.agent["id"], False)
         return None
+
+
+def _hands_done(rt, why):
+    """The hands are done for this run (the session budget is spent). The
+    agent carries on as in the paper, reviewing a teammate's work at the board
+    from what the card says (review_at_the_board)."""
+    log.event(f"{rt.tag}'s hands are done for this run: {why}")
+    rt.executor, rt.hands_out = None, True
+    project_board.set_can_review(rt.agent["id"], False)
 
 
 def remember_work(rt, task, result, current_time):
@@ -1344,9 +1362,7 @@ def ship_approved_work(rt, world):
 # ---------------------------------------------------------------------------
 # THE HANDS: review a teammate's task
 # ---------------------------------------------------------------------------
-def _review_round(task):
-    """How many times the task has gone to review: a new round needs a new review."""
-    return sum(1 for e in task["history"] if e.get("event", "").endswith("-> review"))
+_review_round = project_board.review_round
 
 
 def review_at_hand(rt, world):
@@ -1387,6 +1403,8 @@ def review_teammate_work(rt, task, block, current_time, world):
         log.event(f"🔍 {line}")
         return result
     rt.reviewed[task["id"]] = _review_round(task)
+    if result.verdict == "approve":
+        project_board.record_review_approved(rt.agent["id"], task)
     lines = [f"{name} reviewed {ref} at {current_time}: {short(result.summary).rstrip('.')}."]
     if result.tests_passed is not None:
         lines.append(f"The tests on {task['id']}'s branch {'pass' if result.tests_passed else 'fail'}.")
@@ -1402,6 +1420,23 @@ def review_teammate_work(rt, task, block, current_time, world):
     for line in lines:
         log.event(f"🔍 {line}")
     return result
+
+
+def review_at_the_board(rt, current_time, world):
+    """With the hands done for the run, a teammate's task in review is reviewed
+    at the board from what the card says, as in the paper: approve it if the
+    owner's note shows it finished, or ask for what is missing. Once per review
+    round. In the 75-step run the budget ran out at 9:45 with Eve's T-3 in
+    review, and it was still waiting there at the end of the day."""
+    task = review_at_hand(rt, world)
+    if task is None:
+        return None
+    rt.reviewed[task["id"]] = _review_round(task)
+    owner = world["agents"][task["assignee"]]["name"]
+    head_to_board(rt, f"review {owner}'s {task['id']} on the project board: approve {task['id']} "
+                      f"if the note on the card shows it is finished, or leave a note asking "
+                      f"{owner} for what is missing", current_time, world)
+    return task
 
 
 def finish_approved_tasks(rt, current_time, world):

@@ -37,6 +37,7 @@ adam_seed_memories = [
     "Adam Beck prefers to check in with Eve Smith one-on-one.",
     # The team's goal and how the team organizes work
     "Adam Beck's team has been asked to build and ship the company's one-page website.",
+    "The company is Beck & Smith, a small software studio; its contact email is hello@becksmith.example.",
     "Adam Beck is responsible for the website's backend: the content data and the build that checks and ships the site.",
     "Eve Smith is responsible for the website's frontend.",
     "The team tracks its work on the project board in the conference room.",
@@ -76,6 +77,7 @@ eve_seed_memories = [
     "Eve Smith is building a feature with Adam Beck.",
     # The team's goal and how the team organizes work
     "Eve Smith's team has been asked to build and ship the company's one-page website.",
+    "The company is Beck & Smith, a small software studio; its contact email is hello@becksmith.example.",
     "Eve Smith is responsible for the website's frontend: the page's layout, styles, and look and feel.",
     "Adam Beck is responsible for the website's backend.",
     "The team tracks its work on the project board in the conference room.",

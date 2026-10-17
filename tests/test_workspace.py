@@ -44,7 +44,7 @@ def test_a_workspace_is_a_checkout_of_the_sandbox_repo(root):
     assert Workspace(ADAM, root, runner=Recorder()).origin == eve.origin   # one shared origin
 
 
-@pytest.mark.parametrize("path", ["../adam/notes.txt", "/etc/passwd", "C:/Windows/win.ini",
+@pytest.mark.parametrize("path", ["../adam/notes.txt", "/etc/passwd", "C:/Windows/win.ini", "C:notes.txt",
                                   ".git/config", "sub/../../escape.txt"])
 def test_file_access_stays_inside_the_checkout(root, path):
     eve = Workspace(EVE, root, runner=Recorder())

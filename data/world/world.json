@@ -94,7 +94,7 @@
   "project": {
     "name": "Company Website",
     "goal": "Build and ship the company's one-page website",
-    "description": "A single static web page for the company: a header with the company name, a short about section, the team, and a contact section with an email link. The page's text lives in a content file (JSON) that is kept apart from the layout, and a build step fills the layout with the content, checks the result, and puts the finished site in dist/. Plain HTML and CSS, built and tested with Python's standard library: no server, no outside services.",
+    "description": "A single static web page for Beck & Smith, a small software studio (contact email hello@becksmith.example): a header with the company name, a short about section, the team, and a contact section with an email link. The page's text lives in a content file (JSON) that is kept apart from the layout, and a build step fills the layout with the content, checks the result, and puts the finished site in dist/. Plain HTML and CSS, built and tested with Python's standard library: no server, no outside services.",
     "status": "not_started",
     "tasks": []
   }

@@ -331,6 +331,45 @@ def clear_tested(agent_id=None):
         _tested.pop(agent_id, None)
 
 
+# Grounded reviews (agent.review_teammate_work): which review round of a
+# teammate's task each agent's hands read, ran and found ready to approve.
+# While an agent's hands can still review, approving at the board needs one:
+# in the 75-step run Adam approved T-2 at the board on a plan line alone, and
+# it was merged without anyone reading it.
+_approved_in_review = {}     # agent id -> {task id: review round}
+_can_review = set()          # agent ids whose hands can still review
+
+
+def review_round(task):
+    """How many times the task has gone to review: a new round needs a new review."""
+    return sum(1 for e in task["history"] if e.get("event", "").endswith("-> review"))
+
+
+def set_can_review(agent_id, able):
+    (_can_review.add if able else _can_review.discard)(agent_id)
+
+
+def record_review_approved(agent_id, task):
+    _approved_in_review.setdefault(agent_id, {})[task["id"]] = review_round(task)
+
+
+def review_backs_approval(agent_id, task):
+    """May the agent approve the task at the board? Always, without hands (the
+    card is all there is to go on, as in the paper); with hands, only once they
+    approved this round of it."""
+    return (agent_id not in _can_review
+            or _approved_in_review.get(agent_id, {}).get(task["id"]) == review_round(task))
+
+
+def clear_reviews(agent_id=None):
+    if agent_id is None:
+        _approved_in_review.clear()
+        _can_review.clear()
+    else:
+        _approved_in_review.pop(agent_id, None)
+        _can_review.discard(agent_id)
+
+
 def add_commitment(agent_id, text):
     items = _commitments.setdefault(agent_id, [])
     if all(c["text"] != text for c in items):
@@ -404,7 +443,7 @@ def create_task(world, agent_id, title, description="", area="general",
 
     key = _normalize(title)
     for existing in project["tasks"]:
-        if _normalize(existing["title"]) == key:
+        if _normalize(existing["title"]) == key or _same_task_title(existing["title"], title):
             raise BoardError(f"{existing['id']} '{existing['title']}' is already on the board")
 
     area = area if area in AREAS else "general"
@@ -600,6 +639,21 @@ def add_board_note(world, agent_id, note):
 
 def _similar_words(a, b, share=0.6):
     wa, wb = set(re.findall(r"[a-z0-9-]{3,}", a.lower())), set(re.findall(r"[a-z0-9-]{3,}", b.lower()))
+    return bool(wa and wb) and len(wa & wb) / len(wa | wb) >= share
+
+
+_TITLE_FILLER = {"a", "an", "the", "and", "for", "from", "into", "to", "of", "on", "in", "with",
+                 "its", "our", "file", "files"}
+
+
+def _same_task_title(a, b, share=0.8):
+    """Two titles for the same work, a word or two apart. In the 75-step run
+    Adam added T-6 'Integrate content from JSON into layout' next to Eve's T-3
+    'Integrate content from JSON file into layout'. The bar is high so that
+    sibling tasks ('the home page layout', 'the about page layout') stay apart."""
+    def words(title):
+        return set(re.findall(r"[a-z0-9]+", title.lower())) - _TITLE_FILLER
+    wa, wb = words(a), words(b)
     return bool(wa and wb) and len(wa & wb) / len(wa | wb) >= share
 
 
@@ -1222,6 +1276,11 @@ def apply_action(world, agent, action):
         return f"{name} updated the {', '.join(changed)} of task {t['id']} '{t['title']}' on the project board."
 
     if kind == "approve_task":
+        current = get_task(world, action.get("task_id"))
+        if (current["status"] == "review" and current["assignee"] != aid
+                and not review_backs_approval(aid, current)):
+            raise BoardError(f"{current['id']} hasn't been reviewed yet: read and test its branch "
+                             f"at your desk first, then approve it here")
         t = approve_task(world, aid, action.get("task_id"), action.get("note", ""))
         return (f"{name} approved {_agent_name(world, t['assignee'])}'s task {t['id']} "
                 f"'{t['title']}' on the project board.")

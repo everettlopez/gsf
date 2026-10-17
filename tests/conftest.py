@@ -151,6 +151,7 @@ def w(world):
         project_board.clear_workload_changed()
         project_board.clear_commitments()
         project_board.clear_tested()
+        project_board.clear_reviews()
         conversation.clear_talks()
 
     reset()

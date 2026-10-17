@@ -192,6 +192,7 @@ def main():
     project_board.clear_workload_changed()      # nothing carried over from a previous run
     project_board.clear_commitments()
     project_board.clear_tested()
+    project_board.clear_reviews()
     clear_talks()
 
     for rt in runtimes:

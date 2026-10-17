@@ -16,6 +16,16 @@ One static page, built from two halves that meet at a contract:
 | `dist/` | backend (generated) | The finished site: `index.html` and `styles.css`. Not edited by hand |
 | `tests/` | both | `unittest` tests, one file per area (`test_page.py`, `test_build.py`, ...) |
 
+## The company
+
+These are settled; use them as they are, and don't ask a teammate for them.
+
+- Name: Beck & Smith (`company_name`)
+- Contact email: hello@becksmith.example (`contact_email`)
+- Team: Adam Beck, backend engineer; Eve Smith, frontend engineer (`team`)
+- The tagline and the about copy are yours to write: short and plain, about a small
+  software studio that builds simple, reliable websites.
+
 ## The contract between template and content
 
 - A placeholder is `{{key}}`, lowercase with underscores: `{{company_name}}`, `{{about}}`.
