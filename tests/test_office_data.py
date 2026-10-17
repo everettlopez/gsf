@@ -180,3 +180,34 @@ def test_a_task_merges_cleanly_after_newer_snapshots(fake_llm, world, story, iso
     assert "site/pages/index.html" in files
     newest = json.loads(eve.git("show", "origin/main:data/snapshot.json"))
     assert newest["generated"]["time"] == "9:00 am"
+
+
+@needs_git
+def test_a_run_with_real_workspaces_publishes_the_office_every_hour(fake_llm, isolated_data,
+                                                                     monkeypatch, capsys, tmp_path):
+    import agent as ag
+    import executor
+    import main
+
+    root = tmp_path / "workspaces"
+
+    def hands(agent, budget=None):
+        return executor.FakeExecutor(), Workspace(agent, root, runner=Recorder())
+
+    monkeypatch.setattr(main, "hands_for", hands)
+    monkeypatch.setattr(main, "NUM_STEPS", 13)
+    monkeypatch.setattr(ag, "REFLECTION_THRESHOLD", None)
+    log.timings.clear()
+    main.main()
+    capsys.readouterr()
+
+    origin = root / "origin.git"
+    subjects = ws._git(origin, "log", "--format=%s", "main").splitlines()
+    snapshots = [s for s in subjects if s.startswith("Snapshot of the office")]
+    # at the start, after the first hour (step 12: 7:55 am) and at the end (step 13: 8:00 am)
+    assert snapshots == ["Snapshot of the office: Thursday 8:00 am",
+                         "Snapshot of the office: Thursday 7:55 am",
+                         "Snapshot of the office: Thursday 7:00 am"]
+    shot = json.loads(ws._git(origin, "show", "main:data/snapshot.json"))
+    assert len(shot["timeline"]) == 13 * 2 and shot["agents"][0]["plan"]
+    assert chronicle.load()["steps"] == shot["timeline"]

@@ -9,7 +9,6 @@ import chronicle
 import clock
 import log
 import main
-import persona
 import project_board as pb
 from memory_stream import MemoryStream
 

@@ -438,7 +438,7 @@ def new_task(task_id, agent_id, title, description="", area="general",
         "approved_by": [],
         "created_at": now,
         "updated_at": now,
-        "history": [{"time": now, "agent": agent_id, "event": "created"}],
+        "history": [{"time": now, "day": clock.day(), "agent": agent_id, "event": "created"}],
     }
 
 
