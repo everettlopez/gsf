@@ -79,7 +79,7 @@ def test_the_combined_site_is_built_and_tested(sandbox, tmp_path):
     (out / "tests").mkdir()
     runner = Runner()
     results = preview.build_and_test(out, runner)
-    assert runner.commands == ["python build.py", "python -m unittest discover -s tests"]
+    assert runner.commands == ["python build.py", "python run_tests.py"]
     assert set(results) == {"build", "tests"}
     assert preview.page(out) == out / "site" / "template.html"          # not built: the layout
     (out / "dist").mkdir()

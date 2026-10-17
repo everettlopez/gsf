@@ -18,10 +18,12 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+import chronicle  # noqa: E402
 import clock  # noqa: E402
 import conversation  # noqa: E402
 import llm  # noqa: E402
 import memory_stream  # noqa: E402
+import persona  # noqa: E402
 import project_board  # noqa: E402
 import world as world_module  # noqa: E402
 
@@ -98,9 +100,11 @@ def fake_generate(prompt, options=None, format=None):
 @pytest.fixture(autouse=True)
 def reset_clock():
     """The sim clock is module state; tests that move it shouldn't leak."""
-    clock.set_time("7:00 am")
+    clock.reset("7:00 am")
     yield
-    clock.set_time("7:00 am")
+    clock.reset("7:00 am")
+    persona.clear_previous_days()          # a multi-day run's "yesterday"
+    chronicle.stop()
 
 
 @pytest.fixture

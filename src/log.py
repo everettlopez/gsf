@@ -54,9 +54,16 @@ def warn(text):
     _emit(f"  ⚠ {text}", QUIET, stderr=True)
 
 
+# Called with every event's text, whatever the verbosity (chronicle.py keeps
+# them for the website).
+listeners = []
+
+
 def event(text, min_level=INFO):
     """A notable thing that happened during the step (indented one level)."""
     _emit(f"  ▸ {text}", min_level)
+    for listener in listeners:
+        listener(text)
 
 
 # --- Structure -------------------------------------------------------------

@@ -16,6 +16,16 @@ changes:
 The per-agent switches (PAPER_STRICT, EAGER_DECOMPOSITION, REFLECTION_THRESHOLD,
 ...) are at the top of agent.py.
 
+A run is one workday by default (GA_STEPS steps from START_TIME), or
+GA_DAYS whole workdays (DAY_STEPS steps each, 7:00 am to 5:00 pm): each new
+day the agents plan afresh from the day before (agent.start_day), while their
+memories, the board and the hands' work carry over.
+
+Along the way the chronicle (chronicle.py) keeps the story of the run, and
+with real hands (GA_EXECUTOR=local) a snapshot of the office (snapshot.py)
+goes to the sandbox every hour of sim time, for the website the agents are
+building about their own working days.
+
 Verbosity: set GA_LOG=quiet|info|debug (default info). See log.py.
 """
 
@@ -24,11 +34,15 @@ import time
 from datetime import timedelta
 
 import agent
+import chronicle
 import clock
 import log
+import persona
 import project_board
-from agent import (TASK_ID, Agent, initial_planning, meeting_pending, note_board_use, queue_board_visit,
-                   replan_after_board, replan_after_conversation, settle_after_conversation)
+import snapshot
+from agent import (TASK_ID, Agent, end_day, initial_planning, meeting_pending, note_board_use,
+                   queue_board_visit, replan_after_board, replan_after_conversation,
+                   settle_after_conversation, start_day)
 from clock import STEP_MINUTES, step_time
 from executor import hands_for, run_budget
 from conversation import clear_talks, record_talk, run_conversation, talked_recently_ids
@@ -41,6 +55,8 @@ from world import load_world, save_world
 # ---------------------------------------------------------------------------
 START_TIME = "7:00 am"
 NUM_STEPS = 30               # GA_STEPS overrides it for one run
+DAY_STEPS = 120             # a whole workday, 7:00 am to 5:00 pm (GA_DAYS)
+SNAPSHOT_EVERY = 12         # steps between snapshots for the website: an hour
 STEP_DELAY_SECONDS = 0      # wall-clock padding per step (0 = run flat out)
 
 
@@ -78,6 +94,7 @@ def resolve_conversations(runtimes, step, current_time, world):
         with timed(f"{rt.tag}<->{other.tag} conversation (LLM per turn)"):
             history = run_conversation(rt, other, current_time, rt.reaction, world)
         remember_conversation(rt, other, current_time, rt.reaction)
+        where = rt.agent["current_location"]
 
         # One call: shared meeting (if any) + each agent's own commitment
         outcomes = {"meeting": None, "commitments": {}}
@@ -88,6 +105,8 @@ def resolve_conversations(runtimes, step, current_time, world):
                     transcript, rt.agent, other.agent, world, current_time
                 )
             log_outcomes(rt, other, outcomes)
+        if history:
+            chronicle.note_conversation(where, rt.reaction, history, outcomes)
 
         busy.update({rt.agent["id"], other.agent["id"]})
 
@@ -174,38 +193,93 @@ def schedule_meeting(rt, other, meeting, current_time):
 
 
 # ---------------------------------------------------------------------------
+# THE WEBSITE'S DATA
+# ---------------------------------------------------------------------------
+def sandbox_root(runtimes):
+    """Where the sandbox repository is, if the agents have real hands."""
+    for rt in runtimes:
+        root = getattr(rt.workspace, "root", None)
+        if root is not None:
+            return root
+    return None
+
+
+def publish_snapshot(runtimes, world):
+    """The office as it is now, committed to the sandbox's main for the
+    website (snapshot.py). Nothing without real hands; a failure is a warning,
+    never the end of the run."""
+    from workspace import WorkspaceError
+
+    root = sandbox_root(runtimes)
+    if root is None:
+        return
+    shot = snapshot.build(world, chronicle.data(),
+                          streams={rt.agent["id"]: rt.stream for rt in runtimes},
+                          plans={rt.agent["id"]: rt.broad_chunks for rt in runtimes})
+    try:
+        if snapshot.export(shot, root):
+            log.debug(f"snapshot of the office published ({shot['generated']['day_name']} "
+                      f"{shot['generated']['time']})")
+    except WorkspaceError as e:
+        log.warn(f"couldn't publish the snapshot of the office: {e}")
+
+
+def _day_plans(runtimes):
+    return {rt.agent["id"]: [c.get("activity") for c in rt.broad_chunks] for rt in runtimes}
+
+
+def run_length():
+    """(days, steps per day): GA_DAYS whole workdays (each GA_STEPS steps if
+    that is set too), else one day of GA_STEPS (or NUM_STEPS) steps."""
+    days = int(os.environ.get("GA_DAYS") or 0)
+    steps = int(os.environ.get("GA_STEPS") or 0)
+    if days > 0:
+        return days, steps or DAY_STEPS
+    return 1, steps or NUM_STEPS
+
+
+# ---------------------------------------------------------------------------
 # MAIN LOOP
 # ---------------------------------------------------------------------------
 def main():
-    steps = int(os.environ.get("GA_STEPS") or NUM_STEPS)
+    days, day_steps = run_length()
+    steps = days * day_steps
     world = load_world()
     budget = run_budget()                       # one cap on executor sessions for the run
     runtimes = [Agent.load(agent_id, world, *hands_for(world["agents"][agent_id], budget))
                 for agent_id in ("adam", "eve")]
 
-    log.banner(f"Generative Agents · {START_TIME} · {steps} steps x {STEP_MINUTES} min")
+    length = (f"{days} days x {day_steps} steps" if days > 1 else f"{steps} steps")
+    log.banner(f"Generative Agents · {START_TIME} · {length} x {STEP_MINUTES} min")
     log.info(f"  PAPER_STRICT={agent.PAPER_STRICT} EAGER_DECOMPOSITION={agent.EAGER_DECOMPOSITION} "
              f"REACT_COOLDOWN_STEPS={agent.REACT_COOLDOWN_STEPS} REFLECTION_THRESHOLD={agent.REFLECTION_THRESHOLD}")
 
     current_time = START_TIME
-    clock.set_time(current_time)
+    clock.reset(current_time)
     project_board.clear_workload_changed()      # nothing carried over from a previous run
     project_board.clear_commitments()
     project_board.clear_tested()
     project_board.clear_reviews()
+    persona.clear_previous_days()
     clear_talks()
+    chronicle.start(world)
 
     for rt in runtimes:
         # What is already in the stream (the seeds, earlier days) was not
         # perceived today and doesn't count toward the first reflection.
         rt.reflected_through = max((m.id for m in rt.stream.memories), default=0)
         initial_planning(rt, world)
+    chronicle.note_day(_day_plans(runtimes))
+    publish_snapshot(runtimes, world)
 
     try:
         for step in range(1, steps + 1):
+            if step > 1 and (step - 1) % day_steps == 0:
+                current_time = next_workday(runtimes, world)
             step_start = time.time()
             clock.set_time(current_time)
-            log.step_header(step, steps, current_time)
+            log.step_header(step, steps,
+                            f"{clock.day_name()} {current_time}" if days > 1 else current_time)
 
             # Run each phase for every agent before moving on, so one agent's
             # actions don't leak into the other's perception mid-step.
@@ -226,6 +300,7 @@ def main():
 
             for rt in runtimes:
                 rt.log_step()
+            chronicle.note_step(world)
 
             for rt in runtimes:
                 rt.reflect(current_time)
@@ -234,6 +309,9 @@ def main():
             save_world(world)
             for rt in runtimes:
                 rt.stream.flush()
+            if step % SNAPSHOT_EVERY == 0:
+                chronicle.save()
+                publish_snapshot(runtimes, world)
 
             elapsed = time.time() - step_start
             log.debug(f"step {step} took {elapsed:.1f}s")
@@ -250,10 +328,33 @@ def main():
         # from the interrupted step still get written.
         for rt in runtimes:
             rt.stream.flush()
+        chronicle.save()
+        publish_snapshot(runtimes, world)
+        chronicle.stop()
         print_timing_summary()
         if budget.spent:
             log.info(f"  executor sessions cost about ${budget.spent:.2f} this run "
                      f"(estimate; the Anthropic console has the real bill)")
+
+
+def next_workday(runtimes, world):
+    """The workday is over: the agents go home, and the next one starts at
+    START_TIME with fresh plans that continue from today. Returns its time."""
+    log.event(f"{clock.day_name()} is over: everyone goes home")
+    for rt in runtimes:
+        end_day(rt)
+    save_world(world)
+    publish_snapshot(runtimes, world)
+    clock.next_day(START_TIME)
+    # Yesterday's promises, talks and board pings were about yesterday's plans.
+    project_board.clear_workload_changed()
+    project_board.clear_commitments()
+    clear_talks()
+    log.banner(f"{clock.day_name()} · day {clock.day()}")
+    for rt in runtimes:
+        start_day(rt, world)
+    chronicle.note_day(_day_plans(runtimes))
+    return START_TIME
 
 
 if __name__ == "__main__":

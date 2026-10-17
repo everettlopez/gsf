@@ -8,7 +8,7 @@ in ``world["project"]``, a structured record the LLM never edits directly:
 
     "project": {
       "name": "Company Website",
-      "goal": "Build and ship the company's one-page website",
+      "goal": "Build and ship the studio's website",
       "description": "...",
       "status": "not_started" | "in_progress" | "done",
       "tasks": [ <task>, ... ]
@@ -48,7 +48,7 @@ looking at the board, or by being told in conversation.
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import clock
 import llm
@@ -146,13 +146,15 @@ def _clean(text, limit=200):
     return " ".join((text or "").split())[:limit].strip().rstrip(".")
 
 
-def _parse_clock(text):
-    """'7:10 am' -> a datetime on today's sim date, or None."""
+def _parse_clock(text, day=None):
+    """'7:10 am' -> a datetime on the sim date of workday `day` (today if
+    None), or None. The date moves on one day per workday (clock.next_day)."""
     try:
         t = datetime.strptime((text or "").strip().upper(), "%I:%M %p").time()
     except ValueError:
         return None
-    return datetime.combine(clock.now().date(), t)
+    back = clock.day() - day if day else 0
+    return datetime.combine(clock.now().date() - timedelta(days=back), t)
 
 
 def _last_event(task, suffix):
@@ -164,14 +166,25 @@ def _last_event(task, suffix):
 
 
 def started_at(task):
-    """When the task last went in progress ('7:10 am'), or None."""
+    """When the task last went in progress ('7:10 am', or 'Thursday 4:10 pm'
+    if that was an earlier workday), or None."""
     entry = _last_event(task, "-> in_progress")
-    return entry["time"] if entry else None
+    return _when(entry) if entry else None
+
+
+def _when(entry):
+    """A history entry's time, with its day's name if it wasn't today."""
+    day = entry.get("day")
+    if day and day != clock.day():
+        return f"{clock.day_name(day)} {entry['time']}"
+    return entry["time"]
 
 
 def minutes_in_progress(task):
-    """How long the task has been in progress, by the sim clock, or None."""
-    start = _parse_clock(started_at(task))
+    """How long the task has been in progress, by the sim clock, or None.
+    Across a night it counts the night too: yesterday's work isn't new."""
+    entry = _last_event(task, "-> in_progress")
+    start = _parse_clock(entry["time"], entry.get("day")) if entry else None
     if task["status"] != "in_progress" or start is None:
         return None
     return int((clock.now() - start).total_seconds() // 60)
@@ -228,7 +241,7 @@ def _agent_name(world, agent_id):
 
 
 def _log_event(task, agent_id, event, note=None):
-    entry = {"time": _now(), "agent": agent_id, "event": event}
+    entry = {"time": _now(), "day": clock.day(), "agent": agent_id, "event": event}
     if note:
         entry["note"] = note
     task["history"].append(entry)
@@ -632,7 +645,7 @@ def add_board_note(world, agent_id, note):
     notes = get_project(world)["notes"]
     if notes and notes[-1]["agent"] == agent_id and notes[-1]["note"] == note:
         raise NoChange("that note is already on the board")
-    notes.append({"time": _now(), "agent": agent_id, "note": note})
+    notes.append({"time": _now(), "day": clock.day(), "agent": agent_id, "note": note})
     del notes[:-MAX_BOARD_NOTES]
     return notes[-1]
 

@@ -8,3 +8,5 @@ venv/
 .coverage
 workspaces/
 preview/
+data/chronicle.json
+workspaces-archive/

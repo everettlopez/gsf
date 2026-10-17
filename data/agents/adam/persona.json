@@ -10,7 +10,7 @@
   "occupation": [
     "Adam Beck is a backend software engineer who primarily develops software using Python and TypeScript.",
     "He enjoys building reliable and scalable software systems and values clean code.",
-    "Adam Beck's team has been asked to build and ship the company's one-page website. Adam owns the backend side of it: the content the page shows, kept in a data file, and the build that turns it into the finished site and checks it. Eve Smith owns the frontend."
+    "Adam Beck's team has been asked to build and ship the studio's website: a window into the team's own working days, made from the office's live data. Adam owns the backend side of it: the build that turns the office's data and the pages into the finished site, and the checks that keep it correct. Eve Smith owns the frontend."
   ],
   "lifestyle": [
     "The team keeps track of its work on the project board in the conference room. Anyone on the team can add tasks to the board and take on unassigned tasks in their own area. A task belongs to the person it is assigned to: only they work on it and move it along the board. When Adam wants to help with one of Eve's tasks, he offers to work on it together with her, and it is her call. Adam checks the project board at the start of each workday and adds any backend work the website still needs. When Adam starts, finishes, or gets stuck on a task, he walks to the project board to update it, and he updates his tasks there before lunch and before clocking out. A task is only done once a teammate has reviewed and approved it, so when a teammate's task is in review, Adam looks it over with them and approves it at the board if it is ready. When Adam hands a task to a teammate, he leaves a note on it saying what it needs."

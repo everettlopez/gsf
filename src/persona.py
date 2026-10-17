@@ -28,10 +28,25 @@ def load(agent_id):
         return json.load(f)
 
 
+# Yesterday, once the run has had one: agent id -> {"day": ..., "activities": [...]}.
+# On the first day it is the persona's own previous_day.
+_yesterday = {}
+
+
+def set_previous_day(agent_id, day, activities):
+    """What the agent did on the workday that just ended (main.py, at the end
+    of each day): the next morning's plan continues from it, as in the paper."""
+    _yesterday[agent_id] = {"day": day, "activities": list(activities)}
+
+
+def clear_previous_days():
+    _yesterday.clear()
+
+
 def previous_day(persona):
     """'On Wednesday, Adam:\n 1) ..., 2) ... .' as the paper's prompt reads."""
     first = persona["name"].split()[0]
-    day = persona["previous_day"]
+    day = _yesterday.get(persona["id"]) or persona["previous_day"]
     items = ",\n        ".join(f"{i}) {a}" for i, a in enumerate(day["activities"], 1))
     return f"On {day['day']}, {first}:\n        {items}."
 

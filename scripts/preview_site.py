@@ -12,8 +12,11 @@ every test in the Docker sandbox, and opens the page.
     python scripts/preview_site.py --no-open   # ... without opening a browser
     python scripts/preview_site.py --local     # run build and tests here, not in Docker
 
-The board's tasks are listed alongside, so you can see whose work is where.
-Nothing in workspaces/ is changed.
+The office's data the site shows (data/snapshot.json) is written fresh from
+the last run (world.json, the memory streams, data/chronicle.json), so the
+preview shows the office as the run left it, not as of the last hourly
+snapshot. The board's tasks are listed alongside, so you can see whose work
+is where. Nothing in workspaces/ is changed.
 """
 
 import argparse
@@ -29,9 +32,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from workspace import DockerRunner, LocalRunner  # noqa: E402
-
-TEST_COMMAND = "python -m unittest discover -s tests"
+import snapshot  # noqa: E402
+from executor import TEST_COMMAND  # noqa: E402
+from workspace import LocalRunner, SNAPSHOT_FILE, WorkspaceError, default_runner  # noqa: E402
 
 
 def git(repo, *args):
@@ -46,7 +49,7 @@ def repos(workspaces):
     if (origin / "HEAD").exists():
         found.append(("published", origin, ""))
     for path in sorted(workspaces.iterdir()):
-        if (path / ".git").exists():
+        if (path / ".git").exists() and not path.name.startswith("."):
             found.append((f"{path.name}'s checkout", path, ""))
     return found
 
@@ -157,8 +160,20 @@ def main(argv=None):
     print("\nCombined into", dest, ":")
     for line in combine(workspaces, dest, args.world):
         print("  " + line)
+    try:
+        shot = snapshot.from_disk(args.world)
+        snapshot.write(shot, dest / SNAPSHOT_FILE)
+        when = shot["generated"]
+        print(f"  the office's data as of {when['day_name']} {when['time']}")
+    except (OSError, ValueError, KeyError) as e:
+        print(f"  (couldn't write a fresh snapshot of the office: {e}; using main's)")
 
-    results = build_and_test(dest, LocalRunner() if args.local else DockerRunner())
+    try:
+        runner = LocalRunner() if args.local else default_runner()
+    except WorkspaceError as e:
+        print(f"\nCan't build or test it: {e}")
+        return 1
+    results = build_and_test(dest, runner)
     for name, result in results.items():
         print(f"\n{name}: {'ok' if result.ok else f'failed (exit {result.exit_code})'}")
         print("  " + "\n  ".join(result.output.strip().splitlines()[-6:]))

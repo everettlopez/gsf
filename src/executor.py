@@ -24,8 +24,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-# How the tests are run, here and in the skills (skills/shared/SKILL.md).
-TEST_COMMAND = "python -m unittest discover -s tests"
+# How the tests are run, here and in the skills (skills/shared/SKILL.md): the
+# sandbox's run_tests.py, which runs the Python and the JavaScript tests.
+TEST_COMMAND = "python run_tests.py"
 
 
 def short(text, sentences=2, limit=300):
@@ -318,8 +319,9 @@ blocker: build and test against a small stand-in, as the conventions below say. 
 blocked only when this task itself can't go on without something outside it (a decision, an \
 account, a teammate's answer to a question).
 
-Commands run in a Linux container with Python 3.12 and no network, so nothing can be \
-installed: build with what is there and test with the standard library. You don't commit \
+Commands run in a Linux container with Python 3.12, Node 22 and no network, so nothing can \
+be installed: build with what is there, and test with Python's unittest and Node's built-in \
+test runner (node:test). You don't commit \
 (there is no git in the container): when the session ends, the work is committed and, if its \
 tests pass, published for review. The tests are run again then with \
 `{TEST_COMMAND}`, and that run is what counts. End the session with report: a sentence or \
@@ -337,7 +339,7 @@ team building the company website. {who}
 
 The teammate's branch is checked out in {a['name']}'s copy of the repository. Read it, run it, \
 and end with review_report. Change nothing: anything written here is thrown away. Commands run \
-in a Linux container with Python 3.12 and no network; use show_changes for the diff.
+in a Linux container with Python 3.12, Node 22 and no network; use show_changes for the diff.
 
 {skills.load(skills.for_review())}"""
 
@@ -442,12 +444,13 @@ in a Linux container with Python 3.12 and no network; use show_changes for the d
         """The tests, run by the host at the end of the session: whether they
         pass is this, not what the model said. None if there are none."""
         try:
-            if not [f for f in workspace.list_files("tests") if f.endswith(".py")]:
+            if not [f for f in workspace.list_files("tests")
+                    if f.endswith(".py") or ".test." in f.rsplit("/", 1)[-1]]:
                 return None
         except Exception:
             return None
         done = workspace.run(TEST_COMMAND)
-        if "NO TESTS RAN" in done.output or "Ran 0 tests" in done.output:
+        if any(m in done.output for m in ("NO TESTS FOUND", "NO TESTS RAN", "Ran 0 tests")):
             return None
         return done.ok
 

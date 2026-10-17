@@ -92,9 +92,13 @@
     }
   },
   "project": {
-    "name": "Company Website",
-    "goal": "Build and ship the company's one-page website",
-    "description": "A single static web page for Beck & Smith, a small software studio (contact email hello@becksmith.example): a header with the company name, a short about section, the team, and a contact section with an email link. The page's text lives in a content file (JSON) that is kept apart from the layout, and a build step fills the layout with the content, checks the result, and puts the finished site in dist/. Plain HTML and CSS, built and tested with Python's standard library: no server, no outside services.",
+    "name": "The Beck & Smith website",
+    "goal": "Build and ship the studio's website: a live window into the team's working days",
+    "description": "The website of Beck & Smith, a two-person software studio (hello@becksmith.example), that shows visitors the studio from the inside: who Adam and Eve are, where they are and what they are doing right now, the project board, their conversations, their plans and what they have been thinking. The office's real state is in data/snapshot.json, which the simulation keeps up to date in the repository; the site shows it and never invents it. Several pages (home, team, the board, a day at the office, the office map, behind the scenes) share one layout, and JavaScript lets visitors filter, explore and replay the day. A Python build turns the pages and the snapshot into the finished site in dist/, which works opened straight from disk: no server, no outside services. Tested with Python's unittest and Node's built-in test runner.",
+    "company": {
+      "name": "Beck & Smith",
+      "email": "hello@becksmith.example"
+    },
     "status": "not_started",
     "tasks": []
   }

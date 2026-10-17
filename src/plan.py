@@ -3,6 +3,7 @@ import json
 import math
 import re
 
+import clock
 import llm
 import log
 import persona
@@ -109,7 +110,7 @@ class Planner:
         prompt = f"""
         {persona.profile(agent["id"])}
 {self.recent_project_context(agent)}{self.teammates_line(agent, world)}
-        Today is Thursday.
+        Today is {clock.day_name()}.
 
         Here is {name}'s plan today in broad strokes:
         1. {FIRST_PLAN_ITEM}
@@ -164,7 +165,7 @@ class Planner:
         prompt = f"""
         {persona.profile(agent["id"])}
 
-        Today is Thursday and it is now {current_time}.
+        Today is {clock.day_name()} and it is now {current_time}.
         
         So far today, {name} has done:
         {done_text}

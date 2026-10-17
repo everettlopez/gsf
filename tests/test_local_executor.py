@@ -119,7 +119,7 @@ def test_the_hosts_final_test_run_decides_not_the_models(eve, script):
         _turn(("report", {"summary": "Done, I think."})),
     ]
     result = LocalExecutor().run(rt, task, rt.workspace)
-    assert runner.commands[-1] == "python -m unittest discover -s tests"   # the host's own run
+    assert runner.commands[-1] == "python run_tests.py"                   # the host's own run
     assert result.tests_passed is False and not result.finished
     assert not rt.workspace.git("ls-remote", "origin", "task/T-2")      # not published
 
@@ -250,7 +250,7 @@ def test_skills_load_without_their_front_matter():
 
     text = skills.load(["shared", "frontend", "no-such-skill"])
     assert not text.startswith("---") and "name: shared" not in text
-    assert "{{placeholders}}" in text and "# Frontend" in text
+    assert "{{content}}" in text and "# Frontend" in text
 
 
 def test_the_work_session_carries_the_tasks_skills(eve, script):
@@ -258,8 +258,8 @@ def test_the_work_session_carries_the_tasks_skills(eve, script):
     script["replies"] = [_turn(("report", {"summary": "Started."}))]
     LocalExecutor().run(rt, task, rt.workspace)
     system = script["requests"][0]["system"]
-    assert "# Frontend: the layout and the styles" in system             # T-2 is frontend
-    assert "The contract between template and content" in system
+    assert "# Frontend: the pages and what visitors can do on them" in system             # T-2 is frontend
+    assert "How the pieces meet" in system
     assert "# Backend" not in system
 
 

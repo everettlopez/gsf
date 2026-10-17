@@ -12,7 +12,15 @@ latest main, so teammates' finished work is there when a new task begins:
 File access is confined to the checkout. Commands the model asks for run in a
 runner: DockerRunner (default: a throwaway container, the checkout mounted at
 /work, no network) or LocalRunner (on this machine; only when asked for with
-GA_SANDBOX=local, since the commands come from a model).
+GA_SANDBOX=local, since the commands come from a model). The container image
+(sandbox/Dockerfile: Python 3.12 and Node 22) is built the first time it is
+needed.
+
+Some files in the sandbox belong to the simulation, not the team (HOST_FILES):
+the snapshot of the office the website shows (snapshot.py) and the command
+that runs the tests. The host commits them to main (update_host_files); the
+hands can read them but not change them: a write is refused, and anything a
+command changes in them is put back before a commit.
 """
 
 import os
@@ -29,15 +37,39 @@ MAX_READ_BYTES = 200_000
 COMMAND_TIMEOUT = 120          # seconds
 MAX_OUTPUT = 20_000            # characters of command output kept
 
-DOCKER_IMAGE = "python:3.12-slim"
+SANDBOX_DIR = ROOT / "sandbox"
+DOCKER_IMAGE = "gsf-sandbox:py3.12-node22"      # built from SANDBOX_DIR/Dockerfile
 
-SEED_GITIGNORE = "__pycache__/\n*.pyc\n"
+# The files only the host writes: the test command (executor.TEST_COMMAND runs
+# it) and the snapshot of the office.
+RUN_TESTS = "run_tests.py"
+SNAPSHOT_FILE = "data/snapshot.json"
+HOST_FILES = (RUN_TESTS, SNAPSHOT_FILE)
 
-SEED_README = """# Company website
+# dist/ is built, never committed: both halves of the team rebuild it, and
+# committed builds conflicted on every merge.
+SEED_GITIGNORE = "__pycache__/\n*.pyc\ndist/\nnode_modules/\n"
+
+SEED_README = """# Beck & Smith: the studio's website
 
 The team's sandbox repository. Each task is built on its own branch
 (task/T-<n>) and merged into main once a teammate has approved it.
+
+data/snapshot.json and run_tests.py are kept by the simulation: the first is
+the office as it is now, the second runs every test (`python run_tests.py`).
 """
+
+HOST_AUTHOR = ("The office", "office@gsf.local")
+
+
+def host_file_contents():
+    """The host-owned files every sandbox main has (the snapshot is added by
+    snapshot.export when there is one)."""
+    return {RUN_TESTS: (SANDBOX_DIR / RUN_TESTS).read_text(encoding="utf-8")}
+
+
+def is_host_file(relative):
+    return Path(relative).as_posix() in HOST_FILES
 
 
 class WorkspaceError(Exception):
@@ -99,6 +131,21 @@ class DockerRunner:
         return CommandResult(done.returncode, _trim(done.stdout + done.stderr))
 
 
+def ensure_image(image=DOCKER_IMAGE):
+    """Build the sandbox image from sandbox/Dockerfile if Docker doesn't have
+    it yet (once: a minute or two, with network, on the host). An image named
+    by GA_SANDBOX_IMAGE is the user's to provide."""
+    if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0:
+        return
+    print(f"Building the sandbox image {image} from {SANDBOX_DIR / 'Dockerfile'} "
+          f"(first run only)...", flush=True)
+    done = subprocess.run(["docker", "build", "-t", image, str(SANDBOX_DIR)],
+                          capture_output=True, text=True, errors="replace")
+    if done.returncode != 0:
+        raise WorkspaceError(f"couldn't build the sandbox image {image}: "
+                             f"{(done.stderr or done.stdout).strip()[-800:]}")
+
+
 def default_runner():
     """GA_SANDBOX=docker (default) or local. Without Docker, refuse rather
     than quietly run a model's commands on this machine."""
@@ -110,7 +157,10 @@ def default_runner():
     if shutil.which("docker") is None:
         raise WorkspaceError("Docker isn't available; install it, or set GA_SANDBOX=local "
                              "to run the executor's commands on this machine")
-    return DockerRunner()
+    runner = DockerRunner()
+    if runner.image == DOCKER_IMAGE:
+        ensure_image(runner.image)
+    return runner
 
 
 def _git(cwd, *args, check=True):
@@ -133,12 +183,43 @@ def ensure_origin(root=None):
     _git(root, "-c", "core.autocrlf=false", "clone", str(origin), str(seed))
     (seed / "README.md").write_text(SEED_README, encoding="utf-8")
     (seed / ".gitignore").write_text(SEED_GITIGNORE, encoding="utf-8")
-    _git(seed, "add", "README.md", ".gitignore")
-    _git(seed, "-c", "user.name=Sandbox", "-c", "user.email=sandbox@gsf.local",
-         "commit", "-m", "Start the company website")
+    for relative, contents in host_file_contents().items():
+        _write(seed / relative, contents)
+    _git(seed, "add", "-A")
+    _git(seed, "-c", f"user.name={HOST_AUTHOR[0]}", "-c", f"user.email={HOST_AUTHOR[1]}",
+         "commit", "-m", "Start the studio's website")
     _git(seed, "push", "origin", "HEAD:main")
     shutil.rmtree(seed, ignore_errors=True)
     return origin
+
+
+def _write(path, contents):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(contents, encoding="utf-8", newline="\n")
+
+
+def update_host_files(files, root=None, message="Update the office's files"):
+    """Commit host-owned files to the sandbox's main, from the host's own
+    checkout (workspaces/.host), with the host files every main has. `files`:
+    path -> contents. Returns True if main changed."""
+    root = Path(root or WORKSPACES)
+    origin = ensure_origin(root)
+    host = root / ".host"
+    if not (host / ".git").exists():
+        shutil.rmtree(host, ignore_errors=True)
+        _git(root, "-c", "core.autocrlf=false", "clone", "--quiet", str(origin), str(host))
+        _git(host, "config", "core.autocrlf", "false")
+    _git(host, "fetch", "--quiet", "origin")
+    _git(host, "checkout", "--quiet", "-B", "main", "origin/main")
+    for relative, contents in {**host_file_contents(), **files}.items():
+        _write(host / relative, contents)
+    _git(host, "add", "-A", "--", *{**host_file_contents(), **files})
+    if not _git(host, "status", "--porcelain"):
+        return False
+    _git(host, "-c", f"user.name={HOST_AUTHOR[0]}", "-c", f"user.email={HOST_AUTHOR[1]}",
+         "commit", "--quiet", "-m", message)
+    _git(host, "push", "--quiet", "origin", "HEAD:main")
+    return True
 
 
 class Workspace:
@@ -205,6 +286,9 @@ class Workspace:
         path = self.resolve(relative)
         if path == self.path.resolve() or path.is_dir():
             raise WorkspaceError(f"{relative!r} is a directory")
+        if is_host_file(path.relative_to(self.path.resolve())):
+            raise WorkspaceError(f"{relative!r} is kept by the simulation, not the team: read it, "
+                                 f"but don't change it")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(contents, encoding="utf-8", newline="\n")
 
@@ -255,8 +339,20 @@ class Workspace:
                    self.git("status", "--porcelain", "--untracked-files=all").splitlines()]
         return sorted({f for f in committed + pending if f})
 
+    def restore_host_files(self):
+        """Put the host-owned files back as the branch has them (a command may
+        have changed them): they only ever change on main, by the host, so a
+        task branch never conflicts with the next snapshot."""
+        for relative in HOST_FILES:
+            if self.git("ls-files", "--error-unmatch", relative, check=False):
+                self.git("checkout", "--quiet", "HEAD", "--", relative, check=False)
+            else:
+                (self.path / relative).unlink(missing_ok=True)
+
     def commit(self, message, body=""):
-        """Commit everything in the checkout; returns False if nothing changed."""
+        """Commit everything in the checkout but the host-owned files; returns
+        False if nothing changed."""
+        self.restore_host_files()
         self.git("add", "-A")
         if not self.git("status", "--porcelain"):
             return False

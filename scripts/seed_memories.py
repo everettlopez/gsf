@@ -4,15 +4,24 @@ Seed Adam's and Eve's memory streams with their starting memories.
 Usage (from the repo root; needs Ollama running for embeddings + importance):
 
     python scripts/seed_memories.py            # add the seeds to the existing streams
-    python scripts/seed_memories.py --reset    # wipe both streams and clear the
-                                               # project board first, then seed
+    python scripts/seed_memories.py --reset    # wipe both streams, clear the project
+                                               # board and start a new sandbox, then seed
+
+A reset starts the project over, so it also sets the last run's sandbox
+(workspaces/) aside in workspaces-archive/<time>/ (its task branches would
+otherwise clash with the new board's T-1, T-2, ...) and forgets the last run's
+chronicle.
 """
 
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
-sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(ROOT / "src"))
 
+import chronicle  # noqa: E402
 import project_board  # noqa: E402
 import world  # noqa: E402
 from memory_stream import MemoryStream  # noqa: E402
@@ -31,14 +40,15 @@ adam_seed_memories = [
     "Adam Beck hopes to become a software architect.",
     "Adam Beck wants to build software that positively impacts many people.",
     "Adam Beck works on the same team as Eve Smith.",
-    "Adam Beck prepares the content and the build that Eve Smith's page is made from.",
+    "Adam Beck prepares the build and the data that Eve Smith's pages are made from.",
     "Adam Beck knows Eve Smith is shy in large groups.",
     "Adam Beck thinks Eve Smith's ideas are thoughtful.",
     "Adam Beck prefers to check in with Eve Smith one-on-one.",
     # The team's goal and how the team organizes work
-    "Adam Beck's team has been asked to build and ship the company's one-page website.",
+    "Adam Beck's team has been asked to build and ship the studio's website: a live window into the team's own working days.",
     "The company is Beck & Smith, a small software studio; its contact email is hello@becksmith.example.",
-    "Adam Beck is responsible for the website's backend: the content data and the build that checks and ships the site.",
+    "The website shows the office's real state from data/snapshot.json, which the simulation keeps up to date; the team builds the views, not the data.",
+    "Adam Beck is responsible for the website's backend: the build that turns the office's data and the pages into the finished site, and its checks.",
     "Eve Smith is responsible for the website's frontend.",
     "The team tracks its work on the project board in the conference room.",
     "Anyone on the team can add tasks to the project board and take on unassigned tasks in their own area.",
@@ -71,14 +81,15 @@ eve_seed_memories = [
     "Eve Smith hopes to become a confident lead frontend engineer.",
     "Eve Smith wants to build software that feels simple and welcoming to use.",
     "Eve Smith works on the same team as Adam Beck.",
-    "Eve Smith builds the page layout that Adam Beck's content and build fill in.",
+    "Eve Smith builds the pages and the interactive views that show the office's data.",
     "Eve Smith finds Adam Beck approachable.",
     "Eve Smith feels comfortable asking Adam Beck for help.",
     "Eve Smith is building a feature with Adam Beck.",
     # The team's goal and how the team organizes work
-    "Eve Smith's team has been asked to build and ship the company's one-page website.",
+    "Eve Smith's team has been asked to build and ship the studio's website: a live window into the team's own working days.",
     "The company is Beck & Smith, a small software studio; its contact email is hello@becksmith.example.",
-    "Eve Smith is responsible for the website's frontend: the page's layout, styles, and look and feel.",
+    "The website shows the office's real state from data/snapshot.json, which the simulation keeps up to date; the team builds the views, not the data.",
+    "Eve Smith is responsible for the website's frontend: the pages, their layout and styles, and the JavaScript that lets visitors explore the day.",
     "Adam Beck is responsible for the website's backend.",
     "The team tracks its work on the project board in the conference room.",
     "Anyone on the team can add tasks to the project board and take on unassigned tasks in their own area.",
@@ -125,9 +136,32 @@ def clear_board():
     print("cleared the project board and reset the office for a new day")
 
 
+def archive_sandbox(root=None):
+    """Set the last project's sandbox aside (not deleted: its site is still
+    there to look at). Returns where it went, or None if there was none."""
+    root = Path(root or ROOT)
+    sandbox = root / "workspaces"
+    if not sandbox.exists():
+        return None
+    dest = root / "workspaces-archive" / datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(sandbox), str(dest))
+    print(f"set the last sandbox aside in {dest.relative_to(root)}")
+    return dest
+
+
+def forget_chronicle():
+    path = chronicle.default_path()
+    if path.exists():
+        path.unlink()
+        print("forgot the last run's chronicle")
+
+
 if __name__ == "__main__":
     reset = "--reset" in sys.argv[1:]
     if reset:
         clear_board()
+        archive_sandbox()
+        forget_chronicle()
     seed("adam", adam_seed_memories, reset=reset)
     seed("eve", eve_seed_memories, reset=reset)

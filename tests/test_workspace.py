@@ -38,7 +38,7 @@ def root(tmp_path):
 def test_a_workspace_is_a_checkout_of_the_sandbox_repo(root):
     eve = Workspace(EVE, root, runner=Recorder())
     assert eve.path == root / "eve" and (eve.path / ".git").is_dir()
-    assert eve.list_files() == [".gitignore", "README.md"]
+    assert eve.list_files() == [".gitignore", "README.md", "run_tests.py"]
     assert "__pycache__/" in eve.read_file(".gitignore")                  # no bytecode committed
     assert "sandbox repository" in eve.read_file("README.md")
     assert Workspace(ADAM, root, runner=Recorder()).origin == eve.origin   # one shared origin

@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
+import clock
 import log
 import project_board
 from clock import STEP_MINUTES, step_time
@@ -468,6 +469,34 @@ def initial_planning(rt, world):
 
     if EAGER_DECOMPOSITION:
         expand_plan(rt, rt.broad_chunks, world)
+
+
+def end_day(rt):
+    """The workday is over. What the agent did becomes "yesterday" for the
+    next morning's plan (persona.previous_day, as the paper starts each day
+    from the one before), and the agent remembers the day ended."""
+    import persona
+
+    day = clock.day_name()
+    activities = [TIME_PREFIX.sub("", c.get("activity") or "") for c in rt.broad_chunks]
+    persona.set_previous_day(rt.agent["id"], day, [a for a in activities if a])
+    rt.stream.add_observations([f"{rt.agent['name']} finished the workday on {day} and went home."])
+
+
+def start_day(rt, world):
+    """A new workday: the agent arrives at reception, and everything that
+    belonged to yesterday's plan (the step in progress, the trip it was on,
+    the plan caches, which are keyed by clock time) is let go before the day
+    is planned afresh. Memories, the board, the hands' work and their budget
+    carry over."""
+    rt.agent.update(current_location="reception", current_action="arriving at work",
+                    interacting_with=None)
+    rt.override = rt.queued = rt.chunk = rt.last_chunk = None
+    rt.last_board_at = None
+    rt.prev_company = set()
+    rt.commitments = []
+    rt.planner.invalidate_summary()
+    initial_planning(rt, world)
 
 
 def get_chunk_lazy(rt, current_time, world=None):
@@ -1150,11 +1179,14 @@ def task_at_hand(rt, world):
 
 
 def _work_block(rt, current_time):
-    """The plan block the step belongs to: one work session per block."""
+    """The plan block the step belongs to: one work session per block. With
+    the day in front, so tomorrow's 9:00 block isn't today's."""
     if rt.override:
-        return rt.override.get("start_time")
-    broad = rt.planner.get_current_minute_chunk(current_time, rt.broad_chunks)
-    return broad.get("start_time") if broad else current_time
+        start = rt.override.get("start_time")
+    else:
+        broad = rt.planner.get_current_minute_chunk(current_time, rt.broad_chunks)
+        start = broad.get("start_time") if broad else current_time
+    return f"day {clock.day()} {start}"
 
 
 def work_on_task(rt, current_time, world):

@@ -66,9 +66,18 @@ Reflection (when perceived importance adds up to 150)
 pip install -r requirements.txt        # numpy, ollama, lemminflect, anthropic
 ollama pull qwen3 && ollama pull nomic-embed-text
 
-python scripts/seed_memories.py --reset   # fresh start: clear memories + board, then seed
+python scripts/seed_memories.py --reset   # fresh start: memories, board, sandbox, then seed
 python src/main.py                     # run the simulation
 ```
+
+**The project.** Adam and Eve build their studio's website, and the site is a window into
+their own working days: who they are, where they are and what they're doing, the board,
+their conversations, plans and reflections, across several pages they can filter, explore
+and replay. The data is real: with real hands, the run commits a snapshot of the office
+(`src/snapshot.py`) to the sandbox every simulated hour as `data/snapshot.json`, and the
+agents build the views of it. `src/chronicle.py` keeps the story the snapshot tells (every
+step's whereabouts, the events, the conversations), saved to `data/chronicle.json`. A
+reset sets the last sandbox aside in `workspaces-archive/` rather than deleting it.
 
 Two model roles (`src/llm.py`): the agents' minds (importance, reactions, planning,
 conversation, the board) run on Ollama `qwen3`; their hands (the executor that will
@@ -92,8 +101,11 @@ pass."). Finished work becomes a promise to move the task to review at the next 
 visit; a blocked task sends the agent to the board to mark it blocked, with the reason.
 Review and approval stay at the board; once a task is done there, its branch is merged
 into the sandbox's main. Commands the model asks for run in a throwaway container with
-no network (`GA_SANDBOX_IMAGE`, default `python:3.12-slim`); without Docker they are
-refused unless `GA_SANDBOX=local`.
+no network, from the image in `sandbox/Dockerfile` (Python 3.12 and Node 22, built
+automatically the first time; `GA_SANDBOX_IMAGE` names another); without Docker they are
+refused unless `GA_SANDBOX=local`. "The tests pass" means `python run_tests.py` passes:
+the sandbox's own runner for the Python (`unittest`) and JavaScript (`node --test`) tests,
+which, like the snapshot, only the host can change.
 
 Reviews are grounded in the code: at a desk-work step, a teammate's task waiting in review
 comes first. The reviewer's hands check out the teammate's published branch, read the diff
@@ -113,7 +125,17 @@ the host reruns them) sends the agent straight to the board to move the task to 
 without the usual two-hour wait; a question only a teammate can answer sends it to ask
 them, and the next session on the task gets the answer; a review verdict sends it to the
 board to approve or leave the note. Each session's cost is estimated in the log, with a
-total at the end. `GA_STEPS` sets the run's length (default 30 steps of 5 minutes).
+total at the end.
+
+**How long a run lasts.** `GA_STEPS` sets one day's run length (default 30 steps of 5
+minutes from 7:00 am; 120 is the whole workday, to 5:00 pm). `GA_DAYS` runs that many whole
+workdays (Thursday, Friday, Monday, ...; with `GA_STEPS` too, that many steps each). Each
+morning the agents plan afresh from what they did the day before, as in the paper, and
+their memories, the board, the hands' work and the session budget carry over.
+
+```bash
+GA_EXECUTOR=local GA_DAYS=2 GA_EXECUTOR_MAX_SESSIONS=40 python src/main.py
+```
 
 To see the site the agents have built so far, combined from every task branch and built
 and tested in the sandbox:
@@ -121,6 +143,9 @@ and tested in the sandbox:
 ```bash
 python scripts/preview_site.py          # writes preview/ and opens the page
 ```
+
+The preview writes a fresh snapshot from the last run, so it shows the office as the run
+left it.
 
 The run length (start time, steps) is at the top of `src/main.py`; the agents'
 settings (cooldowns, reflection threshold, paper-strict mode) are at the top of
